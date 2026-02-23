@@ -1,4 +1,4 @@
-package org.jetbrains.plugins.template.startup
+package com.github.muonrw.mixinmcp.startup
 
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.project.Project
