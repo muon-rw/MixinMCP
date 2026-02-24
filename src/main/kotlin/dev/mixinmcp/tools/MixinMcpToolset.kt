@@ -200,7 +200,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Regex search across dependency/library sources. Searches in SOURCES roots (attached -sources.jar, etc.). Returns file URL and line snippets with matches surrounded by ||. Use mixin_get_dep_source with the URL to read full content.")
+    @McpDescription("Regex search across dependency/library sources. Searches in SOURCES roots (attached -sources.jar, etc.). For each match, returns url (pass to mixin_get_dep_source) and line snippets with matches surrounded by ||.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
@@ -279,6 +279,48 @@ class MixinMcpToolset : McpToolset {
         return McpToolCallResult.text(result)
     }
 
+    /**
+     * Locates a dependency source file by path (e.g. io/redspace/.../Utils.java).
+     * Searches SOURCES roots; returns first match.
+     */
+    private fun locateDepSourceByPath(project: com.intellij.openapi.project.Project, path: String): VirtualFile? {
+        val normalizedPath: String = path.replace('\\', '/').removePrefix("/")
+        var found: VirtualFile? = null
+
+        ReadAction.compute<Unit, Throwable> {
+            val modules = ModuleManager.getInstance(project).modules
+            for (module in modules) {
+                val orderEntries = ModuleRootManager.getInstance(module).orderEntries
+                for (entry in orderEntries) {
+                    val libraryRoots = when (entry) {
+                        is LibraryOrderEntry -> {
+                            entry.library?.getFiles(OrderRootType.SOURCES)?.toList() ?: emptyList()
+                        }
+                        else -> emptyList()
+                    }
+                    for (root in libraryRoots) {
+                        found = findFileByPathInTree(root, normalizedPath)
+                        if (found != null) return@compute
+                    }
+                }
+            }
+        }
+
+        return found
+    }
+
+    private fun findFileByPathInTree(vf: VirtualFile, targetPath: String): VirtualFile? {
+        if (vf.isDirectory) {
+            for (child in vf.children) {
+                findFileByPathInTree(child, targetPath)?.let { return it }
+            }
+            return null
+        }
+        val pathInJar: String? = vf.url.substringAfter("!/", "").takeIf { it.isNotEmpty() }
+        val normalized: String = (pathInJar ?: vf.path).replace('\\', '/')
+        return if (normalized == targetPath || normalized.endsWith("/$targetPath")) vf else null
+    }
+
     private fun collectRegexMatches(
         vf: VirtualFile,
         pattern: Pattern,
@@ -309,17 +351,19 @@ class MixinMcpToolset : McpToolset {
                 if (matcher.find()) {
                     val highlighted: String = matcher.replaceAll("||\$0||")
                     val lineNum: Int = i + 1
-                    results.add("${vf.url}:$lineNum  $highlighted")
+                    results.add("url: ${vf.url}")
+                    results.add("  line $lineNum: $highlighted")
                 }
             }
         }
     }
 
     @McpTool
-    @McpDescription("Reads content from a dependency file by VirtualFile URL (from mixin_search_in_deps results). Returns a window of lines centered on lineNumber. Prefix each line with its line number for reference.")
+    @McpDescription("Reads source from dependency jars. Required: either `url` (full VirtualFile URL from mixin_search_in_deps, e.g. jar://.../sources.jar!/path/to/File.java) or `path` (e.g. io/redspace/ironsspellbooks/api/util/Utils.java). If both given, url takes precedence. Optional: lineNumber, linesBefore, linesAfter for a window around a line.")
     @Suppress("unused")
     suspend fun mixin_get_dep_source(
-        url: String,
+        url: String? = null,
+        path: String? = null,
         lineNumber: Int = 1,
         linesBefore: Int = 30,
         linesAfter: Int = 70,
@@ -328,11 +372,24 @@ class MixinMcpToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val vf: VirtualFile? =
-            VirtualFileManager.getInstance().findFileByUrl(url)
+        if (url.isNullOrBlank() && path.isNullOrBlank()) {
+            return McpToolCallResult.error(
+                "Missing required parameter. Pass `url` (the jar:// URL from mixin_search_in_deps results) or `path` (e.g. io/redspace/ironsspellbooks/api/util/Utils.java).",
+            )
+        }
+
+        val vf: VirtualFile? = when {
+            !url.isNullOrBlank() -> VirtualFileManager.getInstance().findFileByUrl(url!!)
+            else -> locateDepSourceByPath(project, path!!.trim())
+        }
 
         if (vf == null || !vf.isValid) {
-            return McpToolCallResult.error("File not found: $url")
+            val hint: String = if (!url.isNullOrBlank()) {
+                "Pass the exact jar:// URL from mixin_search_in_deps results, or try the `path` parameter (e.g. io/redspace/.../Utils.java)."
+            } else {
+                "Path not found in dependency sources. Use mixin_search_in_deps to find the file, then pass its `url` to this tool."
+            }
+            return McpToolCallResult.error("File not found. $hint")
         }
 
         val content: String = try {

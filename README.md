@@ -5,7 +5,7 @@ An IntelliJ Platform plugin that extends the built-in MCP Server with tools for
 Minecraft mod development — dependency navigation, semantic code analysis, and
 bytecode inspection for mixin authoring.
 
-The built-in MCP Server excludes libraries and dependencies from its tools. MixinMCP
+IntelliJ's built-in MCP Server excludes libraries and dependencies from its tools. MixinMCP
 adds 12 tools that search across your entire classpath, resolve type hierarchies,
 and inspect bytecode — including the synthetic lambda methods that are invisible in
 decompiled source but essential for mixin targeting.
@@ -13,14 +13,14 @@ decompiled source but essential for mixin targeting.
 
 ## Why?
 
-Minecraft mod projects typically have 50-100 dependencies (remapped Minecraft
+Minecraft mod projects often have 50+ dependencies (remapped Minecraft
 sources, mod APIs, libraries). The built-in MCP Server's tools explicitly exclude
 all of them — your LLM can't look up a Minecraft class, search mod APIs, or trace
 inheritance chains across libraries.
 
 Mixin development makes this worse. Targeting a lambda in a Minecraft method
 requires knowing the synthetic method name (e.g. `lambda$tick$0`), which only
-exists in compiled bytecode. No existing MCP tool exposes this.
+exists in compiled bytecode. No existing MCP plugin exposes this.
 
 ## Requirements
 
@@ -43,10 +43,9 @@ exists in compiled bytecode. No existing MCP tool exposes this.
 4. Select the ZIP, restart IntelliJ
 5. Verify: **Settings → Tools → MCP Server** should list the `mixin_*` tools
 
-### From JetBrains Marketplace
+### From JetBrains Marketplace (Once published)
 
-*(Once published)*
-
+*(This plugin is not yet published!)*
 **Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
 
 ## Tools
@@ -58,7 +57,7 @@ exists in compiled bytecode. No existing MCP tool exposes this.
 | `mixin_find_class` | Look up any class by FQCN — project, library, or JDK. Optionally include members or decompiled source. |
 | `mixin_search_symbols` | Find classes, methods, or fields by name pattern across project and all dependencies. |
 | `mixin_search_in_deps` | Regex search across dependency sources — like grep for your entire classpath. |
-| `mixin_get_dep_source` | Retrieve decompiled source for a file path returned by `mixin_search_in_deps`. |
+| `mixin_get_dep_source` | Read source from dependency jars. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java). |
 
 ### Semantic Navigation
 
@@ -94,26 +93,37 @@ how to use each tool.
 
 ### Cursor
 
-Create `.cursor/rules/mixinmcp.mdc` in your **mod project** (not the plugin
-project):
+Create `.cursor/rules/mixinmcp.mdc` in your **mod project**:
 
 ```markdown
 ---
-description: "MixinMCP tool usage for Minecraft modding with mixin support"
 alwaysApply: true
 ---
-
 This is a Minecraft mod project using [Fabric/NeoForge/Forge] with extensive
 mixin usage and many dependencies.
 
-You have access to the IntelliJ MCP server with MixinMCP tools. Use them:
+You have access to the IntelliJ MCP server with MixinMCP tools. **Prefer these
+over grep, read_file, or jar extraction** when working with mod/dependency code.
+They search and read inside dependency jars natively; grep cannot see jar contents.
+
+## When to Reach for MixinMCP First
+- **Finding usages** (e.g. setBlock, destroyBlock, BreakEvent) across mods → mixin_search_in_deps
+- **Reading mod source** (Iron's Spellbooks, Traveloptics, etc.) → mixin_search_in_deps first, then mixin_get_dep_source with the `url` from results (or pass `path` directly)
+- **Looking up a class** in any dependency (including compiled-only mods) → mixin_find_class
+- **Understanding mixin target logic** when the mod has no sources → mixin_method_bytecode
+- **Checking inheritance** before writing a mixin → mixin_type_hierarchy
 
 ## Dependency Navigation
 - mixin_find_class: Look up any class by FQCN (Minecraft, mods, Java stdlib).
   Use includeMembers=true for API overview, includeSource=true for full code.
 - mixin_search_symbols: Find classes/methods by name pattern across everything.
 - mixin_search_in_deps: Regex search across all library/dependency sources.
-- mixin_get_dep_source: Read dependency source files from search results.
+  Use fileMask (e.g. "*irons*", "*traveloptics*") to scope to specific mods.
+- mixin_get_dep_source: Read source from dependency jars. **Required: `url`** (from
+  mixin_search_in_deps results) **or** `path` (e.g. io/redspace/ironsspellbooks/api/util/Utils.java).
+  Workflow: (1) mixin_search_in_deps to find matches; (2) copy the `url` from the result
+  and pass to mixin_get_dep_source — or pass `path` directly if you know it. Optional:
+  lineNumber, linesBefore, linesAfter.
 
 ## Semantic Navigation
 - mixin_type_hierarchy: See inheritance chains. Essential before writing mixins.
@@ -126,6 +136,8 @@ You have access to the IntelliJ MCP server with MixinMCP tools. Use them:
 - mixin_class_bytecode: Get bytecode info including synthetic methods.
   Use filter="synthetic" for lambda/bridge method mixin targets.
 - mixin_method_bytecode: Get instructions for a specific method.
+  **Use when the target mod has no sources** (e.g. Traveloptics in to-tweaks jar)
+  to see exact call sites for @Redirect/@Inject.
 
 ## Workflow Rules
 - When writing @Mixin: ALWAYS check mixin_type_hierarchy first.

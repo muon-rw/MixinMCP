@@ -2,6 +2,10 @@
 
 # MixinMCP Changelog
 
-## [Unreleased]
-### Added
-- Initial scaffold created from [IntelliJ Platform Plugin Template](https://github.com/JetBrains/intellij-platform-plugin-template)
+## [0.2.0]
+- Add path-based file resolution
+- Improve tool call error handling 
+- Update tool documentation and README
+
+## [0.1.0]
+- Initial Alpha
