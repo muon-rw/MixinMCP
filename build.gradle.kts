@@ -5,6 +5,7 @@ import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 plugins {
     id("java") // Java support
     alias(libs.plugins.kotlin) // Kotlin support
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.3.0" // @Serializable for MCP tool args
     alias(libs.plugins.intelliJPlatform) // IntelliJ Platform Gradle Plugin
     alias(libs.plugins.changelog) // Gradle Changelog Plugin
     alias(libs.plugins.qodana) // Gradle Qodana Plugin
@@ -31,6 +32,13 @@ repositories {
 
 // Dependencies are managed with Gradle version catalog - read more: https://docs.gradle.org/current/userguide/version_catalogs.html
 dependencies {
+    // ASM for bytecode analysis (IntelliJ bundles ASM but we need explicit access to asm-util for Textifier)
+    implementation(libs.asm)
+    implementation(libs.asm.util)
+
+    // kotlinx.serialization for @Serializable MCP tool args
+    implementation(libs.kotlinx.serialization.json)
+
     testImplementation(libs.junit)
     testImplementation(libs.opentest4j)
 
