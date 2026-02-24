@@ -16,4 +16,13 @@
     <extensions defaultExtensionNs="com.intellij.mcpServer">
         <mcpToolset implementation="dev.mixinmcp.tools.MixinMcpToolset"/>
     </extensions>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <additionalLibraryRootsProvider
+            implementation="dev.mixinmcp.cache.MixinDecompiledRootsProvider"/>
+        <externalSystemTaskNotificationListener
+            implementation="dev.mixinmcp.cache.MixinDecompileCacheSyncListener"/>
+        <postStartupActivity
+            implementation="dev.mixinmcp.cache.MixinDecompileCacheStartupActivity"/>
+    </extensions>
 </idea-plugin>

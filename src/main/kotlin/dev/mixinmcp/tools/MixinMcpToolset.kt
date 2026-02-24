@@ -13,6 +13,8 @@ import com.intellij.openapi.externalSystem.service.execution.ProgressExecutionMo
 import com.intellij.openapi.externalSystem.util.ExternalSystemUtil
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.ModuleManager
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.AdditionalLibraryRootsProvider
 import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
 import com.intellij.openapi.vfs.VirtualFileManager
@@ -31,6 +33,9 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.search.searches.ClassInheritorsSearch
 import com.intellij.psi.search.searches.MethodReferencesSearch
 import com.intellij.psi.search.searches.ReferencesSearch
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.progress.Task
+import dev.mixinmcp.cache.DecompilationCacheService
 import dev.mixinmcp.util.BytecodeAnalyzer
 import dev.mixinmcp.util.ClassFileLocator
 import dev.mixinmcp.util.FqcnResolver
@@ -200,7 +205,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Regex search across dependency/library sources. Searches in SOURCES roots (attached -sources.jar, etc.). For each match, returns url (pass to mixin_get_dep_source) and line snippets with matches surrounded by ||.")
+    @McpDescription("Regex search across dependency/library sources — both published -sources.jar and auto-decompiled sources. For each match, returns url (pass to mixin_get_dep_source) and line snippets with matches surrounded by ||.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
@@ -238,26 +243,10 @@ class MixinMcpToolset : McpToolset {
         val startTime: Long = System.currentTimeMillis()
 
         ReadAction.compute<Unit, Throwable> {
-            val modules = ModuleManager.getInstance(project).modules
-
-            for (module in modules) {
-                val orderEntries = ModuleRootManager.getInstance(module).orderEntries
-                for (entry in orderEntries) {
+            for (root in collectAllSourceRoots(project)) {
                 if (System.currentTimeMillis() - startTime > timeout) break
                 if (results.size >= maxResults) break
-
-                    val libraryRoots = when (entry) {
-                        is LibraryOrderEntry -> {
-                            entry.library?.getFiles(OrderRootType.SOURCES)?.toList() ?: emptyList()
-                        }
-                        else -> emptyList()
-                    }
-
-                    for (root in libraryRoots) {
-                        if (results.size >= maxResults) break
-                        collectRegexMatches(root, pattern, matchesMask, results, maxResults, startTime, timeout)
-                    }
-                }
+                collectRegexMatches(root, pattern, matchesMask, results, maxResults, startTime, timeout)
             }
         }
 
@@ -280,29 +269,37 @@ class MixinMcpToolset : McpToolset {
     }
 
     /**
-     * Locates a dependency source file by path (e.g. io/redspace/.../Utils.java).
-     * Searches SOURCES roots; returns first match.
+     * Collects all source roots: SOURCES from library order entries plus
+     * source roots from AdditionalLibraryRootsProvider (decompiled cache).
+     * Must be called inside ReadAction.
      */
-    private fun locateDepSourceByPath(project: com.intellij.openapi.project.Project, path: String): VirtualFile? {
+    private fun collectAllSourceRoots(project: Project): List<VirtualFile> {
+        val fromLibraries = mutableListOf<VirtualFile>()
+        val fromSynthetic = AdditionalLibraryRootsProvider.EP_NAME.extensionList
+            .flatMap { it.getAdditionalProjectLibraries(project) }
+            .flatMap { it.sourceRoots }
+        for (module in ModuleManager.getInstance(project).modules) {
+            for (entry in ModuleRootManager.getInstance(module).orderEntries) {
+                if (entry is LibraryOrderEntry) {
+                    entry.library?.getFiles(OrderRootType.SOURCES)?.toList()?.let { fromLibraries.addAll(it) }
+                }
+            }
+        }
+        return (fromLibraries + fromSynthetic).distinct()
+    }
+
+    /**
+     * Locates a dependency source file by path (e.g. io/redspace/.../Utils.java).
+     * Searches SOURCES roots and synthetic library roots; returns first match.
+     */
+    private fun locateDepSourceByPath(project: Project, path: String): VirtualFile? {
         val normalizedPath: String = path.replace('\\', '/').removePrefix("/")
         var found: VirtualFile? = null
 
         ReadAction.compute<Unit, Throwable> {
-            val modules = ModuleManager.getInstance(project).modules
-            for (module in modules) {
-                val orderEntries = ModuleRootManager.getInstance(module).orderEntries
-                for (entry in orderEntries) {
-                    val libraryRoots = when (entry) {
-                        is LibraryOrderEntry -> {
-                            entry.library?.getFiles(OrderRootType.SOURCES)?.toList() ?: emptyList()
-                        }
-                        else -> emptyList()
-                    }
-                    for (root in libraryRoots) {
-                        found = findFileByPathInTree(root, normalizedPath)
-                        if (found != null) return@compute
-                    }
-                }
+            for (root in collectAllSourceRoots(project)) {
+                found = findFileByPathInTree(root, normalizedPath)
+                if (found != null) return@compute
             }
         }
 
@@ -359,7 +356,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Reads source from dependency jars. Required: either `url` (full VirtualFile URL from mixin_search_in_deps, e.g. jar://.../sources.jar!/path/to/File.java) or `path` (e.g. io/redspace/ironsspellbooks/api/util/Utils.java). If both given, url takes precedence. Optional: lineNumber, linesBefore, linesAfter for a window around a line.")
+    @McpDescription("Reads source from dependency jars or decompiled cache. Required: either `url` (full VirtualFile URL from mixin_search_in_deps, e.g. jar://.../sources.jar!/path/to/File.java) or `path` (e.g. io/redspace/ironsspellbooks/api/util/Utils.java). If both given, url takes precedence. Optional: lineNumber, linesBefore, linesAfter for a window around a line.")
     @Suppress("unused")
     suspend fun mixin_get_dep_source(
         url: String? = null,
@@ -836,7 +833,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Triggers Gradle or Maven project sync to refresh dependencies. Call after changing build.gradle or pom.xml. The sync runs in the background; dependencies will be updated when complete.")
+    @McpDescription("Triggers Gradle or Maven project sync to refresh dependencies and the decompilation cache. Call after changing build.gradle or pom.xml. The sync runs in the background; dependencies and decompiled sources will be updated when complete.")
     @Suppress("unused")
     suspend fun mixin_sync_project(
         projectPath: String? = null,
@@ -869,10 +866,21 @@ class MixinMcpToolset : McpToolset {
                     // Ignore — project may not be Gradle/Maven
                 }
             }
+            // Trigger decompilation cache refresh in background (sync listener also does this on success)
+            ProgressManager.getInstance().run(object : Task.Backgroundable(
+                project,
+                "MixinMCP: Decompiling dependencies...",
+                true,
+            ) {
+                override fun run(indicator: com.intellij.openapi.progress.ProgressIndicator) {
+                    DecompilationCacheService.getInstance(project).refreshCache(project)
+                }
+            })
         }
 
         return McpToolCallResult.text(
-            "Project sync triggered for $externalPath. Dependencies will refresh in the background.",
+            "Project sync triggered for $externalPath. Dependencies will refresh in the background. " +
+                "Decompilation cache will refresh in the background.",
         )
     }
 }

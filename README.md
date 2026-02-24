@@ -2,13 +2,14 @@
 
 <!-- Plugin description -->
 An IntelliJ Platform plugin that extends the built-in MCP Server with tools for
-Minecraft mod development — dependency navigation, semantic code analysis, and
-bytecode inspection for mixin authoring.
+Minecraft mod development — dependency navigation, semantic code analysis,
+bytecode inspection, and automatic decompilation of compiled-only dependencies.
 
 IntelliJ's built-in MCP Server excludes libraries and dependencies from its tools. MixinMCP
 adds 12 tools that search across your entire classpath, resolve type hierarchies,
 and inspect bytecode — including the synthetic lambda methods that are invisible in
-decompiled source but essential for mixin targeting.
+decompiled source but essential for mixin targeting. Dependencies without published
+sources are automatically decompiled via Vineflower so every library is searchable.
 <!-- Plugin description end -->
 
 ## Why?
@@ -56,8 +57,8 @@ exists in compiled bytecode. No existing MCP plugin exposes this.
 |------|-------------|
 | `mixin_find_class` | Look up any class by FQCN — project, library, or JDK. Optionally include members or decompiled source. |
 | `mixin_search_symbols` | Find classes, methods, or fields by name pattern across project and all dependencies. |
-| `mixin_search_in_deps` | Regex search across dependency sources — like grep for your entire classpath. |
-| `mixin_get_dep_source` | Read source from dependency jars. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java). |
+| `mixin_search_in_deps` | Regex search across all dependency sources — published *and* auto-decompiled. Like grep for your entire classpath. |
+| `mixin_get_dep_source` | Read source from dependency jars or decompiled cache. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java). |
 
 ### Semantic Navigation
 
@@ -80,7 +81,36 @@ exists in compiled bytecode. No existing MCP plugin exposes this.
 
 | Tool | Description |
 |------|-------------|
-| `mixin_sync_project` | Trigger Gradle sync to re-index after dependency changes. |
+| `mixin_sync_project` | Trigger Gradle sync and refresh the decompilation cache. |
+
+## Decompilation Cache
+
+Many Minecraft mod dependencies ship without published sources (`-sources.jar`).
+MixinMCP automatically decompiles these compiled-only JARs using
+[Vineflower](https://github.com/Vineflower/vineflower) so that `mixin_search_in_deps`
+and `mixin_get_dep_source` cover your *entire* classpath — not just libraries that
+happened to publish source artifacts.
+
+**How it works:**
+
+- On project open and after every Gradle sync, a background task scans your
+  library order entries for JARs that have no SOURCES root attached.
+- Each missing-sources JAR is decompiled to `~/.cache/mixinmcp/decompiled/<hash>/`.
+- A manifest (`manifest.json`) tracks artifact identity so unchanged JARs are
+  never re-decompiled.
+- The cached `.java` files are exposed to IntelliJ as `SyntheticLibrary` roots
+  via `AdditionalLibraryRootsProvider`, making them indexed and searchable just
+  like real sources.
+
+Decompilation runs entirely in the background; no user action is required. To
+force a refresh (e.g. after manually clearing the cache), call `mixin_sync_project`.
+
+**Prefer native sources when available.** Decompiled output lacks comments,
+meaningful parameter names, and local variable names — and large dependency
+sets increase the initial decompilation time. If a library publishes sources
+(Maven Central, JitPack, etc.), add the `-sources` classifier in your build
+script so IntelliJ attaches the real sources and MixinMCP skips decompilation
+for that JAR entirely.
 
 ## Configuring Your MCP Client
 
@@ -105,6 +135,9 @@ mixin usage and many dependencies.
 You have access to the IntelliJ MCP server with MixinMCP tools. **Prefer these
 over grep, read_file, or jar extraction** when working with mod/dependency code.
 They search and read inside dependency jars natively; grep cannot see jar contents.
+Dependencies without published sources are automatically decompiled (Vineflower)
+so every library on the classpath is searchable. Native sources are always
+preferred — decompiled output lacks comments and meaningful variable names.
 
 ## When to Reach for MixinMCP First
 - **Finding usages** (e.g. setBlock, destroyBlock, BreakEvent) across mods → mixin_search_in_deps
@@ -117,13 +150,15 @@ They search and read inside dependency jars natively; grep cannot see jar conten
 - mixin_find_class: Look up any class by FQCN (Minecraft, mods, Java stdlib).
   Use includeMembers=true for API overview, includeSource=true for full code.
 - mixin_search_symbols: Find classes/methods by name pattern across everything.
-- mixin_search_in_deps: Regex search across all library/dependency sources.
-  Use fileMask (e.g. "*irons*", "*traveloptics*") to scope to specific mods.
-- mixin_get_dep_source: Read source from dependency jars. **Required: `url`** (from
-  mixin_search_in_deps results) **or** `path` (e.g. io/redspace/ironsspellbooks/api/util/Utils.java).
-  Workflow: (1) mixin_search_in_deps to find matches; (2) copy the `url` from the result
-  and pass to mixin_get_dep_source — or pass `path` directly if you know it. Optional:
-  lineNumber, linesBefore, linesAfter.
+- mixin_search_in_deps: Regex search across all library/dependency sources
+  (published and auto-decompiled). Use fileMask (e.g. "*irons*", "*traveloptics*")
+  to scope to specific mods.
+- mixin_get_dep_source: Read source from dependency jars or decompiled cache.
+  **Required: `url`** (from mixin_search_in_deps results) **or** `path`
+  (e.g. io/redspace/ironsspellbooks/api/util/Utils.java). Workflow:
+  (1) mixin_search_in_deps to find matches; (2) copy the `url` from the result
+  and pass to mixin_get_dep_source — or pass `path` directly if you know it.
+  Optional: lineNumber, linesBefore, linesAfter.
 
 ## Semantic Navigation
 - mixin_type_hierarchy: See inheritance chains. Essential before writing mixins.
@@ -145,7 +180,8 @@ They search and read inside dependency jars natively; grep cannot see jar conten
   Decompiled source DOES NOT show synthetic method names.
 - When unsure about method origin: use mixin_super_methods.
 - After writing any mixin: use the built-in get_file_problems to validate.
-- After changing build.gradle deps: call mixin_sync_project.
+- After changing build.gradle deps: call mixin_sync_project (also refreshes
+  the decompilation cache).
 ```
 
 Replace `[Fabric/NeoForge/Forge]` with your actual loader.
