@@ -2,6 +2,9 @@
 
 # MixinMCP Changelog
 
+## [0.3.0]
+- Add decompilation + cache
+
 ## [0.2.0]
 - Add path-based file resolution
 - Improve tool call error handling 
