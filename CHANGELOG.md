@@ -1,6 +1,9 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.4.2]
+- More tool documentation improvements
+
 ## [0.4.1]
 - Minor optimizations to documentation/regex lookup
 

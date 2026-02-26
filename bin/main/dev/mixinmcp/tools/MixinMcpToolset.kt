@@ -49,7 +49,7 @@ import java.util.regex.Pattern
 class MixinMcpToolset : McpToolset {
 
     @McpTool
-    @McpDescription("Resolves a fully-qualified Java class name and returns its declaration info. Works for project classes, Minecraft sources, mod APIs, and ALL dependency classes. Returns: package, modifiers, superclass, interfaces, source file location. With includeMembers=true (default): also lists all methods with full signatures and all fields with types. With includeSource=true: returns the full decompiled source code (can be large, use sparingly — prefer includeMembers for API overview).")
+    @McpDescription("Look up any class by fully-qualified name — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location. includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code — can be very large, prefer includeMembers for API overview.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
@@ -114,7 +114,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Searches for classes, methods, or fields by name pattern across project and/or dependencies. Use kind=class|method|field|all. Use scope=all|project|libraries. Query matches names containing the pattern (case-sensitive if caseSensitive=true). Returns FQCN for classes, class#method for methods, class.field for fields.")
+    @McpDescription("Find classes, methods, or fields by name substring across project and dependencies. kind: class (default), method, field, all. scope: all (default), project, libraries. Returns FQCN for classes, class#method(…) for methods, class.field for fields. maxResults defaults to 50.")
     @Suppress("unused")
     suspend fun mixin_search_symbols(
         query: String,
@@ -203,14 +203,14 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Regex search across dependency/library sources — both published -sources.jar and auto-decompiled sources. For each match, returns url (pass to mixin_get_dep_source) and line snippets with matches surrounded by ||.")
+    @McpDescription("Searches dependency/library sources with a regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Returns url (pass to mixin_get_dep_source) and matching line snippets with matches in ||markers||. regexPattern: prefer simple single-term patterns; make separate calls for multiple patterns. fileMask: glob matched against the full file path inside the jar (e.g. *minecraft* matches net/minecraft/…/Level.java; *LivingEntity* matches that specific class); defaults to all files. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
         fileMask: String? = null,
         caseSensitive: Boolean = true,
         maxResults: Int = 100,
-        timeout: Long = 10000,
+        timeout: Long = 15000,
         projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
@@ -245,7 +245,7 @@ class MixinMcpToolset : McpToolset {
             for (root in collectAllSourceRoots(project)) {
                 if (System.currentTimeMillis() - startTime > timeout) { timedOut = true; break }
                 if (results.size >= maxResults) break
-                collectRegexMatches(root, pattern, matchesMask, results, maxResults, startTime, timeout)
+                collectRegexMatches(root, root, pattern, matchesMask, results, maxResults, startTime, timeout)
             }
             if (!timedOut && System.currentTimeMillis() - startTime > timeout) timedOut = true
         }
@@ -325,8 +325,26 @@ class MixinMcpToolset : McpToolset {
         return if (normalized == targetPath || normalized.endsWith("/$targetPath")) vf else null
     }
 
+    /**
+     * Returns the path used for fileMask matching: for JAR entries, the path inside
+     * the jar (e.g. net/minecraft/world/entity/LivingEntity.java); for directory
+     * roots (decompiled cache), the path relative to root.
+     */
+    private fun getPathForMask(root: VirtualFile, vf: VirtualFile): String {
+        val pathInJar: String? = vf.url.substringAfter("!/", "").takeIf { it.isNotEmpty() }
+        if (pathInJar != null) return pathInJar.replace('\\', '/')
+        val rootPath: String = root.path.replace('\\', '/').trimEnd('/')
+        val vfPath: String = vf.path.replace('\\', '/')
+        return if (vfPath.startsWith(rootPath)) {
+            vfPath.removePrefix(rootPath).trimStart('/')
+        } else {
+            vf.name
+        }
+    }
+
     private fun collectRegexMatches(
         vf: VirtualFile,
+        root: VirtualFile,
         pattern: Pattern,
         matchesMask: (String) -> Boolean,
         results: MutableList<String>,
@@ -339,10 +357,11 @@ class MixinMcpToolset : McpToolset {
 
         if (vf.isDirectory) {
             for (child in vf.children) {
-                collectRegexMatches(child, pattern, matchesMask, results, maxResults, startTime, timeout)
+                collectRegexMatches(child, root, pattern, matchesMask, results, maxResults, startTime, timeout)
             }
         } else {
-            if (!matchesMask(vf.name)) return
+            val pathToMatch: String = getPathForMask(root, vf)
+            if (!matchesMask(pathToMatch)) return
             val content: String = try {
                 String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
             } catch (e: Exception) {
@@ -363,7 +382,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Reads source from dependency jars or decompiled cache. Required: either `url` (full VirtualFile URL from mixin_search_in_deps, e.g. jar://.../sources.jar!/path/to/File.java) or `path` (e.g. io/redspace/ironsspellbooks/api/util/Utils.java). If both given, url takes precedence. Optional: lineNumber, linesBefore, linesAfter for a window around a line.")
+    @McpDescription("Reads source from dependency jars or decompiled cache. Use this tool to view library code that grep/read_file cannot access. Pass url (exact string from mixin_search_in_deps results, e.g. jar://…/sources.jar!/path/File.java) or path (package path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java — not a filesystem path). url takes precedence if both given. lineNumber, linesBefore (default 30), linesAfter (default 70) define a window around a specific line.")
     @Suppress("unused")
     suspend fun mixin_get_dep_source(
         url: String? = null,
@@ -421,7 +440,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns bytecode-level information for a class, including synthetic methods, lambda targets, method descriptors, and access flags. Essential for mixin target resolution where decompiled source hides synthetic members. Use filter=synthetic to show only compiler-generated methods (lambdas, bridge methods, access methods). This is the primary use case for mixin development — finding the real method names for lambda targets. Set includeInstructions=true to get actual bytecode instructions for each method (equivalent to javap -c). Warning: output can be very large. Decompiled source does NOT show synthetic method names. If you need to target a lambda in @Redirect or @Inject mixin, you MUST use this tool.")
+    @McpDescription("Returns bytecode-level class overview including synthetic methods, lambda targets, method descriptors, and access flags. Use this tool when decompiled source hides the real method names you need for mixin targets. filter: all (default), synthetic (only compiler-generated: lambdas, bridges, access methods), methods, fields. includeInstructions: javap -c style bytecode per method (large output). Use filter=synthetic to discover lambda mixin target names (e.g. lambda\$tick\$0).")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_class_bytecode(
         className: String,
@@ -509,7 +528,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns javap-style bytecode instructions for a single method in a class. Use for lambda targets (e.g. lambda\$tick\$0) or any method. Pass methodDescriptor for overload disambiguation when the method has multiple overloads. Essential for understanding mixin target bytecode.")
+    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor — use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor to disambiguate overloads.")
     @Suppress("unused")
     suspend fun mixin_method_bytecode(
         className: String,
@@ -544,7 +563,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Traverses the type hierarchy of a class. Returns superclasses and/or subclasses. Use direction=supers for superclass chain and interfaces, direction=subs for inheritors, direction=both for full hierarchy. Essential before writing mixins to understand inheritance structure.")
+    @McpDescription("Retrieves the type hierarchy of a class. Use this tool to understand inheritance before writing mixins. direction: supers (superclass chain + interfaces), subs (inheritors), both (default). maxDepth limits superclass traversal (default 10). includeInterfaces: default true.")
     @Suppress("unused")
     suspend fun mixin_type_hierarchy(
         className: String,
@@ -610,7 +629,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Finds all concrete implementations of an interface or abstract class. Uses ClassInheritorsSearch across project and dependencies. Results are limited by maxResults to avoid performance issues with large dependency sets.")
+    @McpDescription("Finds all implementations of an interface or abstract class across project and dependencies. maxResults: 50 default.")
     @Suppress("unused")
     suspend fun mixin_find_impls(
         className: String,
@@ -655,7 +674,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns the chain of super method declarations for a method. Shows where the method is originally declared and the full super chain from most specific to most general. Use to confirm mixin target declaration location. For overloaded methods, pass parameterTypes to disambiguate (e.g. [\"E\"] for add(E)). For parameterless methods, pass parameterTypes: [].")
+    @McpDescription("Returns the super method declaration chain for a method. Use this tool to confirm where a method is originally declared before targeting it in a mixin. Shows all overrides from most specific to most general. For overloaded methods, pass parameterTypes to disambiguate (e.g. [\"E\"] for add(E)). For parameterless methods, pass parameterTypes: [].")
     @Suppress("unused")
     suspend fun mixin_super_methods(
         className: String,
@@ -699,7 +718,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Finds all references to a class or class member. If memberName is null, finds references to the class itself. If memberName is set, finds references to that method. For overloaded methods, pass parameterTypes to disambiguate. For parameterless methods, pass parameterTypes: []. Searches across project and dependencies.")
+    @McpDescription("Find all references to a class or member across project and dependencies. Without memberName: references to the class. With memberName: references to that method/field. For overloaded methods, pass parameterTypes to disambiguate. For parameterless methods, pass parameterTypes: []. maxResults: 100 default.")
     @Suppress("unused")
     suspend fun mixin_find_references(
         className: String,
@@ -757,7 +776,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Finds callers or callees of a method. direction=callers uses MethodReferencesSearch to find where the method is called. direction=callees walks the method body to find methods it calls. Use for understanding call flow when writing mixins. For overloaded methods, pass parameterTypes to disambiguate. For parameterless methods, pass parameterTypes: [].")
+    @McpDescription("Finds callers or callees of a method. Use this tool to trace execution flow when writing mixins. direction: callers (default) — finds call sites; callees — walks method body for outgoing calls. For overloaded methods, pass parameterTypes to disambiguate. For parameterless methods, pass parameterTypes: []. maxDepth: 3 default, maxResults: 50 default.")
     @Suppress("unused")
     suspend fun mixin_call_hierarchy(
         className: String,
@@ -840,7 +859,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Triggers Gradle or Maven project sync to refresh dependencies and the decompilation cache. Call after changing build.gradle or pom.xml. The sync runs in the background; dependencies and decompiled sources will be updated when complete.")
+    @McpDescription("Trigger Gradle/Maven project sync to refresh dependencies and decompilation cache. Call after changing build.gradle or pom.xml. Runs in background.")
     @Suppress("unused")
     suspend fun mixin_sync_project(
         projectPath: String? = null,

@@ -272,6 +272,7 @@ Read source by known path (without searching first):
 | Call graph | mixin_call_hierarchy |
 | Method origin in hierarchy | mixin_super_methods |
 | Synthetic/lambda method names | mixin_class_bytecode (filter="synthetic") |
+| Exact @At(target) for an INVOKE | mixin_method_bytecode — read the owner class from INVOKE* instructions |
 | Bytecode for a specific method | mixin_method_bytecode |
 
 ## Common Pitfalls
@@ -302,12 +303,22 @@ Read source by known path (without searching first):
 - Decompiled source does NOT show synthetic method names. If you need to target
   a lambda in @Redirect or @Inject, you MUST use this tool with filter="synthetic".
 
+**mixin_method_bytecode:**
+- Each INVOKE* instruction in the output shows the real owner class, not the
+  declaring class from source. The owner in bytecode may differ from what the
+  source suggests (e.g. `INVOKEVIRTUAL GauntletEntity.getAttributeValue` even
+  though `getAttributeValue` is declared in `LivingEntity`). Always use the
+  owner from bytecode when writing @At(target = "...") strings.
+
 ## Mixin Workflow
 1. Before writing @Mixin: ALWAYS check mixin_type_hierarchy first.
 2. When targeting lambdas: ALWAYS use mixin_class_bytecode with filter="synthetic".
    Decompiled source DOES NOT show synthetic method names.
-3. When unsure about method origin: use mixin_super_methods.
-4. After writing any mixin: use the built-in get_file_problems to validate.
+3. When writing @At(target): ALWAYS use mixin_method_bytecode to get the exact
+   INVOKE* owner class from bytecode. Do NOT assume the target owner from
+   decompiled source — the bytecode owner may be a subclass of the declaring class.
+4. When unsure about method origin: use mixin_super_methods.
+5. After writing any mixin: use the built-in get_file_problems to validate.
 5. After changing build.gradle deps: run `./gradlew mixinDecompile` to decompile
    new dependencies, then call mixin_sync_project to refresh IntelliJ's project model.
 
