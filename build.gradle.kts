@@ -39,9 +39,6 @@ dependencies {
     // kotlinx.serialization for @Serializable MCP tool args
     implementation(libs.kotlinx.serialization.json)
 
-    // Vineflower for decompiling library JARs without sources
-    implementation("org.vineflower:vineflower:1.11.2")
-
     testImplementation(libs.junit)
     testImplementation(libs.opentest4j)
 

@@ -3,7 +3,7 @@
 ## Design & Implementation Reference
 
 > **Status:** Core tools complete and tested end-to-end on Fabric 1.21 and Forge 1.20.1.
-> Decompilation cache (Section 11) in design phase.
+> Decompilation cache implemented (Section 11): Gradle plugin decompiles, IDE reads.
 
 ---
 
@@ -19,7 +19,9 @@
 8. [Tool Definitions](#8-tool-definitions)
 9. [Acceptance Test](#9-acceptance-test)
 10. [Known Pitfalls & Edge Cases](#10-known-pitfalls--edge-cases)
-11. [Decompilation Cache (Planned)](#11-decompilation-cache-planned)
+11. [Decompilation Cache](#11-decompilation-cache)
+    - [11.10 Timing — Tools vs. Background Decompilation](#1110-resolved-timing--tools-vs-background-decompilation)
+    - [11.11 Gradle Plugin for Decompilation](#1111-gradle-plugin-for-decompilation)
 12. [License](#12-license)
 
 ---
@@ -168,19 +170,24 @@ silently fails to register tools.
 ## 4. Project Structure
 
 ```
-mixin-mcp/
-├── build.gradle.kts
-├── settings.gradle.kts
+MixinMCP/
+├── build.gradle.kts                   # IntelliJ plugin build
+├── settings.gradle.kts                # Includes mixinmcp-gradle module
 ├── gradle.properties
 ├── gradle/libs.versions.toml          # Version catalog
 ├── DESIGN.md                          ← This file
-├── ISSUES.md                          # Known issues tracker
 ├── README.md                          # User-facing docs + cursor rule
-├── src/
+├── src/                               # IntelliJ plugin (IDE-side)
 │   └── main/
 │       ├── kotlin/dev/mixinmcp/
 │       │   ├── tools/
 │       │   │   └── MixinMcpToolset.kt # All 12 tools in one class
+│       │   ├── cache/
+│       │   │   ├── DecompilationCacheService.kt  # Read-only cache consumer
+│       │   │   ├── DecompilationManifest.kt      # Manifest format (kotlinx-serialization)
+│       │   │   ├── MixinDecompiledRootsProvider.kt # SyntheticLibrary roots
+│       │   │   ├── MixinDecompileCacheSyncListener.kt  # Re-index after sync
+│       │   │   └── MixinDecompileCacheStartupActivity.kt # Attach roots on open
 │       │   └── util/
 │       │       ├── FqcnResolver.kt    # FQCN → PsiClass (allScope)
 │       │       ├── MethodResolver.kt  # Class + name → PsiMethod
@@ -189,12 +196,22 @@ mixin-mcp/
 │       └── resources/
 │           └── META-INF/
 │               └── plugin.xml
+├── mixinmcp-gradle/                   # Gradle plugin (decompilation)
+│   ├── build.gradle.kts
+│   └── src/main/kotlin/dev/mixinmcp/gradle/
+│       ├── MixinDecompilePlugin.kt    # Plugin entry point
+│       ├── MixinDecompileTask.kt      # ./gradlew mixinDecompile
+│       ├── DecompilationManifest.kt   # Manifest format (Gson)
+│       └── CacheEntry.kt             # Cache entry data class
 └── src/test/kotlin/dev/mixinmcp/
     └── ...
 ```
 
 All tools live in `MixinMcpToolset.kt` rather than separate files per tool. This avoids
 registration boilerplate and keeps the entire tool surface in one place.
+
+The `cache/` package in the IntelliJ plugin is a **read-only consumer** of the
+decompilation cache populated by the Gradle plugin. See Section 11 for details.
 
 ---
 
@@ -278,8 +295,8 @@ bytecode extraction via `analyzeMethod()` returning javap-style output.
 |------|-----------|-------|
 | `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false` | All classes (project + deps + JDK) |
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` | All indexed symbols |
-| `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=10000` | **Sources jars only** (not decompiled) |
-| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` | **Sources jars only** (not decompiled) |
+| `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=10000` | Sources jars + decompiled cache |
+| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` | Sources jars + decompiled cache |
 
 **Important:** `mixin_search_in_deps` and `mixin_get_dep_source` only search/read from
 `OrderRootType.SOURCES` (attached `-sources.jar` files). They do **not** search decompiled
@@ -383,10 +400,10 @@ For project sync, use `ProgressExecutionMode.START_IN_FOREGROUND_ASYNC` (not
 ### ClassInheritorsSearch Performance
 Can be slow with 100+ dependencies. Always use `maxResults` limits.
 
-### Sources-Only Limitation
-`mixin_search_in_deps` and `mixin_get_dep_source` only work on SOURCES roots (attached
-`-sources.jar`). They cannot search decompiled content. For compiled-only dependencies,
-use `mixin_find_class` (includeSource=true) or bytecode tools instead.
+### Decompiled Source Search
+`mixin_search_in_deps` and `mixin_get_dep_source` search both SOURCES roots (attached
+`-sources.jar`) and decompiled cache roots (from `AdditionalLibraryRootsProvider`).
+Run `./gradlew mixinDecompile` to populate the cache for compiled-only dependencies.
 
 ### Large Output
 Full decompiled source or `includeInstructions=true` can produce very large responses.
@@ -399,9 +416,12 @@ Fabric/Loom intermediary mappings use `method_XXXXX` instead. BytecodeAnalyzer's
 
 ---
 
-## 11. Decompilation Cache (Planned)
+## 11. Decompilation Cache
 
-> **Status:** Design phase. Not yet implemented.
+> **Status:** Implemented. IDE-side cache is read-only (Sections 11.5 Steps 4–5).
+> Gradle plugin `dev.mixinmcp.decompile` implemented (Section 11.11).
+> `MixinDecompiledRootsProvider` uses the 5-param `newImmutableLibrary` overload
+> with `comparisonId` + `ExcludeFileCondition`.
 
 ### 11.1 Problem
 
@@ -425,51 +445,82 @@ However, these toolchains do **not** decompile other dependencies (mod APIs, sha
 libraries, closed-source mod deps). The Gradle cache (`~/.gradle/caches/`) only stores
 artifacts as published — if no `-sources.jar` was published, none is cached.
 
-### 11.3 Solution: Synthetic Sources via Background Decompilation
+### 11.3 Solution: Synthetic Sources via Gradle Decompilation + IDE Exposure
 
-On project open and after each Gradle/Maven sync, a background task decompiles all
-library JARs that lack SOURCES roots and writes the output to a persistent file cache.
-An `AdditionalLibraryRootsProvider` exposes the cached decompiled sources as
-`SyntheticLibrary` roots, making them visible in `GlobalSearchScope.allScope()` and
-indexed by IntelliJ — without modifying the Gradle-managed project model.
+A **Gradle plugin** (`dev.mixinmcp.decompile`) decompiles all library JARs that lack
+SOURCES roots and writes the output to a persistent file cache. Running
+`./gradlew mixinDecompile` completes decompilation as a blocking step — before the IDE
+opens or the LLM invokes tools — giving deterministic, CI-friendly results.
+
+An `AdditionalLibraryRootsProvider` in the IntelliJ plugin exposes the cached
+decompiled sources as `SyntheticLibrary` roots, making them visible in
+`GlobalSearchScope.allScope()` and indexed by IntelliJ — without modifying the
+Gradle-managed project model.
+
+This two-layer split (Gradle writes, IDE reads) solves the timing problem inherent in
+background decompilation: tools never run against a half-populated cache because
+decompilation finishes before the project model is built. See Section 11.10 for the timing analysis and Section 11.11 for the Gradle plugin
+design.
 
 ### 11.4 Architecture
 
 ```
-Gradle Sync completes
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────┐
-│  DecompilationCacheService  (project-level service)          │
-│                                                              │
-│  1. Enumerate library order entries without SOURCES roots    │
-│  2. For each, check file cache by artifact hash             │
-│  3. Decompile cache misses via Vineflower (library dep)     │
-│  4. Write .java files to disk cache                         │
-│  5. Notify AdditionalLibraryRootsProvider to refresh        │
-└──────────────────────────────────────────────────────────────┘
-        │                                    │
-        ▼                                    ▼
-┌────────────────────────┐   ┌─────────────────────────────────────────┐
-│  File cache on disk    │   │  MixinDecompiledRootsProvider           │
-│  ~/.cache/mixinmcp/    │   │  (AdditionalLibraryRootsProvider impl)  │
-│  └── decompiled/       │   │                                         │
-│      ├── manifest.json │◄──│  Returns SyntheticLibrary per cached    │
-│      └── <hash>/       │   │  artifact. Source roots = cache dirs.   │
-│          └── com/...   │   │                                         │
-│              └── *.java│   │  Files are in allScope(), indexed,      │
-│                        │   │  treated as library source files.       │
-└────────────────────────┘   └─────────────────────────────────────────┘
-                                             │
-                                             ▼
-                               ┌──────────────────────────────┐
-                               │  Existing tools              │
-                               │  mixin_search_in_deps ◄──── needs small change:
-                               │  mixin_get_dep_source ◄──── also iterate synthetic
-                               │                              library source roots
-                               │  mixin_find_class     ◄──── works automatically
-                               │  mixin_search_symbols ◄──── works automatically
-                               └──────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  GRADLE SIDE (blocking, runs before IDE)                            │
+│                                                                     │
+│  ./gradlew mixinDecompile                                           │
+│        │                                                            │
+│        ▼                                                            │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  Gradle Plugin  (dev.mixinmcp.decompile)                   │     │
+│  │                                                            │     │
+│  │  1. Resolve configurations → find JARs without -sources    │     │
+│  │  2. Compute artifact hash per JAR                          │     │
+│  │  3. Check manifest.json for cache hits                     │     │
+│  │  4. Decompile misses via Vineflower → write .java to disk  │     │
+│  │  5. Update manifest.json                                   │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│        │                                                            │
+│        ▼                                                            │
+│  ┌────────────────────────┐                                         │
+│  │  File cache on disk    │                                         │
+│  │  ~/.cache/mixinmcp/    │                                         │
+│  │  └── decompiled/       │                                         │
+│  │      ├── manifest.json │                                         │
+│  │      └── <hash>/       │                                         │
+│  │          └── com/...   │                                         │
+│  │              └── *.java│                                         │
+│  └────────────────────────┘                                         │
+└─────────────────────────────────────────────────────────────────────┘
+                │
+                │  reads (no decompilation)
+                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  IDE SIDE (IntelliJ plugin, read-only cache consumer)               │
+│                                                                     │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  DecompilationCacheService  (project-level service)        │     │
+│  │  Reads manifest.json, returns CachedLibraryInfo list       │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│        │                                                            │
+│        ▼                                                            │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  MixinDecompiledRootsProvider                              │     │
+│  │  (AdditionalLibraryRootsProvider impl)                     │     │
+│  │                                                            │     │
+│  │  Returns SyntheticLibrary per cached artifact.             │     │
+│  │  Source roots = cache dirs → indexed, in allScope().       │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│        │                                                            │
+│        ▼                                                            │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  Existing tools (no changes needed)                        │     │
+│  │  mixin_search_in_deps ◄─── collectAllSourceRoots() already│     │
+│  │  mixin_get_dep_source ◄─── queries synthetic library roots│     │
+│  │  mixin_find_class     ◄─── works automatically (allScope) │     │
+│  │  mixin_search_symbols ◄─── works automatically (indexed)  │     │
+│  └────────────────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 **Why `AdditionalLibraryRootsProvider` instead of `LibraryEx.modifiableModel`:**
@@ -489,6 +540,11 @@ dependency on editor state. It's also the same decompiler IntelliJ bundles (Fern
 → Vineflower lineage), so output quality is equivalent.
 
 ### 11.5 Implementation Steps
+
+> **Note:** Steps 1–3 and 5 describe the original IDE-side decompilation approach.
+> With the Gradle plugin (Section 11.11), Steps 2–3 move to the Gradle task and
+> Step 5 is simplified — the IDE only reads the cache, not writes it. Step 1 (cache
+> format) and Step 4 (roots provider) remain unchanged.
 
 #### Step 1: Cache Directory & Manifest
 
@@ -554,25 +610,40 @@ dependency on editor state. It's also the same decompiler IntelliJ bundles (Fern
   </extensions>
   ```
 - `getAdditionalProjectLibraries(project)` reads the manifest and returns a
-  `SyntheticLibrary` for each cached artifact:
+  `SyntheticLibrary` for each cached artifact using the **5-parameter overload**
+  that accepts a `comparisonId` and `ExcludeFileCondition`:
   ```kotlin
   SyntheticLibrary.newImmutableLibrary(
-      comparisonId,       // stable ID for incremental rescan
-      sourceRoots,        // list of VirtualFile dirs in cache
-      emptyList(),        // no binary roots
-      emptySet(),         // no exclusions
-      excludeCondition    // only include .java files
+      "mixinmcp-${info.artifactHash}",   // comparisonId — stable per-artifact, enables incremental rescan
+      listOf(info.root),                  // sourceRoots — decompiled .java dirs
+      emptyList(),                        // binaryRoots — none needed
+      emptySet(),                         // excludedRoots — none
+      ExcludeFileCondition { isDir, filename, _, _, _ ->
+          !isDir && !filename.endsWith(".java")
+      }
   )
   ```
+  **Important:** The 4-parameter overload (without `comparisonId`, using `Condition`)
+  is deprecated. Per the `SyntheticLibrary` Javadoc: "Non-null [Condition] value blocks
+  from incremental rescanning of library changes." Using the 5-parameter overload with
+  `comparisonId` + `ExcludeFileCondition` allows IntelliJ to rescan only changed
+  libraries instead of re-indexing all synthetic roots on every change.
+
+  Note on parameter order: `newImmutableLibrary(sourceRoots, binaryRoots, ...)` — the
+  first list is `sourceRoots`, not `binaryRoots`. Decompiled `.java` directories belong
+  in `sourceRoots` so they are indexed as library source files and visible to
+  `GlobalSearchScope.allScope()`.
 - After decompilation completes, call
   `AdditionalLibraryRootsListener.fireAdditionalLibraryChanged(...)` to trigger
   IntelliJ to re-query the provider and re-index the new roots.
 - **Effect on existing tools:**
   - `mixin_find_class`, `mixin_search_symbols`: work automatically — the decompiled
     files are in `allScope()` and indexed by `PsiShortNamesCache`.
-  - `mixin_search_in_deps`, `mixin_get_dep_source`: need a small modification to also
-    iterate source roots from `AdditionalLibraryRootsProvider.EP_NAME.extensionList`
-    in addition to `OrderRootType.SOURCES` on library order entries.
+  - `mixin_search_in_deps`, `mixin_get_dep_source`: `collectAllSourceRoots()` already
+    queries `AdditionalLibraryRootsProvider.EP_NAME.extensionList` to include synthetic
+    library source roots alongside `OrderRootType.SOURCES` on library order entries.
+    No further tool changes needed — decompiled content is searchable once the
+    `SyntheticLibrary` roots are exposed and indexed.
 
 #### Step 5: Sync Trigger & Invalidation
 
@@ -617,6 +688,27 @@ dependency on editor state. It's also the same decompiler IntelliJ bundles (Fern
    `com.intellij.externalSystemTaskNotificationListener` extension point. The
    `onSuccess()` callback fires after sync completes. Combine with `ProjectActivity`
    for project-open trigger.
+
+4. ~~**Timing: tools vs. background decompilation**~~ → **Resolved: Move
+   decompilation to a Gradle task** (Section 11.10, 11.11). Background decompilation
+   in the IDE creates a race condition where MCP tools execute before decompilation
+   finishes. The Gradle plugin (`./gradlew mixinDecompile`) makes decompilation a
+   blocking build step, eliminating the timing gap. The IntelliJ plugin becomes a
+   read-only cache consumer.
+
+5. ~~**Concurrent access**~~ → **Resolved: Gradle daemon serialization + shared
+   cache.** The Gradle plugin runs within the Gradle daemon, which serializes task
+   execution per project. Multiple projects sharing `~/.cache/mixinmcp/` is safe
+   because the artifact hash includes the full JAR path — different projects
+   referencing the same JAR at the same path produce the same hash and the same
+   cache entry (idempotent). Different JAR paths produce different hashes. Manifest
+   file-locking is still recommended for robustness but not critical for correctness.
+
+6. ~~**Tool modification scope**~~ → **Resolved: Already implemented.**
+   `collectAllSourceRoots()` in `MixinMcpToolset` already queries
+   `AdditionalLibraryRootsProvider.EP_NAME.extensionList` to include synthetic
+   library source roots. No tool changes needed — decompiled `.java` files in
+   synthetic roots are searchable/readable via the same `VirtualFile` APIs.
 
 ### 11.7 Resolved: Vineflower API
 
@@ -700,30 +792,202 @@ Remaining items before implementation:
    Consider adding a `// DECOMPILED — not original source` header to each file, or
    implementing a custom `IResultSaver` that prepends this header before writing.
 
-3. **Concurrent access:** Multiple IntelliJ instances (different projects) sharing
-   `~/.cache/mixinmcp/`. Manifest needs file-locking or per-project isolation. File
-   locking adds complexity; per-project dirs waste disk for shared dependencies.
-
-4. **Tool modification scope:** `mixin_search_in_deps` and `mixin_get_dep_source`
-   currently iterate `LibraryOrderEntry → library.getFiles(OrderRootType.SOURCES)`.
-   They need to also iterate
-   `AdditionalLibraryRootsProvider.EP_NAME.extensionList
-       .flatMap { it.getAdditionalProjectLibraries(project) }
-       .flatMap { it.sourceRoots }`.
-   Verify that decompiled `.java` files in synthetic roots are searchable/readable
-   via the same `VirtualFile` APIs used for real source JARs.
-
-5. **Loom/MDG interaction:** Loom and MDG already decompile Minecraft and attach
+3. **Loom/MDG interaction:** Loom and MDG already decompile Minecraft and attach
    sources. Verify that our provider doesn't create duplicate synthetic libraries for
    JARs that already have SOURCES roots (the enumeration in Step 2 should filter
    these out, but needs testing with real Fabric/Forge projects).
 
-6. **Scale estimate:** How many libraries lack sources in a typical Minecraft mod
+4. **Scale estimate:** How many libraries lack sources in a typical Minecraft mod
    project? Determines whether background decompilation takes seconds or minutes,
    and whether priority ordering is needed. Check in IntelliJ: Project Structure →
    Libraries → count those without a sources JAR attached.
 
-### 11.10 Alternatives Considered
+5. **Gradle Plugin Portal publishing:** The `dev.mixinmcp.decompile` Gradle plugin
+   needs its own publishing pipeline. Determine whether to publish to the Gradle
+   Plugin Portal, Maven Central, or both. Coordinate versioning with the IntelliJ
+   plugin.
+
+### 11.10 Resolved: Timing — Tools vs. Background Decompilation
+
+The original design (Section 11.5 Step 5) triggers decompilation as a
+`Task.Backgroundable` after Gradle sync completes, and again via `ProjectActivity`
+on project open. This creates a **timing gap**: MCP tools can execute before
+decompilation finishes, causing `mixin_search_in_deps` to return incomplete results
+for decompiled content.
+
+**How the gap manifests:**
+
+1. User opens project → `MixinDecompileCacheStartupActivity` attaches cached roots
+   from the manifest immediately, then queues a background `refreshCache()` for
+   new/changed JARs.
+2. User triggers Gradle sync → `MixinDecompileCacheSyncListener.onSuccess()` queues
+   another background `refreshCache()`.
+3. LLM calls `mixin_search_in_deps` → `collectAllSourceRoots()` queries the
+   `AdditionalLibraryRootsProvider`, but decompilation is still in progress. Only
+   previously-cached roots are visible; newly-added dependencies are missing.
+
+**Why there is no good in-process fix:** The MCP tool has no mechanism to block
+until decompilation finishes. Adding one would stall the LLM on every tool call.
+Exposing a "decompilation in progress" status adds complexity to the tool protocol
+and shifts the burden to the LLM to retry.
+
+**Resolution: Move decompilation to Gradle (Section 11.11).** A Gradle task
+(`./gradlew mixinDecompile`) runs decompilation as a blocking build step. The cache
+is fully populated before the IDE opens or the user starts working. The IntelliJ
+plugin becomes a read-only cache consumer — it never decompiles, only reads the
+manifest and exposes roots. This eliminates the timing gap entirely.
+
+**Fallback for the hybrid approach:** If the plugin retains background decompilation
+as a convenience fallback (see Section 11.11), the timing gap still exists for that
+path. The mitigation is to treat it as best-effort: previously-cached results are
+available immediately, and newly-decompiled content appears after the background task
+finishes and `fireAdditionalLibraryChanged()` triggers re-indexing. The Gradle task
+remains the "guaranteed complete" path.
+
+### 11.11 Gradle Plugin for Decompilation
+
+> **Status:** Implemented in `mixinmcp-gradle/` module. Published as
+> `dev.mixinmcp.decompile`. IDE-side decompilation removed; the IntelliJ
+> plugin is a read-only cache consumer.
+
+#### 11.11.1 Motivation
+
+| Concern | Background decompilation (current) | Gradle task |
+|---------|-----------------------------------|-------------|
+| **Determinism** | Tools can run before decompilation finishes | Task completes before IDE opens |
+| **Visibility** | Silent background task; errors logged to `idea.log` | Progress and errors in Gradle console output |
+| **CI support** | Requires a running IDE | `./gradlew mixinDecompile` in any environment |
+| **User control** | Automatic on sync; no way to run on demand | Explicit: run when needed, skip when not |
+| **Reproducibility** | Cache state depends on when the IDE was last open | Cache state depends on dependency resolution — reproducible |
+
+#### 11.11.2 User-Facing Design
+
+Users apply the plugin in their `build.gradle.kts`:
+
+```kotlin
+plugins {
+    id("dev.mixinmcp.decompile") version "..."
+}
+```
+
+The plugin registers a `mixinDecompile` task:
+
+```bash
+./gradlew mixinDecompile
+```
+
+After dependency resolution, this task:
+1. Enumerates resolved configurations for JARs without `-sources.jar` counterparts.
+2. For each JAR, computes the artifact hash using the same algorithm as
+   `DecompilationManifest.computeArtifactHash` (SHA-256 of `jarPath|jarSize|jarModified`).
+3. Checks `~/.cache/mixinmcp/decompiled/manifest.json` for a cache hit.
+4. On miss: invokes Vineflower to decompile to `~/.cache/mixinmcp/decompiled/<hash>/`.
+5. Updates `manifest.json` with the new entry.
+6. Deletes orphaned cache entries for JARs no longer in the dependency graph.
+
+The task is **incremental**: re-running it after a dependency change only decompiles
+new/changed JARs. Unchanged entries are served from cache.
+
+#### 11.11.3 Shared Cache Layout
+
+The Gradle plugin writes to the **exact same** directory structure and manifest format
+as the existing `DecompilationCacheService`:
+
+```
+~/.cache/mixinmcp/decompiled/
+├── manifest.json
+├── <artifact-hash-1>/
+│   └── com/example/Foo.java
+├── <artifact-hash-2>/
+│   └── net/minecraft/...
+└── ...
+```
+
+This means:
+- `MixinDecompiledRootsProvider` reads from this cache **without any changes**.
+- `DecompilationCacheService.getCachedRoots()` works as-is — it reads `manifest.json`
+  and returns `CachedLibraryInfo` entries with VirtualFile roots.
+- No protocol or format changes between the Gradle plugin and the IntelliJ plugin.
+
+#### 11.11.4 Dependency Enumeration in Gradle
+
+In the IntelliJ plugin, library enumeration uses `ModuleRootManager.orderEntries` to
+find `LibraryOrderEntry` instances without SOURCES roots. In the Gradle plugin, the
+equivalent is resolving Gradle configurations:
+
+```kotlin
+// Pseudo-code for the Gradle task action
+val resolvedArtifacts = project.configurations
+    .filter { it.isCanBeResolved }
+    .flatMap { it.resolvedConfiguration.resolvedArtifacts }
+
+val withoutSources = resolvedArtifacts.filter { artifact ->
+    val sourcesClassifier = "${artifact.name}-sources"
+    // Check if a -sources.jar exists for this artifact
+    !resolvedArtifacts.any { it.classifier == "sources" && it.name == artifact.name }
+}
+```
+
+JARs from the JDK and JARs that already have attached `-sources.jar` are excluded,
+matching the IntelliJ-side enumeration logic.
+
+#### 11.11.5 Impact on the IntelliJ Plugin
+
+With the Gradle plugin as the primary decompilation path:
+
+- **`DecompilationCacheService`** becomes read-only. `refreshCache()` no longer
+  enumerates libraries or invokes Vineflower — it only reads `manifest.json` and
+  returns cached roots. The Vineflower dependency can be removed from the IntelliJ
+  plugin's `build.gradle.kts`, reducing plugin size.
+- **`MixinDecompileCacheSyncListener`** is simplified or removed. After Gradle sync,
+  it only calls `fireAdditionalLibraryChanged()` to re-read the (already-populated)
+  cache — no background decompilation task.
+- **`MixinDecompileCacheStartupActivity`** remains: on project open, it reads the
+  manifest and attaches existing cached roots immediately.
+- **`MixinDecompiledRootsProvider`** remains unchanged: reads manifest, returns
+  `SyntheticLibrary` per cached artifact.
+
+#### 11.11.6 Hybrid Option
+
+As an alternative to making the IntelliJ plugin fully read-only:
+
+- **Gradle task** is the "guaranteed complete" path — deterministic, CI-friendly.
+- **IntelliJ plugin** retains background decompilation as a **convenience fallback**
+  for users who haven't run `./gradlew mixinDecompile` yet.
+- The plugin checks the manifest before decompiling: if the Gradle task has already
+  populated a cache entry for a given JAR hash, the plugin skips it.
+- The Gradle task is authoritative: if it has run, the plugin defers entirely.
+
+**Recommendation:** Start with the Gradle plugin as the sole decompilation path
+(simpler, no timing issues, smaller plugin). Add the hybrid fallback only if user
+feedback indicates the explicit Gradle step is too much friction.
+
+#### 11.11.7 Gradle Plugin Implementation Sketch
+
+The plugin would be a separate Gradle project/module, published to the Gradle Plugin
+Portal alongside the IntelliJ plugin on JetBrains Marketplace:
+
+```
+mixinmcp-gradle/
+├── build.gradle.kts          # Gradle plugin project
+├── src/main/kotlin/
+│   └── dev/mixinmcp/gradle/
+│       ├── MixinDecompilePlugin.kt    # Plugin entry point
+│       ├── MixinDecompileTask.kt      # Task implementation
+│       └── DecompilationManifest.kt   # Shared manifest format (duplicated or extracted)
+└── src/main/resources/
+    └── META-INF/gradle-plugins/
+        └── dev.mixinmcp.decompile.properties
+```
+
+The `DecompilationManifest` format is shared between the Gradle plugin and IntelliJ
+plugin. Options for sharing:
+1. **Duplicate the data class** — simplest; the format is ~60 lines and changes rarely.
+2. **Extract to a shared module** — cleaner but adds a multi-module build.
+
+Recommendation: duplicate for now; extract if the format evolves.
+
+### 11.12 Alternatives Considered
 
 **Scoped on-demand decompilation tool:** A new `mixin_search_decompiled` tool that
 takes a `packagePrefix`, decompiles matching classes on the fly, and runs regex over

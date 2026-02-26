@@ -1,0 +1,28 @@
+<idea-plugin>
+    <id>dev.mixinmcp</id>
+    <name>MixinMCP - Mixin Development Tools for MCP Server</name>
+    <vendor>mixinmcp</vendor>
+
+    <description><![CDATA[
+    Extends the built-in MCP Server with tools for Minecraft mod development:
+    class/symbol lookup in dependencies, type hierarchy traversal,
+    call graph navigation, and bytecode inspection for mixin target resolution.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+    <depends>com.intellij.mcpServer</depends>
+
+    <extensions defaultExtensionNs="com.intellij.mcpServer">
+        <mcpToolset implementation="dev.mixinmcp.tools.MixinMcpToolset"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <additionalLibraryRootsProvider
+            implementation="dev.mixinmcp.cache.MixinDecompiledRootsProvider"/>
+        <externalSystemTaskNotificationListener
+            implementation="dev.mixinmcp.cache.MixinDecompileCacheSyncListener"/>
+        <postStartupActivity
+            implementation="dev.mixinmcp.cache.MixinDecompileCacheStartupActivity"/>
+    </extensions>
+</idea-plugin>

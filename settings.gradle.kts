@@ -3,3 +3,5 @@ plugins {
 }
 
 rootProject.name = "MixinMCP"
+
+include("mixinmcp-gradle")
