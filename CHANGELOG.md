@@ -1,6 +1,9 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.4.1]
+- Minor optimizations to documentation/regex lookup
+
 ## [0.4.0]
 - Decompilation cache is now handled via a gradle plugin - see the README
 - Fixed all known issues with decompiled pseudo-source search resolution

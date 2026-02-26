@@ -295,7 +295,7 @@ bytecode extraction via `analyzeMethod()` returning javap-style output.
 |------|-----------|-------|
 | `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false` | All classes (project + deps + JDK) |
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` | All indexed symbols |
-| `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=10000` | Sources jars + decompiled cache |
+| `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000` | Sources jars + decompiled cache |
 | `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` | Sources jars + decompiled cache |
 
 **Important:** `mixin_search_in_deps` and `mixin_get_dep_source` only search/read from

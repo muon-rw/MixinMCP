@@ -214,7 +214,15 @@ MixinMCP tools are on the **user-jetbrains** MCP server. Use CallMcpTool:
 
     CallMcpTool(server="user-jetbrains", toolName="<tool>", arguments={...})
 
-Example — look up a class:
+**Arguments must be valid JSON.** No trailing commas, no single quotes, no
+unescaped special characters. An empty or malformed `arguments` object will
+produce a parse error.
+
+Tool descriptions document all parameters and defaults — read them before calling.
+
+### Examples
+
+Look up a class:
 
     CallMcpTool(
       server="user-jetbrains",
@@ -222,73 +230,101 @@ Example — look up a class:
       arguments={"className": "net.minecraft.world.level.Level", "includeMembers": true}
     )
 
-Example — search dependency sources:
+Search dependency sources, then read the result:
 
     CallMcpTool(
       server="user-jetbrains",
       toolName="mixin_search_in_deps",
-      arguments={"regexPattern": "destroyBlock", "fileMask": "*minecraft*"}
+      arguments={"regexPattern": "destroyBlock", "fileMask": "*Level*"}
+    )
+    // Results include `url:` lines — pass that url to mixin_get_dep_source:
+    CallMcpTool(
+      server="user-jetbrains",
+      toolName="mixin_get_dep_source",
+      arguments={
+        "url": "<url from mixin_search_in_deps result>",
+        "lineNumber": 42, "linesBefore": 10, "linesAfter": 20
+      }
     )
 
-Example — read source at a URL returned by search:
+Read source by known path (without searching first):
 
     CallMcpTool(
       server="user-jetbrains",
       toolName="mixin_get_dep_source",
-      arguments={"url": "<url from mixin_search_in_deps>", "lineNumber": 42, "linesBefore": 10, "linesAfter": 20}
+      arguments={
+        "path": "io/redspace/ironsspellbooks/player/ServerPlayerEvents.java",
+        "lineNumber": 360, "linesBefore": 20, "linesAfter": 20
+      }
     )
 
+## Tool Selection
+
+| Goal | Tool |
+|------|------|
+| Look up a class by FQCN | mixin_find_class |
+| Search names across classpath | mixin_search_symbols |
+| Grep dependency sources by regex | mixin_search_in_deps → then mixin_get_dep_source with returned `url` |
+| Read a known dependency file | mixin_get_dep_source (pass `path`, e.g. `io/redspace/.../Utils.java`) |
+| Inheritance chain | mixin_type_hierarchy |
+| All implementors | mixin_find_impls |
+| All usages of a class/method | mixin_find_references |
+| Call graph | mixin_call_hierarchy |
+| Method origin in hierarchy | mixin_super_methods |
+| Synthetic/lambda method names | mixin_class_bytecode (filter="synthetic") |
+| Bytecode for a specific method | mixin_method_bytecode |
+
+## Common Pitfalls
+
+**mixin_search_in_deps:**
+- fileMask is a glob matched against the **file path inside the jar** (e.g.
+  `net/minecraft/world/entity/LivingEntity.java`). It does NOT match jar names
+  or Maven coordinates.
+  - `*LivingEntity*` — good, matches that class specifically
+  - `*minecraft*` — broad, matches any path containing "minecraft"; prefer
+    narrower masks when you know the class name
+  - `*.java` — effectively no filter
+- Prefer simple single-term regex patterns. Complex alternation (e.g.
+  `addEffect.*dimension|changeDimension`) is fragile — make separate calls.
+- Broad searches can time out. Increase `timeout` (e.g. 20000–30000) for
+  searches without a fileMask or on projects with 50+ dependencies.
+
+**mixin_get_dep_source:**
+- `url`: copy the exact `url:` string from mixin_search_in_deps output. This is
+  the most reliable method after a search.
+- `path`: use the class's package path with `/` separators and `.java` extension
+  (e.g. `io/redspace/ironsspellbooks/api/util/Utils.java`). This is NOT a
+  filesystem path. Convenient when you already know the class location.
+- If a path is not found, fall back to mixin_search_in_deps to locate the file,
+  then use the returned `url`.
+
+**mixin_class_bytecode:**
+- Decompiled source does NOT show synthetic method names. If you need to target
+  a lambda in @Redirect or @Inject, you MUST use this tool with filter="synthetic".
+
+## Mixin Workflow
+1. Before writing @Mixin: ALWAYS check mixin_type_hierarchy first.
+2. When targeting lambdas: ALWAYS use mixin_class_bytecode with filter="synthetic".
+   Decompiled source DOES NOT show synthetic method names.
+3. When unsure about method origin: use mixin_super_methods.
+4. After writing any mixin: use the built-in get_file_problems to validate.
+5. After changing build.gradle deps: run `./gradlew mixinDecompile` to decompile
+   new dependencies, then call mixin_sync_project to refresh IntelliJ's project model.
+
+**Note:** All tools accept an optional `projectPath` parameter. You don't need
+it when only one project is open in IntelliJ (the common case). If you have
+multiple projects open and tools target the wrong one, pass the workspace root
+path as `projectPath` to disambiguate.
+
+## Troubleshooting
 **If `mixin_*` tools are not found or the server is unavailable:**
 The `user-jetbrains` MCP server only appears after Cursor connects to IntelliJ's
 MCP Server. If you get "MCP server does not exist: user-jetbrains", try:
 1. Ensure IntelliJ is running with the project open
-2. Check IntelliJ: Settings → Plugins → verify both "MCP Server" and "MixinMCP" are enabled
+2. Check IntelliJ: Settings → Plugins → verify both "MCP Server" and "MixinMCP"
+   are enabled
 3. **Restart Cursor** — the MCP server list is cached at startup and may not
    reflect a newly-started IntelliJ instance
-
-## When to Reach for MixinMCP First
-- **Finding usages** (e.g. setBlock, destroyBlock, BreakEvent) across mods → mixin_search_in_deps
-- **Reading mod source** (Iron's Spellbooks, Traveloptics, etc.) → mixin_search_in_deps first, then mixin_get_dep_source with the `url` from results (or pass `path` directly)
-- **Looking up a class** in any dependency (including compiled-only mods) → mixin_find_class
-- **Understanding mixin target logic** when the mod has no sources → mixin_method_bytecode
-- **Checking inheritance** before writing a mixin → mixin_type_hierarchy
-
-## Dependency Navigation
-- mixin_find_class: Look up any class by FQCN (Minecraft, mods, Java stdlib).
-  Use includeMembers=true for API overview, includeSource=true for full code.
-- mixin_search_symbols: Find classes/methods by name pattern across everything.
-- mixin_search_in_deps: Regex search across all library/dependency sources
-  (published and auto-decompiled). Use fileMask (e.g. "*irons*", "*traveloptics*")
-  to scope to specific mods.
-- mixin_get_dep_source: Read source from dependency jars or decompiled cache.
-  **Required: `url`** (from mixin_search_in_deps results) **or** `path`
-  (e.g. io/redspace/ironsspellbooks/api/util/Utils.java). Workflow:
-  (1) mixin_search_in_deps to find matches; (2) copy the `url` from the result
-  and pass to mixin_get_dep_source — or pass `path` directly if you know it.
-  Optional: lineNumber, linesBefore, linesAfter.
-
-## Semantic Navigation
-- mixin_type_hierarchy: See inheritance chains. Essential before writing mixins.
-- mixin_find_impls: Find all implementors of an interface.
-- mixin_find_references: Find all usages of a class/method.
-- mixin_call_hierarchy: See callers/callees of a method.
-- mixin_super_methods: Find where a method is originally declared.
-
-## Bytecode (for Mixin Targets)
-- mixin_class_bytecode: Get bytecode info including synthetic methods.
-  Use filter="synthetic" for lambda/bridge method mixin targets.
-- mixin_method_bytecode: Get instructions for a specific method.
-  **Use when the target mod has no sources** (e.g. Traveloptics in to-tweaks jar)
-  to see exact call sites for @Redirect/@Inject.
-
-## Workflow Rules
-- When writing @Mixin: ALWAYS check mixin_type_hierarchy first.
-- When targeting lambdas: ALWAYS use mixin_class_bytecode with filter="synthetic".
-  Decompiled source DOES NOT show synthetic method names.
-- When unsure about method origin: use mixin_super_methods.
-- After writing any mixin: use the built-in get_file_problems to validate.
-- After changing build.gradle deps: run `./gradlew mixinDecompile` to decompile
-  new dependencies, then call mixin_sync_project to refresh IntelliJ's project model.
 ```
 
 Replace `[Fabric/NeoForge/Forge]` with your actual loader.
@@ -298,8 +334,8 @@ Replace `[Fabric/NeoForge/Forge]` with your actual loader.
 Add equivalent instructions to your `CLAUDE.md` or MCP client system prompt.
 The MCP server name will depend on your client's configuration — check your
 MCP client docs for the identifier assigned to the IntelliJ/JetBrains server.
-The tool descriptions are self-documenting, but the workflow rules above
-significantly improve mixin authoring accuracy.
+The tool descriptions are self-documenting, but the workflow rules and common
+pitfalls above significantly improve mixin authoring accuracy.
 
 ## Building from Source
 
