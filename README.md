@@ -238,9 +238,13 @@ Example — read source at a URL returned by search:
       arguments={"url": "<url from mixin_search_in_deps>", "lineNumber": 42, "linesBefore": 10, "linesAfter": 20}
     )
 
-If `mixin_*` tools are not found, the MixinMCP IntelliJ plugin may not be
-installed or the MCP Server plugin may not be connected. Check IntelliJ:
-Settings → Plugins → verify both "MCP Server" and "MixinMCP" are enabled.
+**If `mixin_*` tools are not found or the server is unavailable:**
+The `user-jetbrains` MCP server only appears after Cursor connects to IntelliJ's
+MCP Server. If you get "MCP server does not exist: user-jetbrains", try:
+1. Ensure IntelliJ is running with the project open
+2. Check IntelliJ: Settings → Plugins → verify both "MCP Server" and "MixinMCP" are enabled
+3. **Restart Cursor** — the MCP server list is cached at startup and may not
+   reflect a newly-started IntelliJ instance
 
 ## When to Reach for MixinMCP First
 - **Finding usages** (e.g. setBlock, destroyBlock, BreakEvent) across mods → mixin_search_in_deps
