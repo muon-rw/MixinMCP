@@ -537,7 +537,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns javap-style bytecode instructions for a single method. Use this tool to inspect bytecode for lambda targets (e.g. lambda\$tick\$0) or any method. Pass methodDescriptor to disambiguate overloads.")
+    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor — use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor to disambiguate overloads.")
     @Suppress("unused")
     suspend fun mixin_method_bytecode(
         className: String,

@@ -6,6 +6,9 @@
 - Improvements to error message feedback
 - Improve detection of vanilla sources in cases of loader patching
 
+## [0.4.2]
+- More tool documentation improvements
+
 ## [0.4.1]
 - Minor optimizations to documentation/regex lookup
 
