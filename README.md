@@ -269,9 +269,12 @@ Read source by known path (without searching first):
 | Inheritance chain | mixin_type_hierarchy |
 | All implementors | mixin_find_impls |
 | All usages of a class/method | mixin_find_references |
+| All call sites across MC + all deps | mixin_find_references (more complete than mixin_search_in_deps for call-site enumeration) |
+| Other mods' mixins on the same method | mixin_find_references — string refs in mixin annotations (e.g. `@Inject(method=...)`) also appear |
 | Call graph | mixin_call_hierarchy |
 | Method origin in hierarchy | mixin_super_methods |
 | Synthetic/lambda method names | mixin_class_bytecode (filter="synthetic") |
+| Exact @At(target) for an INVOKE | mixin_method_bytecode — read the owner class from INVOKE* instructions |
 | Bytecode for a specific method | mixin_method_bytecode |
 
 ## Common Pitfalls
@@ -280,10 +283,10 @@ Read source by known path (without searching first):
 - fileMask is a glob matched against the **file path inside the jar** (e.g.
   `net/minecraft/world/entity/LivingEntity.java`). It does NOT match jar names
   or Maven coordinates.
-  - `*LivingEntity*` — good, matches that class specifically
-  - `*minecraft*` — broad, matches any path containing "minecraft"; prefer
-    narrower masks when you know the class name
-  - `*.java` — effectively no filter
+    - `*LivingEntity*` — good, matches that class specifically
+    - `*minecraft*` — broad, matches any path containing "minecraft"; prefer
+      narrower masks when you know the class name
+    - `*.java` — effectively no filter
 - Prefer simple single-term regex patterns. Complex alternation (e.g.
   `addEffect.*dimension|changeDimension`) is fragile — make separate calls.
 - Broad searches can time out. Increase `timeout` (e.g. 20000–30000) for
@@ -297,18 +300,48 @@ Read source by known path (without searching first):
   filesystem path. Convenient when you already know the class location.
 - If a path is not found, fall back to mixin_search_in_deps to locate the file,
   then use the returned `url`.
+- **Vanilla Minecraft classes** (e.g. `net/minecraft/server/level/ServerPlayer.java`)
+  may not resolve via `path` because they live in the merged forge jar, not the
+  decompiled cache. Use `mixin_search_in_deps` to get the `url` from the jar, or
+  prefer `mixin_find_class` / `mixin_method_bytecode` for vanilla classes.
+
+**mixin_find_references / mixin_call_hierarchy:**
+- To disambiguate overloaded methods, pass `parameterTypes` as an array of
+  **simple type names** — NOT JVM method descriptors.
+    - `"parameterTypes": ["MobEffectInstance", "Entity"]` — correct
+    - `"methodDesc": "(Lnet/minecraft/world/effect/MobEffectInstance;...)Z"` — wrong,
+      not a valid parameter for these tools
+    - `"parameterTypes": []` — for parameterless methods
+- `mixin_find_references` returns both runtime call sites AND string references
+  inside mixin annotations (e.g. `@Inject(method = "addEffect...")`), making it
+  the best tool for discovering cross-mod mixin conflicts on a target method.
+
+**mixin_search_symbols:**
+- The required parameter is `query` (a single name substring), NOT `symbolName`
+  or `symbolKind`. It matches symbol names *containing* the query. Search for one
+  name at a time: `{"query": "getEffect", "kind": "method"}`, not combined strings.
 
 **mixin_class_bytecode:**
 - Decompiled source does NOT show synthetic method names. If you need to target
   a lambda in @Redirect or @Inject, you MUST use this tool with filter="synthetic".
 
+**mixin_method_bytecode:**
+- Each INVOKE* instruction in the output shows the real owner class, not the
+  declaring class from source. The owner in bytecode may differ from what the
+  source suggests (e.g. `INVOKEVIRTUAL GauntletEntity.getAttributeValue` even
+  though `getAttributeValue` is declared in `LivingEntity`). Always use the
+  owner from bytecode when writing @At(target = "...") strings.
+
 ## Mixin Workflow
 1. Before writing @Mixin: ALWAYS check mixin_type_hierarchy first.
 2. When targeting lambdas: ALWAYS use mixin_class_bytecode with filter="synthetic".
    Decompiled source DOES NOT show synthetic method names.
-3. When unsure about method origin: use mixin_super_methods.
-4. After writing any mixin: use the built-in get_file_problems to validate.
-5. After changing build.gradle deps: run `./gradlew mixinDecompile` to decompile
+3. When writing @At(target): ALWAYS use mixin_method_bytecode to get the exact
+   INVOKE* owner class from bytecode. Do NOT assume the target owner from
+   decompiled source — the bytecode owner may be a subclass of the declaring class.
+4. When unsure about method origin: use mixin_super_methods.
+5. After writing any mixin: use the built-in get_file_problems to validate.
+6. After changing build.gradle deps: run `./gradlew mixinDecompile` to decompile
    new dependencies, then call mixin_sync_project to refresh IntelliJ's project model.
 
 **Note:** All tools accept an optional `projectPath` parameter. You don't need

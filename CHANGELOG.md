@@ -1,6 +1,11 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.5.0]
+- New tools for finding mixins affecting target class
+- Improvements to error message feedback
+- Improve detection of vanilla sources in cases of loader patching
+
 ## [0.4.1]
 - Minor optimizations to documentation/regex lookup
 

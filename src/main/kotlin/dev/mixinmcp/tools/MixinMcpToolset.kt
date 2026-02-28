@@ -410,7 +410,16 @@ class MixinMcpToolset : McpToolset {
             val hint: String = if (!url.isNullOrBlank()) {
                 "Pass the exact jar:// URL from mixin_search_in_deps results, or try the `path` parameter (e.g. io/redspace/.../Utils.java)."
             } else {
-                "Path not found in dependency sources. Use mixin_search_in_deps to find the file, then pass its `url` to this tool."
+                val normalizedPath: String = path!!.trim()
+                if (normalizedPath.startsWith("net/minecraft/")) {
+                    "Vanilla Minecraft classes may not be available via path lookup " +
+                        "(they live in the merged jar, not the decompiled cache). " +
+                        "Use mixin_find_class with includeSource=true to read the source, " +
+                        "or mixin_search_in_deps to get the jar url."
+                } else {
+                    "Path not found in dependency sources. " +
+                        "Use mixin_search_in_deps to find the file, then pass its `url` to this tool."
+                }
             }
             return McpToolCallResult.error("File not found. $hint")
         }
@@ -550,16 +559,30 @@ class MixinMcpToolset : McpToolset {
             methodDescriptor,
         )
 
-        return when {
-            result != null -> McpToolCallResult.text(
-                buildString {
-                    appendLine("=== $className#$methodName (bytecode) ===")
-                    appendLine()
-                    append(result)
-                },
-            )
-            else -> McpToolCallResult.error("Method not found: $className#$methodName")
+        if (result != null) {
+            return McpToolCallResult.text(buildString {
+                appendLine("=== $className#$methodName (bytecode) ===")
+                appendLine()
+                append(result)
+            })
         }
+
+        val analysis: BytecodeAnalyzer.ClassAnalysis = BytecodeAnalyzer.analyze(classBytes, false)
+        val similar: List<BytecodeAnalyzer.MethodInfo> = analysis.methods
+            .filter { it.name == methodName }
+        return McpToolCallResult.error(buildString {
+            if (similar.isEmpty()) {
+                appendLine("No method named '$methodName' in $className bytecode.")
+                val names: List<String> = analysis.methods.map { it.name }.distinct().sorted()
+                appendLine("Available methods: ${names.joinToString(", ")}")
+            } else {
+                appendLine("No overload of $className#$methodName matches descriptor '$methodDescriptor'.")
+                appendLine("Available overloads:")
+                for (m in similar) {
+                    appendLine("  ${m.name}${m.descriptor}")
+                }
+            }
+        })
     }
 
     @McpTool
@@ -685,11 +708,13 @@ class MixinMcpToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val result: String? = ReadAction.compute<String?, Throwable> {
-            val psiMethod: PsiMethod = MethodResolver.resolveSingle(
-                project, className, methodName, parameterTypes,
-            ) ?: return@compute null
+        val resolution = MethodResolver.resolveDetailed(project, className, methodName, parameterTypes)
+        if (resolution is MethodResolver.Resolution.Error) {
+            return McpToolCallResult.error(resolution.message)
+        }
+        val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
+        val result: String = ReadAction.compute<String, Throwable> {
             val superMethods: Array<PsiMethod> = psiMethod.findSuperMethods(false)
             val containingClass: PsiClass? = psiMethod.containingClass
 
@@ -711,10 +736,7 @@ class MixinMcpToolset : McpToolset {
             }
         }
 
-        return when {
-            result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Method not found: $className#$methodName")
-        }
+        return McpToolCallResult.text(result)
     }
 
     @McpTool
@@ -730,16 +752,53 @@ class MixinMcpToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
+        if (memberName != null) {
+            val resolution = MethodResolver.resolveDetailed(project, className, memberName, parameterTypes)
+            if (resolution is MethodResolver.Resolution.Error) {
+                return McpToolCallResult.error(resolution.message)
+            }
+            val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
+
+            val result: String = ReadAction.compute<String, Throwable> {
+                val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
+                val query = ReferencesSearch.search(psiMethod, scope, true)
+                val refs: MutableList<PsiReference> = mutableListOf()
+                var count: Int = 0
+                query.forEach { ref ->
+                    if (count >= maxResults) return@forEach
+                    refs.add(ref)
+                    count++
+                }
+
+                buildString {
+                    appendLine("=== References to $className#$memberName ===")
+                    appendLine()
+                    for (ref: PsiReference in refs) {
+                        val element = ref.element
+                        val file = element.containingFile
+                        val vf = file?.virtualFile
+                        val path: String = vf?.path ?: "(unknown)"
+                        val line: Int = element.containingFile?.let { f ->
+                            val doc = PsiDocumentManager.getInstance(project).getDocument(f)
+                            doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
+                        } ?: 0
+                        appendLine("  $path:$line  ${element.text.take(80)}${if (element.text.length > 80) "..." else ""}")
+                    }
+                    if (refs.size >= maxResults) {
+                        appendLine("  ... (truncated at $maxResults results)")
+                    }
+                }
+            }
+            return McpToolCallResult.text(result)
+        }
+
+        // Class-level reference search
         val result: String? = ReadAction.compute<String?, Throwable> {
+            val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
+                ?: return@compute null
+
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
-
-            val elementToSearch = if (memberName == null) {
-                FqcnResolver.resolveNested(project, className)
-            } else {
-                MethodResolver.resolveSingle(project, className, memberName, parameterTypes)
-            } ?: return@compute null
-
-            val query = ReferencesSearch.search(elementToSearch, scope, true)
+            val query = ReferencesSearch.search(psiClass, scope, true)
             val refs: MutableList<PsiReference> = mutableListOf()
             var count: Int = 0
             query.forEach { ref ->
@@ -749,8 +808,7 @@ class MixinMcpToolset : McpToolset {
             }
 
             buildString {
-                val targetDesc: String = if (memberName == null) className else "$className#$memberName"
-                appendLine("=== References to $targetDesc ===")
+                appendLine("=== References to $className ===")
                 appendLine()
                 for (ref: PsiReference in refs) {
                     val element = ref.element
@@ -771,7 +829,7 @@ class MixinMcpToolset : McpToolset {
 
         return when {
             result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Element not found: $className${memberName?.let { "#$it" } ?: ""}")
+            else -> McpToolCallResult.error("Class not found: $className")
         }
     }
 
@@ -790,11 +848,13 @@ class MixinMcpToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val result: String? = ReadAction.compute<String?, Throwable> {
-            val psiMethod: PsiMethod = MethodResolver.resolveSingle(
-                project, className, methodName, parameterTypes,
-            ) ?: return@compute null
+        val resolution = MethodResolver.resolveDetailed(project, className, methodName, parameterTypes)
+        if (resolution is MethodResolver.Resolution.Error) {
+            return McpToolCallResult.error(resolution.message)
+        }
+        val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
+        val result: String = ReadAction.compute<String, Throwable> {
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
 
             buildString {
@@ -852,10 +912,7 @@ class MixinMcpToolset : McpToolset {
             }
         }
 
-        return when {
-            result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Method not found: $className#$methodName")
-        }
+        return McpToolCallResult.text(result)
     }
 
     @McpTool

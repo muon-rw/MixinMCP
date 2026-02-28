@@ -22,7 +22,11 @@
 11. [Decompilation Cache](#11-decompilation-cache)
     - [11.10 Timing — Tools vs. Background Decompilation](#1110-resolved-timing--tools-vs-background-decompilation)
     - [11.11 Gradle Plugin for Decompilation](#1111-gradle-plugin-for-decompilation)
-12. [License](#12-license)
+12. [Planned Enhancements](#13-planned-enhancements)
+    - [13.1 JVM Method Descriptor Support](#131-jvm-method-descriptor-support-methoddescriptor-parameter)
+    - [13.2 Vanilla Minecraft Source Root Coverage](#132-vanilla-minecraft-source-root-coverage)
+    - [13.3 Mixin Conflict Detection Tool](#133-mixin-conflict-detection-tool-mixin_find_targeting_mixins)
+13. [License](#14-license)
 
 ---
 
@@ -270,6 +274,11 @@ converting dots to dollar signs.
 Resolves a method within a class by name and optional parameter type list. Falls back to
 `psiClass.methods` if `findMethodsByName` returns empty (happens with some JDK classes).
 Returns all overloads when `parameterTypes` is null; filters by signature when provided.
+
+`resolveDetailed()` returns a `Resolution` sealed class: `Found(PsiMethod)` or
+`Error(String)` with a diagnostic message listing available overloads and suggesting
+the correct `parameterTypes` values. Tools use this to produce actionable error messages
+instead of bare "Method not found" strings.
 
 ### 7.3 ClassFileLocator
 
@@ -1002,6 +1011,158 @@ across classes never opened.
 
 ---
 
-## 12. License
+## 13. Planned Enhancements
+
+### 13.1 JVM Method Descriptor Support (`methodDescriptor` parameter)
+
+**Problem:** Tools that disambiguate overloaded methods (`mixin_call_hierarchy`,
+`mixin_find_references`, `mixin_super_methods`) require `parameterTypes` as an array
+of simple Java type names (e.g. `["MobEffectInstance", "Entity"]`). Mixin developers
+think in JVM method descriptors — they write them constantly in `@Inject(method = "...")`.
+Translating `(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z`
+to `["MobEffectInstance", "Entity"]` is unnecessary friction.
+
+**Solution:** Add an optional `methodDescriptor: String?` parameter to all tools that
+currently accept `parameterTypes`. If provided, it takes precedence over `parameterTypes`.
+
+**Implementation:**
+
+1. **`MethodResolver` — add descriptor parsing:**
+   - Add `resolveByDescriptor(project, className, methodName, descriptor)` method.
+   - Parse the JVM descriptor string to extract parameter types. The descriptor format is
+     well-defined: `(` params `)` returnType, where each param is `L` fqcn `;` (objects),
+     `[` (arrays), or single-char primitives (`I`, `Z`, `D`, etc.).
+   - Match against `PsiMethod.parameterList` by comparing canonical type names derived
+     from the descriptor against `PsiParameter.type.canonicalText`.
+   - Fallback: if PSI matching fails (remapped names differ from descriptor), match at the
+     bytecode level via `BytecodeAnalyzer.analyze()` to find the method by exact descriptor,
+     then resolve back to PSI.
+
+2. **Affected tools:**
+   - `mixin_call_hierarchy`: add `methodDescriptor: String? = null`
+   - `mixin_find_references`: add `methodDescriptor: String? = null`
+   - `mixin_super_methods`: add `methodDescriptor: String? = null`
+   - `mixin_method_bytecode`: already has `methodDescriptor` — no change needed
+
+3. **`resolveDetailed()` update:** If both `methodDescriptor` and `parameterTypes` are
+   provided, `methodDescriptor` takes precedence. Error messages should show both the
+   descriptor and the `parameterTypes` equivalent so agents learn the mapping.
+
+4. **Descriptor parsing utility:** Add `DescriptorParser` to `dev.mixinmcp.util`:
+   ```
+   object DescriptorParser {
+       fun parseParameterTypes(descriptor: String): List<String>
+       fun toSimpleNames(internalNames: List<String>): List<String>
+   }
+   ```
+   The parser must handle: object types (`L...;`), array types (`[`), all primitives,
+   and nested arrays of objects (`[[Ljava/lang/String;`).
+
+5. **Tool description updates:** Document `methodDescriptor` as accepting the JVM format
+   agents already see in mixin annotations (e.g. `"(Lnet/minecraft/...;)V"`).
+
+### 13.2 Vanilla Minecraft Source Root Coverage
+
+**Problem:** `mixin_search_in_deps` and `mixin_get_dep_source` search
+`OrderRootType.SOURCES` roots and `AdditionalLibraryRootsProvider` synthetic roots.
+Whether vanilla Minecraft classes appear depends on how the mod loader registers sources:
+
+- **Fabric/Loom:** Typically attaches remapped sources to the Minecraft library entry.
+  `SOURCES` roots should include them. If not, Loom may register them as a separate library.
+- **ForgeGradle/NeoGradle:** May only provide compiled classes without a `-sources.jar`
+  attachment for the merged jar. Sources may be in a separate `_mapped_*` library or
+  not available at all via `OrderRootType.SOURCES`.
+
+The decompilation cache (Vineflower Gradle plugin) is designed to fill this gap, but
+the user may not have run `./gradlew mixinDecompile`, or the Minecraft jar may be
+excluded from decompilation because the mod loader already provides a form of sources.
+
+**Investigation steps:**
+
+1. **Diagnostic tool/logging:** Add a debug mode to `mixin_search_in_deps` (or a
+   separate `mixin_debug_roots` tool) that lists all source roots with their types
+   and sample file paths. This reveals exactly what the search covers on each loader.
+
+2. **Test matrix:** Test `collectAllSourceRoots` output on:
+   - Fabric 1.21 (Loom)
+   - NeoForge 1.21 (NeoGradle)
+   - Forge 1.20.x (ForgeGradle)
+   Document which loaders attach Minecraft sources and which don't.
+
+3. **Potential fixes:**
+   - **Include `CLASSES` roots as fallback:** If a library has no `SOURCES` root but
+     has `CLASSES`, decompile on-demand or note the gap in results.
+   - **Use PSI as bridge:** For classes resolvable via `GlobalSearchScope.allScope(project)`
+     (which includes everything), offer a `--deep` mode that decompiles matched classes
+     on the fly using IntelliJ's built-in decompiler.
+   - **Ensure decompilation cache covers Minecraft:** Update the Gradle plugin to
+     explicitly include the merged Minecraft jar if no sources are attached.
+
+4. **Interim mitigation:** Already implemented — `mixin_get_dep_source` now suggests
+   `mixin_find_class` with `includeSource=true` when a `net/minecraft/` path fails.
+
+### 13.3 Mixin Conflict Detection Tool (`mixin_find_targeting_mixins`)
+
+**Problem:** Discovering that another mod's mixin targets the same method you're
+injecting into currently requires accidental discovery via `mixin_find_references`
+(which returns string references in mixin annotations alongside code references).
+A dedicated tool would make cross-mod conflict analysis first-class.
+
+**Proposed tool:** `mixin_find_targeting_mixins`
+
+**Parameters:**
+```
+className: String          // Target class (e.g. net.minecraft.server.level.ServerPlayer)
+methodName: String? = null // Optionally narrow to a specific method
+maxResults: Int = 50
+projectPath: String? = null
+```
+
+**Returns:** All `@Mixin` classes across project and dependencies that target the given
+class, with their injection points (`@Inject`, `@Redirect`, `@Overwrite`, `@ModifyArg`,
+etc.) and `@At` targets.
+
+**Implementation approach:**
+
+1. **Phase 1 — Annotation-based search:**
+   - Use `AnnotatedElementsSearch` to find all classes annotated with
+     `@org.spongepowered.asm.mixin.Mixin` across `GlobalSearchScope.allScope(project)`.
+   - For each `@Mixin` class, read the `value` or `targets` annotation parameter.
+   - Filter to those targeting `className`.
+   - If `methodName` is specified, further filter by scanning `@Inject(method=...)`,
+     `@Redirect(method=...)`, etc. in the mixin class.
+
+2. **Phase 2 — String search fallback:**
+   - Some mixin annotations may be in compiled dependencies without full PSI annotation
+     support. Fall back to `mixin_search_in_deps`-style regex search for
+     `@Mixin.*className` patterns.
+
+3. **Output format:**
+   ```
+   === Mixins targeting net.minecraft.server.level.ServerPlayer#addEffect ===
+
+   1. com.example.mod.mixin.MixinServerPlayer
+      @Inject(method = "addEffect", at = @At("HEAD"))
+      Source: jar:///path/to/mod.jar!/com/example/mod/mixin/MixinServerPlayer.java
+
+   2. io.othermod.mixin.PlayerEffectMixin
+      @Redirect(method = "addEffect", at = @At(value = "INVOKE", target = "..."))
+      Source: jar:///path/to/othermod.jar!/io/othermod/mixin/PlayerEffectMixin.java
+   ```
+
+4. **Challenges:**
+   - `AnnotatedElementsSearch` may not index annotations in all dependencies.
+     The index coverage depends on whether sources are attached.
+   - Mixin `targets` can use string names (`"net.minecraft.server.level.ServerPlayer"`)
+     or class references (`ServerPlayer.class`). Both need matching.
+   - For compiled-only dependencies, annotation info may only be available via bytecode.
+     Consider using ASM to scan class files for `@Mixin` annotations as a fallback.
+
+5. **Dependencies:** This tool benefits from #13.2 (vanilla source coverage) being
+   resolved first, since mixin annotations in dependencies need to be indexed.
+
+---
+
+## 14. License
 
 Apache-2.0 (matching JetBrains ecosystem conventions).
