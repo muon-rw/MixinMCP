@@ -70,19 +70,21 @@ exists in compiled bytecode. No existing MCP plugin exposes this.
 | `mixin_find_references` | Find all usages of a class, method, or field. |
 | `mixin_call_hierarchy` | Callers and callees of a method — trace execution flow. |
 | `mixin_super_methods` | Find where a method is originally declared in the hierarchy. |
+| `mixin_find_targeting_mixins` | Find all `@Mixin` classes that target a given class/method — cross-mod conflict analysis. |
 
 ### Bytecode Inspection
 
 | Tool | Description |
 |------|-------------|
 | `mixin_class_bytecode` | Bytecode-level class overview including synthetic methods. Use `filter="synthetic"` for lambda/bridge mixin targets. |
-| `mixin_method_bytecode` | Full bytecode instructions for a specific method. |
+| `mixin_method_bytecode` | Full bytecode instructions for a specific method. INVOKE* instructions show the real owner class for `@At(target)`. |
 
 ### Project Management
 
 | Tool | Description |
 |------|-------------|
 | `mixin_sync_project` | Trigger Gradle sync. The decompilation cache is re-read automatically after sync. |
+| `mixin_debug_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
 
 ## Decompilation Cache
 
@@ -270,12 +272,13 @@ Read source by known path (without searching first):
 | All implementors | mixin_find_impls |
 | All usages of a class/method | mixin_find_references |
 | All call sites across MC + all deps | mixin_find_references (more complete than mixin_search_in_deps for call-site enumeration) |
-| Other mods' mixins on the same method | mixin_find_references — string refs in mixin annotations (e.g. `@Inject(method=...)`) also appear |
+| Cross-mod mixin conflicts on a target | mixin_find_targeting_mixins — finds all @Mixin classes + their injection points |
 | Call graph | mixin_call_hierarchy |
 | Method origin in hierarchy | mixin_super_methods |
 | Synthetic/lambda method names | mixin_class_bytecode (filter="synthetic") |
 | Exact @At(target) for an INVOKE | mixin_method_bytecode — read the owner class from INVOKE* instructions |
 | Bytecode for a specific method | mixin_method_bytecode |
+| Diagnose missing source roots | mixin_debug_roots — lists all roots searched by dep tools |
 
 ## Common Pitfalls
 
@@ -305,16 +308,17 @@ Read source by known path (without searching first):
   decompiled cache. Use `mixin_search_in_deps` to get the `url` from the jar, or
   prefer `mixin_find_class` / `mixin_method_bytecode` for vanilla classes.
 
-**mixin_find_references / mixin_call_hierarchy:**
-- To disambiguate overloaded methods, pass `parameterTypes` as an array of
-  **simple type names** — NOT JVM method descriptors.
-    - `"parameterTypes": ["MobEffectInstance", "Entity"]` — correct
-    - `"methodDesc": "(Lnet/minecraft/world/effect/MobEffectInstance;...)Z"` — wrong,
-      not a valid parameter for these tools
+**mixin_find_references / mixin_call_hierarchy / mixin_super_methods:**
+- Two ways to disambiguate overloaded methods:
+    - `"parameterTypes": ["MobEffectInstance", "Entity"]` — simple type names
+    - `"methodDescriptor": "(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z"` — JVM descriptor, same format as in mixin `@Inject(method = "...")`
     - `"parameterTypes": []` — for parameterless methods
+- If disambiguation fails, the error message lists all available overloads with
+  ready-to-copy `parameterTypes` values.
 - `mixin_find_references` returns both runtime call sites AND string references
-  inside mixin annotations (e.g. `@Inject(method = "addEffect...")`), making it
-  the best tool for discovering cross-mod mixin conflicts on a target method.
+  inside mixin annotations (e.g. `@Inject(method = "addEffect...")`).
+- For dedicated cross-mod mixin conflict analysis, prefer `mixin_find_targeting_mixins`
+  — it returns structured results with injection types and `@At` targets.
 
 **mixin_search_symbols:**
 - The required parameter is `query` (a single name substring), NOT `symbolName`

@@ -22,10 +22,10 @@
 11. [Decompilation Cache](#11-decompilation-cache)
     - [11.10 Timing — Tools vs. Background Decompilation](#1110-resolved-timing--tools-vs-background-decompilation)
     - [11.11 Gradle Plugin for Decompilation](#1111-gradle-plugin-for-decompilation)
-12. [Planned Enhancements](#13-planned-enhancements)
-    - [13.1 JVM Method Descriptor Support](#131-jvm-method-descriptor-support-methoddescriptor-parameter)
-    - [13.2 Vanilla Minecraft Source Root Coverage](#132-vanilla-minecraft-source-root-coverage)
-    - [13.3 Mixin Conflict Detection Tool](#133-mixin-conflict-detection-tool-mixin_find_targeting_mixins)
+12. [Enhancements](#13-enhancements-implemented)
+    - [13.1 JVM Method Descriptor Support](#131-jvm-method-descriptor-support-methoddescriptor-parameter--done)
+    - [13.2 Vanilla Minecraft Source Root Coverage](#132-vanilla-minecraft-source-root-coverage--partial-diagnostic-tool-done)
+    - [13.3 Mixin Conflict Detection Tool](#133-mixin-conflict-detection-tool-mixin_find_targeting_mixins--done)
 13. [License](#14-license)
 
 ---
@@ -306,6 +306,7 @@ bytecode extraction via `analyzeMethod()` returning javap-style output.
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` | All indexed symbols |
 | `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000` | Sources jars + decompiled cache |
 | `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` | Sources jars + decompiled cache |
+| `mixin_debug_roots` | `maxSamplesPerRoot=5` | Diagnostic: lists all source roots with types and sample paths |
 
 **Important:** `mixin_search_in_deps` and `mixin_get_dep_source` only search/read from
 `OrderRootType.SOURCES` (attached `-sources.jar` files). They do **not** search decompiled
@@ -318,12 +319,15 @@ content from compiled-only jars. For classes without sources, use `mixin_find_cl
 |------|-----------|
 | `mixin_type_hierarchy` | `className`, `direction=both`, `maxDepth=10`, `includeInterfaces=true` |
 | `mixin_find_impls` | `className`, `maxResults=50` |
-| `mixin_find_references` | `className`, `memberName?`, `parameterTypes?`, `maxResults=100` |
-| `mixin_call_hierarchy` | `className`, `methodName`, `parameterTypes?`, `direction=callers`, `maxDepth=3`, `maxResults=50` |
-| `mixin_super_methods` | `className`, `methodName`, `parameterTypes?` |
+| `mixin_find_references` | `className`, `memberName?`, `parameterTypes?`, `methodDescriptor?`, `maxResults=100` |
+| `mixin_call_hierarchy` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?`, `direction=callers`, `maxDepth=3`, `maxResults=50` |
+| `mixin_super_methods` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?` |
+| `mixin_find_targeting_mixins` | `className`, `methodName?`, `maxResults=50` |
 
-Tools that take `parameterTypes` require it for overloaded methods. For parameterless
-methods, pass `parameterTypes: []` (empty array). Tool descriptions include this guidance.
+Tools that take `parameterTypes` also accept `methodDescriptor` (JVM format, e.g.
+`(Lnet/minecraft/world/effect/MobEffectInstance;)Z`). For parameterless methods,
+pass `parameterTypes: []` (empty array). Error messages list available overloads with
+ready-to-copy `parameterTypes` values.
 
 ### Bytecode Inspection
 
@@ -1011,9 +1015,11 @@ across classes never opened.
 
 ---
 
-## 13. Planned Enhancements
+## 13. Enhancements (Implemented)
 
-### 13.1 JVM Method Descriptor Support (`methodDescriptor` parameter)
+> All three enhancements below are implemented and tested as of this revision.
+
+### 13.1 JVM Method Descriptor Support (`methodDescriptor` parameter) — DONE
 
 **Problem:** Tools that disambiguate overloaded methods (`mixin_call_hierarchy`,
 `mixin_find_references`, `mixin_super_methods`) require `parameterTypes` as an array
@@ -1061,7 +1067,9 @@ currently accept `parameterTypes`. If provided, it takes precedence over `parame
 5. **Tool description updates:** Document `methodDescriptor` as accepting the JVM format
    agents already see in mixin annotations (e.g. `"(Lnet/minecraft/...;)V"`).
 
-### 13.2 Vanilla Minecraft Source Root Coverage
+### 13.2 Vanilla Minecraft Source Root Coverage — PARTIAL (diagnostic tool done)
+
+> **Step 1 implemented:** `mixin_debug_roots` tool lists all source roots with types and sample paths.
 
 **Problem:** `mixin_search_in_deps` and `mixin_get_dep_source` search
 `OrderRootType.SOURCES` roots and `AdditionalLibraryRootsProvider` synthetic roots.
@@ -1101,7 +1109,9 @@ excluded from decompilation because the mod loader already provides a form of so
 4. **Interim mitigation:** Already implemented — `mixin_get_dep_source` now suggests
    `mixin_find_class` with `includeSource=true` when a `net/minecraft/` path fails.
 
-### 13.3 Mixin Conflict Detection Tool (`mixin_find_targeting_mixins`)
+### 13.3 Mixin Conflict Detection Tool (`mixin_find_targeting_mixins`) — DONE
+
+> **Status:** Implemented. Phase 1 (annotation search) and Phase 2 (regex fallback) both implemented.
 
 **Problem:** Discovering that another mod's mixin targets the same method you're
 injecting into currently requires accidental discovery via `mixin_find_references`

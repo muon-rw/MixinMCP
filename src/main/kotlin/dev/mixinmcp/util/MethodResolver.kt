@@ -6,8 +6,9 @@ import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiMethod
 
 /**
- * Resolves methods within a class by name and optional parameter type list.
- * Uses FqcnResolver and GlobalSearchScope.allScope for dependency support.
+ * Resolves methods within a class by name and optional parameter type list
+ * or JVM method descriptor. Uses FqcnResolver and GlobalSearchScope.allScope
+ * for dependency support.
  */
 object MethodResolver {
 
@@ -43,6 +44,48 @@ object MethodResolver {
     }
 
     /**
+     * Resolves a method by JVM descriptor. Tries PSI matching first; if that fails
+     * (e.g. remapped names differ), falls back to bytecode-level match by exact
+     * descriptor and maps back to PSI by parameter count.
+     */
+    fun resolveByDescriptor(
+        project: Project,
+        className: String,
+        methodName: String,
+        descriptor: String,
+    ): PsiMethod? {
+        return ReadAction.compute<PsiMethod?, Throwable> {
+            val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
+                ?: return@compute null
+
+            val methods: List<PsiMethod> = findMethodsByName(psiClass, methodName)
+            if (methods.isEmpty()) return@compute null
+
+            val canonicalTypes: List<String> = DescriptorParser.parseParameterTypes(descriptor)
+            if (canonicalTypes.isEmpty()) return@compute null
+
+            val parameterTypes: List<String> = DescriptorParser.toParameterTypesFormat(canonicalTypes)
+            val psiMatched: List<PsiMethod> = methods.filter { matchesDescriptorTypes(it, canonicalTypes, parameterTypes) }
+            if (psiMatched.isNotEmpty()) return@compute psiMatched.first()
+
+            val classBytes: ByteArray = ClassFileLocator.locate(project, className)
+                ?: return@compute null
+            val analysis: BytecodeAnalyzer.ClassAnalysis = BytecodeAnalyzer.analyze(classBytes, false)
+            val bytecodeMatch: BytecodeAnalyzer.MethodInfo? = analysis.methods.find { m ->
+                m.name == methodName && m.descriptor == descriptor
+            }
+            if (bytecodeMatch == null) return@compute null
+
+            val paramCount: Int = canonicalTypes.size
+            val sameParamCount: List<PsiMethod> = methods.filter { it.parameterList.parametersCount == paramCount }
+            if (sameParamCount.size == 1) return@compute sameParamCount.first()
+            if (sameParamCount.isEmpty()) return@compute null
+
+            sameParamCount.first()
+        }
+    }
+
+    /**
      * Convenience: resolve a single method, erroring if ambiguous.
      */
     fun resolveSingle(
@@ -50,15 +93,24 @@ object MethodResolver {
         className: String,
         methodName: String,
         parameterTypes: List<String>? = null,
+        methodDescriptor: String? = null,
     ): PsiMethod? {
-        val resolution: Resolution = resolveDetailed(project, className, methodName, parameterTypes)
+        val resolution: Resolution = resolveDetailed(
+            project, className, methodName,
+            parameterTypes = parameterTypes,
+            methodDescriptor = methodDescriptor,
+        )
         return (resolution as? Resolution.Found)?.method
     }
 
     /**
      * Resolves a single method with full diagnostics. Returns [Resolution.Found] on
      * success, or [Resolution.Error] with an actionable message listing overloads,
-     * suggesting parameterTypes, or noting that the class/method doesn't exist.
+     * suggesting parameterTypes or methodDescriptor, or noting that the class/method
+     * doesn't exist.
+     *
+     * If both methodDescriptor and parameterTypes are provided, methodDescriptor
+     * takes precedence. Error messages show both formats when applicable.
      *
      * Must be called inside ReadAction when invoked from tool methods (the tools
      * already wrap their logic in ReadAction.compute).
@@ -68,6 +120,7 @@ object MethodResolver {
         className: String,
         methodName: String,
         parameterTypes: List<String>? = null,
+        methodDescriptor: String? = null,
     ): Resolution {
         return ReadAction.compute<Resolution, Throwable> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
@@ -81,14 +134,51 @@ object MethodResolver {
                 )
             }
 
-            if (parameterTypes != null) {
-                val matched: List<PsiMethod> = methods.filter { matchesParameterTypes(it, parameterTypes) }
+            val effectiveTypes: List<String>? = when {
+                !methodDescriptor.isNullOrBlank() -> {
+                    val canonical: List<String> = DescriptorParser.parseParameterTypes(methodDescriptor)
+                    if (canonical.isEmpty()) {
+                        return@compute Resolution.Error(
+                            "Invalid method descriptor: '$methodDescriptor'. Expected format: (params)returnType, e.g. (Lnet/minecraft/world/entity/Entity;)V",
+                        )
+                    }
+                    DescriptorParser.toParameterTypesFormat(canonical)
+                }
+                parameterTypes != null -> parameterTypes
+                else -> null
+            }
+
+            if (effectiveTypes != null) {
+                val canonicalTypes: List<String>? = if (!methodDescriptor.isNullOrBlank()) {
+                    DescriptorParser.parseParameterTypes(methodDescriptor)
+                } else null
+
+                val matched: List<PsiMethod> = if (canonicalTypes != null) {
+                    methods.filter { matchesDescriptorTypes(it, canonicalTypes, effectiveTypes) }
+                } else {
+                    methods.filter { matchesParameterTypes(it, effectiveTypes) }
+                }
+
                 if (matched.isNotEmpty()) {
                     return@compute Resolution.Found(matched.first())
                 }
+
+                val byDescriptor: PsiMethod? = if (!methodDescriptor.isNullOrBlank()) {
+                    resolveByDescriptor(project, className, methodName, methodDescriptor)
+                } else null
+                if (byDescriptor != null) {
+                    return@compute Resolution.Found(byDescriptor)
+                }
+
                 return@compute Resolution.Error(buildString {
-                    append("No overload of ${psiClass.qualifiedName}#$methodName matches parameterTypes $parameterTypes.")
-                    append(" Available overloads:\n")
+                    append("No overload of ${psiClass.qualifiedName}#$methodName matches ")
+                    if (!methodDescriptor.isNullOrBlank()) {
+                        append("methodDescriptor '$methodDescriptor'")
+                        append(" (parameterTypes equivalent: $effectiveTypes)")
+                    } else {
+                        append("parameterTypes $effectiveTypes")
+                    }
+                    append(".\n Available overloads:\n")
                     for (sig in formatOverloads(methods)) {
                         append("  $sig\n")
                     }
@@ -101,7 +191,7 @@ object MethodResolver {
 
             Resolution.Error(buildString {
                 append("Multiple overloads of ${psiClass.qualifiedName}#$methodName.")
-                append(" Pass parameterTypes to disambiguate:\n")
+                append(" Pass parameterTypes or methodDescriptor to disambiguate:\n")
                 for (sig in formatOverloads(methods)) {
                     append("  $sig\n")
                 }
@@ -122,6 +212,25 @@ object MethodResolver {
                 param.type.presentableText == expectedType ||
                     param.type.canonicalText == expectedType
             }
+    }
+
+    /**
+     * Matches a PsiMethod against descriptor-derived types. Tries canonical and
+     * simple names since PSI may use either (remapped vs. fully-qualified).
+     */
+    private fun matchesDescriptorTypes(
+        method: PsiMethod,
+        canonicalTypes: List<String>,
+        simpleTypes: List<String>,
+    ): Boolean {
+        val params = method.parameterList.parameters
+        if (params.size != canonicalTypes.size) return false
+        return params.zip(canonicalTypes.zip(simpleTypes)).all { (param, expected) ->
+            val (canonical, simple) = expected
+            param.type.canonicalText == canonical ||
+                param.type.presentableText == canonical ||
+                param.type.presentableText == simple
+        }
     }
 
     private fun formatOverloads(methods: List<PsiMethod>): List<String> {
