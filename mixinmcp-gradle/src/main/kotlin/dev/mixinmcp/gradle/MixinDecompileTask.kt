@@ -1,7 +1,11 @@
 package dev.mixinmcp.gradle
 
 import org.gradle.api.DefaultTask
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedArtifactResult
+import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.options.Option
 import org.jetbrains.java.decompiler.api.Decompiler
@@ -25,6 +29,9 @@ import java.nio.file.Paths
  * count (default 2). Override with --threads. If you still hit OOM, increase the
  * Gradle daemon heap in gradle.properties:
  *   org.gradle.jvmargs=-Xmx4g
+ *
+ * Configuration cache: resolvedArtifactsProvider is set at configuration time by
+ * the plugin. No Task.project access at execution time.
  */
 abstract class MixinDecompileTask : DefaultTask() {
 
@@ -32,27 +39,37 @@ abstract class MixinDecompileTask : DefaultTask() {
     @get:Option(option = "threads", description = "Vineflower decompiler threads (default 2). Lower = less memory.")
     var threads: Int = 2
 
+    /**
+     * Set by MixinDecompilePlugin at configuration time. Uses ArtifactCollection.resolvedArtifacts
+     * Provider for configuration cache compatibility (no project access at execution).
+     */
+    @get:Internal
+    var resolvedArtifactsProvider: Provider<Set<ResolvedArtifactResult>>? = null
+
     private val cacheRoot: Path
         get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
 
     @TaskAction
     fun decompile() {
-        val runtimeClasspath = project.configurations.findByName("runtimeClasspath") ?: run {
-            logger.lifecycle("No runtimeClasspath configuration found, skipping decompilation")
+        val provider = resolvedArtifactsProvider ?: run {
+            logger.lifecycle("No runtimeClasspath/compileClasspath configuration found, skipping decompilation")
             return
         }
 
-        val resolvedArtifacts = runtimeClasspath.resolvedConfiguration.resolvedArtifacts
-        val artifactsByModule = resolvedArtifacts.groupBy {
-            "${it.moduleVersion.id.group}:${it.moduleVersion.id.name}:${it.moduleVersion.id.version}"
-        }
+        val resolvedArtifacts = provider.get()
+        val artifactsByModule = resolvedArtifacts
+            .filter { it.variant.owner is ModuleComponentIdentifier }
+            .groupBy { artifact ->
+                val owner = artifact.variant.owner as ModuleComponentIdentifier
+                "${owner.group}:${owner.module}:${owner.version}"
+            }
 
         val withoutSources = artifactsByModule
             .filter { (_, artifacts) ->
-                artifacts.none { it.classifier == "sources" }
+                artifacts.none { isSourcesArtifact(it) }
             }
             .flatMap { (_, artifacts) ->
-                artifacts.filter { it.extension == "jar" }
+                artifacts.filter { it.file.extension.equals("jar", ignoreCase = true) }
             }
             .filter { artifact ->
                 !isJdkJar(artifact.file)
@@ -76,7 +93,8 @@ abstract class MixinDecompileTask : DefaultTask() {
             val hash = DecompilationManifest.computeArtifactHash(jarPath, jarSize, jarModified)
             currentJarHashes.add(hash)
 
-            val libraryName = "${artifact.moduleVersion.id.group}:${artifact.moduleVersion.id.name}:${artifact.moduleVersion.id.version}"
+            val owner = artifact.variant.owner as ModuleComponentIdentifier
+            val libraryName = "${owner.group}:${owner.module}:${owner.version}"
             val sizeMb = jarSize / 1024 / 1024
             val sizeKb = jarSize / 1024
             val sizeStr = if (sizeMb > 0) "${sizeMb}MB" else "${sizeKb}KB"
@@ -149,6 +167,12 @@ abstract class MixinDecompileTask : DefaultTask() {
 
         logger.lifecycle("MixinMCP decompilation complete: " +
             "$decompiled decompiled, $cached cached, $failed failed (of $total)")
+    }
+
+    private fun isSourcesArtifact(artifact: ResolvedArtifactResult): Boolean {
+        val name = artifact.file.name.lowercase()
+        val displayName = artifact.id.displayName.lowercase()
+        return name.contains("-sources") || displayName.contains("sources")
     }
 
     private fun isJdkJar(jarFile: File): Boolean {

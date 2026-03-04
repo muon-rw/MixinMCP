@@ -19,13 +19,21 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.psi.JavaRecursiveElementVisitor
+import com.intellij.psi.PsiAnnotation
+import com.intellij.psi.PsiAnnotationMemberValue
+import com.intellij.psi.PsiArrayInitializerMemberValue
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiClassObjectAccessExpression
+import com.intellij.psi.PsiClassType
 import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.PsiType
 import com.intellij.psi.PsiField
+import com.intellij.psi.PsiLiteralExpression
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.PsiMethodCallExpression
 import com.intellij.psi.PsiReference
 import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.searches.AnnotatedElementsSearch
 import com.intellij.psi.search.PsiShortNamesCache
 import com.intellij.psi.search.ProjectScope
 import com.intellij.openapi.roots.LibraryOrderEntry
@@ -203,6 +211,50 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
+    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar) and MixinMCP decompiled cache. Use this to diagnose why vanilla Minecraft or other dependency sources may not appear in search. Shows root URL, type, and sample file paths per root. maxSamplesPerRoot: 5 default.")
+    @Suppress("unused")
+    suspend fun mixin_debug_roots(
+        maxSamplesPerRoot: Int = 5,
+        projectPath: String? = null,
+    ): McpToolCallResult {
+        val project = coroutineContext.projectOrNull
+            ?: return McpToolCallResult.error("No project open")
+
+        val result: String = ReadAction.compute<String, Throwable> {
+            val roots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
+            buildString {
+                appendLine("=== Source roots (mixin_search_in_deps / mixin_get_dep_source scope) ===")
+                appendLine()
+                appendLine("These roots are searched by mixin_search_in_deps and mixin_get_dep_source.")
+                appendLine("If vanilla Minecraft (net/minecraft/*) is missing, run ./gradlew mixinDecompile")
+                appendLine("or check that your mod loader attaches Minecraft sources.")
+                appendLine()
+
+                for ((i, info: SourceRootInfo) in roots.withIndex()) {
+                    appendLine("--- Root ${i + 1}: ${info.typeLabel} ---")
+                    appendLine("  URL: ${info.root.url}")
+                    val samples: List<String> = collectSamplePaths(info.root, maxSamplesPerRoot)
+                    if (samples.isNotEmpty()) {
+                        appendLine("  Sample paths:")
+                        for (p in samples) {
+                            appendLine("    $p")
+                        }
+                    } else {
+                        appendLine("  (no .java files found or root empty)")
+                    }
+                    appendLine()
+                }
+
+                if (roots.isEmpty()) {
+                    appendLine("No source roots found. Add dependencies and run ./gradlew mixinDecompile for compiled-only jars.")
+                }
+            }
+        }
+
+        return McpToolCallResult.text(result)
+    }
+
+    @McpTool
     @McpDescription("Searches dependency/library sources with a regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Returns url (pass to mixin_get_dep_source) and matching line snippets with matches in ||markers||. regexPattern: prefer simple single-term patterns; make separate calls for multiple patterns. fileMask: glob matched against the full file path inside the jar (e.g. *minecraft* matches net/minecraft/…/Level.java; *LivingEntity* matches that specific class); defaults to all files. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
@@ -281,18 +333,69 @@ class MixinMcpToolset : McpToolset {
      * Must be called inside ReadAction.
      */
     private fun collectAllSourceRoots(project: Project): List<VirtualFile> {
-        val fromLibraries = mutableListOf<VirtualFile>()
-        val fromSynthetic = AdditionalLibraryRootsProvider.EP_NAME.extensionList
-            .flatMap { it.getAdditionalProjectLibraries(project) }
-            .flatMap { it.sourceRoots }
+        return collectSourceRootsWithMetadata(project).map { it.root }
+    }
+
+    /**
+     * Collects source roots with type metadata for diagnostic output.
+     * Returns (root, typeLabel) pairs. Must be called inside ReadAction.
+     */
+    private fun collectSourceRootsWithMetadata(project: Project): List<SourceRootInfo> {
+        val seen = mutableSetOf<VirtualFile>()
+        val result = mutableListOf<SourceRootInfo>()
+
         for (module in ModuleManager.getInstance(project).modules) {
             for (entry in ModuleRootManager.getInstance(module).orderEntries) {
                 if (entry is LibraryOrderEntry) {
-                    entry.library?.getFiles(OrderRootType.SOURCES)?.toList()?.let { fromLibraries.addAll(it) }
+                    val lib = entry.library ?: continue
+                    val libName: String = lib.name ?: "(unnamed)"
+                    lib.getFiles(OrderRootType.SOURCES)?.forEach { root ->
+                        if (seen.add(root)) {
+                            result.add(SourceRootInfo(root, "Library SOURCES: $libName"))
+                        }
+                    }
                 }
             }
         }
-        return (fromLibraries + fromSynthetic).distinct()
+
+        for (provider in AdditionalLibraryRootsProvider.EP_NAME.extensionList) {
+            for (synthLib in provider.getAdditionalProjectLibraries(project)) {
+                for (root in synthLib.sourceRoots) {
+                    if (seen.add(root)) {
+                        result.add(SourceRootInfo(root, "Decompiled cache (MixinMCP)"))
+                    }
+                }
+            }
+        }
+
+        return result
+    }
+
+    private data class SourceRootInfo(val root: VirtualFile, val typeLabel: String)
+
+    /**
+     * Collects up to maxSamples .java file paths from a root (for diagnostic output).
+     */
+    private fun collectSamplePaths(root: VirtualFile, maxSamples: Int): List<String> {
+        val samples = mutableListOf<String>()
+        collectSamplePathsRecursive(root, root, samples, maxSamples)
+        return samples
+    }
+
+    private fun collectSamplePathsRecursive(
+        vf: VirtualFile,
+        root: VirtualFile,
+        samples: MutableList<String>,
+        maxSamples: Int,
+    ) {
+        if (samples.size >= maxSamples) return
+        if (vf.isDirectory) {
+            for (child in vf.children) {
+                collectSamplePathsRecursive(child, root, samples, maxSamples)
+            }
+        } else if (vf.name.endsWith(".java")) {
+            samples.add(getPathForMask(root, vf))
+        }
     }
 
     /**
@@ -410,7 +513,16 @@ class MixinMcpToolset : McpToolset {
             val hint: String = if (!url.isNullOrBlank()) {
                 "Pass the exact jar:// URL from mixin_search_in_deps results, or try the `path` parameter (e.g. io/redspace/.../Utils.java)."
             } else {
-                "Path not found in dependency sources. Use mixin_search_in_deps to find the file, then pass its `url` to this tool."
+                val normalizedPath: String = path!!.trim()
+                if (normalizedPath.startsWith("net/minecraft/")) {
+                    "Vanilla Minecraft classes may not be available via path lookup " +
+                        "(they live in the merged jar, not the decompiled cache). " +
+                        "Use mixin_find_class with includeSource=true to read the source, " +
+                        "or mixin_search_in_deps to get the jar url."
+                } else {
+                    "Path not found in dependency sources. " +
+                        "Use mixin_search_in_deps to find the file, then pass its `url` to this tool."
+                }
             }
             return McpToolCallResult.error("File not found. $hint")
         }
@@ -550,16 +662,30 @@ class MixinMcpToolset : McpToolset {
             methodDescriptor,
         )
 
-        return when {
-            result != null -> McpToolCallResult.text(
-                buildString {
-                    appendLine("=== $className#$methodName (bytecode) ===")
-                    appendLine()
-                    append(result)
-                },
-            )
-            else -> McpToolCallResult.error("Method not found: $className#$methodName")
+        if (result != null) {
+            return McpToolCallResult.text(buildString {
+                appendLine("=== $className#$methodName (bytecode) ===")
+                appendLine()
+                append(result)
+            })
         }
+
+        val analysis: BytecodeAnalyzer.ClassAnalysis = BytecodeAnalyzer.analyze(classBytes, false)
+        val similar: List<BytecodeAnalyzer.MethodInfo> = analysis.methods
+            .filter { it.name == methodName }
+        return McpToolCallResult.error(buildString {
+            if (similar.isEmpty()) {
+                appendLine("No method named '$methodName' in $className bytecode.")
+                val names: List<String> = analysis.methods.map { it.name }.distinct().sorted()
+                appendLine("Available methods: ${names.joinToString(", ")}")
+            } else {
+                appendLine("No overload of $className#$methodName matches descriptor '$methodDescriptor'.")
+                appendLine("Available overloads:")
+                for (m in similar) {
+                    appendLine("  ${m.name}${m.descriptor}")
+                }
+            }
+        })
     }
 
     @McpTool
@@ -674,22 +800,264 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns the super method declaration chain for a method. Use this tool to confirm where a method is originally declared before targeting it in a mixin. Shows all overrides from most specific to most general. For overloaded methods, pass parameterTypes to disambiguate (e.g. [\"E\"] for add(E)). For parameterless methods, pass parameterTypes: [].")
+    @McpDescription("Finds all @Mixin classes that target a given class (and optionally a specific method). Use this for cross-mod conflict analysis — discover which other mods inject into the same target. Returns mixin FQCN, injection points (@Inject, @Redirect, @Overwrite, etc.), and source location. methodName: optionally narrow to mixins targeting that method. maxResults: 50 default.")
     @Suppress("unused")
-    suspend fun mixin_super_methods(
+    suspend fun mixin_find_targeting_mixins(
         className: String,
-        methodName: String,
-        parameterTypes: List<String>? = null,
+        methodName: String? = null,
+        maxResults: Int = 50,
         projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val result: String? = ReadAction.compute<String?, Throwable> {
-            val psiMethod: PsiMethod = MethodResolver.resolveSingle(
-                project, className, methodName, parameterTypes,
-            ) ?: return@compute null
+        val result: String = ReadAction.compute<String, Throwable> {
+            val normalizedTarget: String = className.replace('/', '.')
+            val mixinAnnotationClass: PsiClass? =
+                FqcnResolver.resolveNested(project, "org.spongepowered.asm.mixin.Mixin")
 
+            val mixins: MutableList<Pair<PsiClass, List<String>>> = mutableListOf()
+
+            if (mixinAnnotationClass != null) {
+                val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
+                val query = AnnotatedElementsSearch.searchPsiClasses(mixinAnnotationClass, scope)
+                query.forEach { psiClass: PsiClass ->
+                    if (mixins.size >= maxResults) return@forEach
+                    val targets: List<String> = extractMixinTargets(psiClass)
+                    if (targets.any { normalizeForMatch(it) == normalizeForMatch(normalizedTarget) }) {
+                        val injections: List<String> = if (methodName != null) {
+                            extractInjectionsForMethod(psiClass, methodName)
+                        } else {
+                            extractAllInjections(psiClass)
+                        }
+                        if (methodName == null || injections.isNotEmpty()) {
+                            mixins.add(psiClass to injections)
+                        }
+                    }
+                }
+            }
+
+            if (mixins.isEmpty()) {
+                val fallback: List<Pair<String, String>> = findTargetingMixinsByRegex(project, normalizedTarget, methodName, maxResults)
+                buildString {
+                    appendLine("=== Mixins targeting $normalizedTarget${if (methodName != null) "#$methodName" else ""} ===")
+                    appendLine()
+                    if (fallback.isEmpty()) {
+                        appendLine("No mixins found targeting this class.")
+                        if (mixinAnnotationClass == null) {
+                            appendLine("(Mixin library may not be on classpath — add org.spongepowered:mixin as dependency)")
+                        }
+                    } else {
+                        for ((i, pair) in fallback.withIndex()) {
+                            appendLine("${i + 1}. ${pair.first}")
+                            appendLine("   Source: ${pair.second}")
+                            appendLine()
+                        }
+                    }
+                }
+            } else {
+                buildString {
+                    appendLine("=== Mixins targeting $normalizedTarget${if (methodName != null) "#$methodName" else ""} ===")
+                    appendLine()
+                    for ((i, pair) in mixins.withIndex()) {
+                        val (psiClass, injections) = pair
+                        val fqcn: String = psiClass.qualifiedName ?: psiClass.name ?: "?"
+                        val source: String = psiClass.containingFile?.virtualFile?.path ?: "(unknown)"
+                        appendLine("${i + 1}. $fqcn")
+                        for (inj in injections.take(10)) {
+                            appendLine("   $inj")
+                        }
+                        if (injections.size > 10) {
+                            appendLine("   ... (${injections.size - 10} more)")
+                        }
+                        appendLine("   Source: $source")
+                        appendLine()
+                    }
+                    if (mixins.size >= maxResults) {
+                        appendLine("  ... (truncated at $maxResults results)")
+                    }
+                }
+            }
+        }
+
+        return McpToolCallResult.text(result)
+    }
+
+    private fun normalizeForMatch(name: String): String =
+        name.replace('/', '.').trim()
+
+    private fun extractMixinTargets(psiClass: PsiClass): List<String> {
+        val mixinAnnotation: PsiAnnotation = psiClass.modifierList?.annotations?.find {
+            it.qualifiedName == "org.spongepowered.asm.mixin.Mixin" || it.qualifiedName?.endsWith(".Mixin") == true
+        }
+            ?: return emptyList()
+
+        val targets = mutableListOf<String>()
+
+        fun collectFromValue(value: PsiAnnotationMemberValue?) {
+            when (value) {
+                is PsiClassObjectAccessExpression -> {
+                    val operandType: PsiType = value.operand.type
+                    if (operandType is PsiClassType) {
+                        operandType.resolve()?.qualifiedName?.let { targets.add(it) }
+                    }
+                }
+                is PsiArrayInitializerMemberValue -> {
+                    for (init in value.initializers) {
+                        collectFromValue(init)
+                    }
+                }
+                is PsiLiteralExpression -> {
+                    (value.value as? String)?.let { targets.add(it) }
+                }
+                else -> {}
+            }
+        }
+
+        mixinAnnotation.findAttributeValue("value")?.let { collectFromValue(it) }
+        mixinAnnotation.findAttributeValue("targets")?.let { collectFromValue(it) }
+        return targets
+    }
+
+    private fun extractAllInjections(psiClass: PsiClass): List<String> {
+        val injectionNames: Set<String> = setOf(
+            "Inject", "Redirect", "Overwrite", "ModifyArg", "ModifyVariable",
+            "ModifyConstant", "ModifyArgs", "ModifyExpressionValue", "WrapOperation",
+        )
+        val result = mutableListOf<String>()
+        for (method in psiClass.methods) {
+            for (ann in method.modifierList?.annotations ?: emptyArray()) {
+                val shortName: String? = ann.qualifiedName?.substringAfterLast('.')
+                if (shortName != null && shortName in injectionNames) {
+                    result.add(ann.text.trim())
+                }
+            }
+        }
+        return result
+    }
+
+    private fun extractInjectionsForMethod(psiClass: PsiClass, methodName: String): List<String> {
+        val injectionNames: Set<String> = setOf(
+            "Inject", "Redirect", "Overwrite", "ModifyArg", "ModifyVariable",
+            "ModifyConstant", "ModifyArgs", "ModifyExpressionValue", "WrapOperation",
+        )
+        val result = mutableListOf<String>()
+        for (method in psiClass.methods) {
+            for (ann in method.modifierList?.annotations ?: emptyArray()) {
+                val shortName: String? = ann.qualifiedName?.substringAfterLast('.')
+                if (shortName != null && shortName in injectionNames) {
+                    val methodValues: List<String> = extractMethodAttributeValues(ann.findAttributeValue("method"))
+                    if (methodValues.any { methodTargets(it, methodName) }) {
+                        result.add(ann.text.trim())
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private fun extractMethodAttributeValues(value: PsiAnnotationMemberValue?): List<String> {
+        return when (value) {
+            is PsiLiteralExpression -> (value.value as? String)?.let { listOf(it) } ?: emptyList()
+            is PsiArrayInitializerMemberValue -> value.initializers
+                .mapNotNull { (it as? PsiLiteralExpression)?.value as? String }
+            else -> emptyList()
+        }
+    }
+
+    private fun methodTargets(methodStr: String, methodName: String): Boolean {
+        return methodStr == methodName ||
+            methodStr.startsWith("$methodName(") ||
+            methodStr.contains(";$methodName(") ||
+            methodStr.endsWith(";$methodName")
+    }
+
+    private fun findTargetingMixinsByRegex(
+        project: Project,
+        className: String,
+        methodName: String?,
+        maxResults: Int,
+    ): List<Pair<String, String>> {
+        val escapedClass: String = Pattern.quote(className)
+        val pattern: Pattern = try {
+            if (methodName != null) {
+                Pattern.compile("@Mixin.*$escapedClass.*$methodName", Pattern.DOTALL)
+            } else {
+                Pattern.compile("@Mixin.*$escapedClass", Pattern.DOTALL)
+            }
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        val results: MutableList<Pair<String, String>> = mutableListOf()
+        val classPattern: Pattern = Pattern.compile("(?:class|interface)\\s+(\\S+)\\s+")
+        ReadAction.compute<Unit, Throwable> {
+            for (root in collectAllSourceRoots(project)) {
+                if (results.size >= maxResults) break
+                collectMixinRegexMatches(root, root, pattern, classPattern, results, maxResults)
+            }
+        }
+        return results
+    }
+
+    private fun collectMixinRegexMatches(
+        vf: VirtualFile,
+        root: VirtualFile,
+        pattern: Pattern,
+        classPattern: Pattern,
+        results: MutableList<Pair<String, String>>,
+        maxResults: Int,
+    ) {
+        if (results.size >= maxResults) return
+        if (vf.isDirectory) {
+            for (child in vf.children) {
+                collectMixinRegexMatches(child, root, pattern, classPattern, results, maxResults)
+            }
+        } else if (vf.name.endsWith(".java")) {
+            val content: String = try {
+                String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+            } catch (_: Exception) {
+                return
+            }
+            if (pattern.matcher(content).find()) {
+                val classMatcher = classPattern.matcher(content)
+                val classNameFound: String = if (classMatcher.find()) {
+                    classMatcher.group(1) ?: vf.nameWithoutExtension
+                } else {
+                    vf.nameWithoutExtension
+                }
+                val path: String = getPathForMask(root, vf)
+                val fqcn: String = path.removeSuffix(".java").replace("/", ".")
+                if (results.none { it.first == fqcn }) {
+                    results.add(fqcn to vf.path)
+                }
+            }
+        }
+    }
+
+    @McpTool
+    @McpDescription("Returns the super method declaration chain for a method. Use this tool to confirm where a method is originally declared before targeting it in a mixin. Shows all overrides from most specific to most general. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z) — same as in @Inject(method = \"...\"). For parameterless methods, pass parameterTypes: [].")
+    @Suppress("unused")
+    suspend fun mixin_super_methods(
+        className: String,
+        methodName: String,
+        parameterTypes: List<String>? = null,
+        methodDescriptor: String? = null,
+        projectPath: String? = null,
+    ): McpToolCallResult {
+        val project = coroutineContext.projectOrNull
+            ?: return McpToolCallResult.error("No project open")
+
+        val resolution = MethodResolver.resolveDetailed(
+            project, className, methodName,
+            parameterTypes = parameterTypes,
+            methodDescriptor = methodDescriptor,
+        )
+        if (resolution is MethodResolver.Resolution.Error) {
+            return McpToolCallResult.error(resolution.message)
+        }
+        val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
+
+        val result: String = ReadAction.compute<String, Throwable> {
             val superMethods: Array<PsiMethod> = psiMethod.findSuperMethods(false)
             val containingClass: PsiClass? = psiMethod.containingClass
 
@@ -711,35 +1079,74 @@ class MixinMcpToolset : McpToolset {
             }
         }
 
-        return when {
-            result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Method not found: $className#$methodName")
-        }
+        return McpToolCallResult.text(result)
     }
 
     @McpTool
-    @McpDescription("Find all references to a class or member across project and dependencies. Without memberName: references to the class. With memberName: references to that method/field. For overloaded methods, pass parameterTypes to disambiguate. For parameterless methods, pass parameterTypes: []. maxResults: 100 default.")
+    @McpDescription("Find all references to a class or member across project and dependencies. Without memberName: references to the class. With memberName: references to that method/field. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods, pass parameterTypes: []. maxResults: 100 default.")
     @Suppress("unused")
     suspend fun mixin_find_references(
         className: String,
         memberName: String? = null,
         parameterTypes: List<String>? = null,
+        methodDescriptor: String? = null,
         maxResults: Int = 100,
         projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
+        if (memberName != null) {
+            val resolution = MethodResolver.resolveDetailed(
+                project, className, memberName,
+                parameterTypes = parameterTypes,
+                methodDescriptor = methodDescriptor,
+            )
+            if (resolution is MethodResolver.Resolution.Error) {
+                return McpToolCallResult.error(resolution.message)
+            }
+            val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
+
+            val result: String = ReadAction.compute<String, Throwable> {
+                val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
+                val query = ReferencesSearch.search(psiMethod, scope, true)
+                val refs: MutableList<PsiReference> = mutableListOf()
+                var count: Int = 0
+                query.forEach { ref ->
+                    if (count >= maxResults) return@forEach
+                    refs.add(ref)
+                    count++
+                }
+
+                buildString {
+                    appendLine("=== References to $className#$memberName ===")
+                    appendLine()
+                    for (ref: PsiReference in refs) {
+                        val element = ref.element
+                        val file = element.containingFile
+                        val vf = file?.virtualFile
+                        val path: String = vf?.path ?: "(unknown)"
+                        val line: Int = element.containingFile?.let { f ->
+                            val doc = PsiDocumentManager.getInstance(project).getDocument(f)
+                            doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
+                        } ?: 0
+                        appendLine("  $path:$line  ${element.text.take(80)}${if (element.text.length > 80) "..." else ""}")
+                    }
+                    if (refs.size >= maxResults) {
+                        appendLine("  ... (truncated at $maxResults results)")
+                    }
+                }
+            }
+            return McpToolCallResult.text(result)
+        }
+
+        // Class-level reference search
         val result: String? = ReadAction.compute<String?, Throwable> {
+            val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
+                ?: return@compute null
+
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
-
-            val elementToSearch = if (memberName == null) {
-                FqcnResolver.resolveNested(project, className)
-            } else {
-                MethodResolver.resolveSingle(project, className, memberName, parameterTypes)
-            } ?: return@compute null
-
-            val query = ReferencesSearch.search(elementToSearch, scope, true)
+            val query = ReferencesSearch.search(psiClass, scope, true)
             val refs: MutableList<PsiReference> = mutableListOf()
             var count: Int = 0
             query.forEach { ref ->
@@ -749,8 +1156,7 @@ class MixinMcpToolset : McpToolset {
             }
 
             buildString {
-                val targetDesc: String = if (memberName == null) className else "$className#$memberName"
-                appendLine("=== References to $targetDesc ===")
+                appendLine("=== References to $className ===")
                 appendLine()
                 for (ref: PsiReference in refs) {
                     val element = ref.element
@@ -771,17 +1177,18 @@ class MixinMcpToolset : McpToolset {
 
         return when {
             result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Element not found: $className${memberName?.let { "#$it" } ?: ""}")
+            else -> McpToolCallResult.error("Class not found: $className")
         }
     }
 
     @McpTool
-    @McpDescription("Finds callers or callees of a method. Use this tool to trace execution flow when writing mixins. direction: callers (default) — finds call sites; callees — walks method body for outgoing calls. For overloaded methods, pass parameterTypes to disambiguate. For parameterless methods, pass parameterTypes: []. maxDepth: 3 default, maxResults: 50 default.")
+    @McpDescription("Finds callers or callees of a method. Use this tool to trace execution flow when writing mixins. direction: callers (default) — finds call sites; callees — walks method body for outgoing calls. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods, pass parameterTypes: []. maxDepth: 3 default, maxResults: 50 default.")
     @Suppress("unused")
     suspend fun mixin_call_hierarchy(
         className: String,
         methodName: String,
         parameterTypes: List<String>? = null,
+        methodDescriptor: String? = null,
         direction: String = "callers",
         maxDepth: Int = 3,
         maxResults: Int = 50,
@@ -790,11 +1197,17 @@ class MixinMcpToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val result: String? = ReadAction.compute<String?, Throwable> {
-            val psiMethod: PsiMethod = MethodResolver.resolveSingle(
-                project, className, methodName, parameterTypes,
-            ) ?: return@compute null
+        val resolution = MethodResolver.resolveDetailed(
+            project, className, methodName,
+            parameterTypes = parameterTypes,
+            methodDescriptor = methodDescriptor,
+        )
+        if (resolution is MethodResolver.Resolution.Error) {
+            return McpToolCallResult.error(resolution.message)
+        }
+        val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
+        val result: String = ReadAction.compute<String, Throwable> {
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
 
             buildString {
@@ -852,10 +1265,7 @@ class MixinMcpToolset : McpToolset {
             }
         }
 
-        return when {
-            result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Method not found: $className#$methodName")
-        }
+        return McpToolCallResult.text(result)
     }
 
     @McpTool
