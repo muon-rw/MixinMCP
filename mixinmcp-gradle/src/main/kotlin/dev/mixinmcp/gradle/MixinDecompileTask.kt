@@ -16,10 +16,17 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.attribute.FileTime
+import java.util.concurrent.TimeUnit
 
 /**
  * Decompiles dependency JARs without -sources.jar into ~/.cache/mixinmcp/decompiled/.
  * See DESIGN.md Section 11.11.
+ *
+ * Each Gradle (sub)project writes its own manifest at <projectDir>/.gradle/mixinmcp/manifest.json,
+ * while decompiled output is shared in a global content-addressed store. This allows multiloader
+ * builds and entirely separate projects to share decompilation work without interfering with
+ * each other's cache entries.
  *
  * Vineflower spawns N decompiler threads internally (default = CPU count). Each
  * thread builds an SSA variable graph per class that can consume hundreds of MB.
@@ -46,8 +53,16 @@ abstract class MixinDecompileTask : DefaultTask() {
     @get:Internal
     var resolvedArtifactsProvider: Provider<Set<ResolvedArtifactResult>>? = null
 
-    private val cacheRoot: Path
+    /** Set by MixinDecompilePlugin at configuration time. */
+    @get:Internal
+    var projectDir: File? = null
+
+    private val globalCacheRoot: Path
         get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
+
+    private val projectManifestRoot: Path
+        get() = projectDir?.toPath()?.resolve(".gradle")?.resolve("mixinmcp")
+            ?: globalCacheRoot
 
     @TaskAction
     fun decompile() {
@@ -55,6 +70,8 @@ abstract class MixinDecompileTask : DefaultTask() {
             logger.lifecycle("No runtimeClasspath/compileClasspath configuration found, skipping decompilation")
             return
         }
+
+        evictStaleCacheEntries()
 
         val resolvedArtifacts = provider.get()
         val artifactsByModule = resolvedArtifacts
@@ -76,7 +93,7 @@ abstract class MixinDecompileTask : DefaultTask() {
             }
             .sortedBy { it.file.length() }
 
-        var manifest = DecompilationManifest().load(cacheRoot)
+        var manifest = DecompilationManifest().load(projectManifestRoot)
         val currentJarHashes = mutableSetOf<String>()
         var decompiled = 0
         var cached = 0
@@ -100,14 +117,27 @@ abstract class MixinDecompileTask : DefaultTask() {
             val sizeStr = if (sizeMb > 0) "${sizeMb}MB" else "${sizeKb}KB"
             val progress = "[${index + 1}/$total]"
 
-            val existingEntry = manifest.entries[hash]
-            if (existingEntry != null && existingEntry.isValid(jarFile)) {
+            val cacheDir = globalCacheRoot.resolve(hash).toFile()
+
+            if (cacheDir.isDirectory && cacheDir.list()?.isNotEmpty() == true) {
+                if (hash !in manifest.entries) {
+                    val entry = CacheEntry(
+                        libraryName = libraryName,
+                        classesJarPath = jarPath,
+                        jarSize = jarSize,
+                        jarModified = jarModified,
+                        cachePath = cacheDir.absolutePath + File.separator,
+                        decompilerVersion = "vineflower-1.11.2",
+                        createdAt = System.currentTimeMillis(),
+                    )
+                    manifest = DecompilationManifest(manifest.entries + (hash to entry))
+                }
+                touchDirectory(cacheDir.toPath())
                 logger.lifecycle("$progress Already cached: $libraryName ($sizeStr) Skipping...")
                 cached++
                 continue
             }
 
-            val cacheDir = cacheRoot.resolve(hash).toFile()
             Files.createDirectories(cacheDir.toPath())
 
             logger.lifecycle("$progress Decompiling: $libraryName ($sizeStr)")
@@ -132,7 +162,7 @@ abstract class MixinDecompileTask : DefaultTask() {
                     createdAt = System.currentTimeMillis(),
                 )
                 manifest = DecompilationManifest(manifest.entries + (hash to entry))
-                manifest.save(cacheRoot)
+                manifest.save(projectManifestRoot)
                 decompiled++
                 logger.lifecycle("$progress Done! $libraryName")
             } catch (e: OutOfMemoryError) {
@@ -150,23 +180,44 @@ abstract class MixinDecompileTask : DefaultTask() {
             System.gc()
         }
 
-        val orphanedHashes = manifest.entries.keys - currentJarHashes
-        if (orphanedHashes.isNotEmpty()) {
-            val newEntries = manifest.entries.toMutableMap()
-            for (hash in orphanedHashes) {
-                newEntries.remove(hash)
-                val orphanDir = cacheRoot.resolve(hash)
-                if (Files.exists(orphanDir)) {
-                    deleteRecursively(orphanDir.toFile())
-                    logger.lifecycle("Removed orphaned cache: $hash")
-                }
-            }
-            manifest = DecompilationManifest(newEntries)
-            manifest.save(cacheRoot)
-        }
+        manifest = DecompilationManifest(manifest.entries.filterKeys { it in currentJarHashes })
+        manifest.save(projectManifestRoot)
 
         logger.lifecycle("MixinMCP decompilation complete: " +
             "$decompiled decompiled, $cached cached, $failed failed (of $total)")
+    }
+
+    /**
+     * Evict global cache entries whose directory hasn't been touched in 30+ days.
+     * Runs at the start of each decompile — before this project's entries are touched —
+     * so it only affects genuinely stale entries from any project.
+     */
+    private fun evictStaleCacheEntries() {
+        if (!Files.exists(globalCacheRoot)) return
+        val cutoffMs = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(30)
+        var evicted = 0
+        try {
+            Files.list(globalCacheRoot).use { stream ->
+                stream.filter { Files.isDirectory(it) }
+                    .forEach { dir ->
+                        try {
+                            if (Files.getLastModifiedTime(dir).toMillis() < cutoffMs) {
+                                deleteRecursively(dir.toFile())
+                                evicted++
+                            }
+                        } catch (_: Exception) {}
+                    }
+            }
+        } catch (_: Exception) {}
+        if (evicted > 0) {
+            logger.lifecycle("MixinMCP: evicted $evicted stale cache entries (>30 days untouched)")
+        }
+    }
+
+    private fun touchDirectory(dir: Path) {
+        try {
+            Files.setLastModifiedTime(dir, FileTime.fromMillis(System.currentTimeMillis()))
+        } catch (_: Exception) {}
     }
 
     private fun isSourcesArtifact(artifact: ResolvedArtifactResult): Boolean {

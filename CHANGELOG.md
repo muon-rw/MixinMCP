@@ -1,6 +1,12 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.5.1]
+- Fix decompilation cache handling in multiloader environments
+- Each Gradle subproject now writes its own manifest; decompiled output is shared via a global content-addressed store
+- Replace destructive per-run orphan cleanup with 30-day time-based eviction of untouched cache entries
+- IntelliJ plugin merges per-project manifests with backward-compatible fallback to the legacy global manifest
+
 ## [0.5.0]
 - New tools for finding mixins affecting target class
 - Improvements to error message feedback

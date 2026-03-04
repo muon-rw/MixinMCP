@@ -1,0 +1,268 @@
+---
+alwaysApply: true
+---
+## Mixin Writing Reference
+
+When writing SpongePowered Mixins, **always prefer MixinExtras injectors** over vanilla
+patterns. MixinExtras injectors chain when multiple mods target the same code; vanilla
+`@Overwrite`, `@Inject` at HEAD with cancel/return, `@Redirect`, and `@ModifyConstant`
+do not chain and will silently conflict with other mods.
+
+### Injector Selection
+
+Pick the **most specific** MixinExtras injector that fits:
+
+| Goal | Use | Avoid |
+|---|---|---|
+| Tweak a method's return value | `@ModifyReturnValue` | `@Inject(at = RETURN)` + `cir.setReturnValue(modify(cir.getReturnValue()))` |
+| Add/change a condition around an expression | `@ModifyExpressionValue` | `@Redirect` on the boolean call |
+| Conditionally skip a void call or field write | `@WrapWithCondition` | `@Redirect` returning default/void |
+| Wrap a call/field/instanceof in custom logic | `@WrapOperation` | `@Redirect` |
+| Wrap an entire method (try/catch, sync, etc.) | `@WrapMethod` | `@Overwrite` or `@Inject` at HEAD + RETURN |
+| Change receiver of a call/field access | `@ModifyReceiver` | `@Redirect` |
+| Replace a method wholesale (last resort) | `@Overwrite` only if no other option | — |
+
+**Why not vanilla patterns:**
+- **`@Overwrite`**: Breaks ALL other mods targeting the same method.
+- **`@Inject` at HEAD + `ci.cancel()`/`cir.setReturnValue()`**: Prevents other mods' injections from running.
+- **`@Redirect`**: Does not chain. Use `@WrapOperation`/`@ModifyExpressionValue`/`@WrapWithCondition`/`@ModifyReceiver`.
+- **`@ModifyConstant`**: Does not chain. Use `@ModifyExpressionValue` on the constant expression.
+
+Exceptions exist — sometimes `@Inject` at HEAD with cancel is the only practical option
+(e.g., returning early before any logic runs). Use judgment, but default to MixinExtras.
+
+**Vanilla injectors still useful alongside MixinExtras:**
+- `@ModifyArg` / `@ModifyArgs` — modify argument(s) passed to a specific method call.
+  No MixinExtras replacement; these are fine to use. Specify `index` for multi-arg calls.
+- `@ModifyVariable` — modify a local variable's value at a specific point. Takes
+  `method`, `at`, and `ordinal`/`name`/`index` to identify which local. Prefer `ordinal`
+  over `index` — see pitfalls.
+
+### `@At` Injection Points
+
+| Value | Targets | Key params |
+|---|---|---|
+| `HEAD` | First instruction in method | — |
+| `RETURN` | Before **every** return instruction | `ordinal` |
+| `TAIL` | Before the **last** return only | — |
+| `INVOKE` | Before a method call | `target`, `ordinal` |
+| `INVOKE_ASSIGN` | After a method call's result is stored | `target`, `ordinal` |
+| `INVOKE_STRING` | Before an invoke with a single string arg | `target`, `args={"ldc=value"}` |
+| `FIELD` | Before a field get/set | `target`, `opcode` (GETFIELD/PUTFIELD/GETSTATIC/PUTSTATIC) |
+| `NEW` | Before a `new` instruction | `target` (FQCN or constructor descriptor) |
+| `CONSTANT` | Before a constant literal | `args` — see below |
+| `JUMP` | Before a jump instruction | `opcode` (IFEQ/IFNE/IFLT/GOTO/etc.), `ordinal` |
+| `MIXINEXTRAS:EXPRESSION` | MixinExtras expression target | Use with `@Expression` + `@Definition` |
+
+**RETURN vs TAIL**: `RETURN` fires before *every* return statement (early returns too).
+`TAIL` fires only before the *final* return. Use TAIL for cleanup logic that runs once;
+use RETURN to intercept every exit.
+
+**CONSTANT args** (use exactly one discriminator):
+`intValue=N`, `floatValue=N`, `longValue=N`, `doubleValue=N`, `stringValue=text`,
+`classValue=fully/qualified/Name`, `nullValue=true`.
+Also: `expandZeroConditions=LESS_THAN_ZERO,GREATER_THAN_ZERO` to match zero in conditionals.
+
+### `@At` Parameters
+
+| Parameter | Description |
+|---|---|
+| `target` | Bytecode member descriptor: `Lowner/Class;name(Lparam;)Lreturn;` for methods, `Lowner/Class;name:Ltype;` for fields. **Uses the bytecode owner**, which may differ from the source declaration — use `mixin_method_bytecode` to verify. |
+| `ordinal` | 0-based index when multiple instructions match. -1 (default) = match all. |
+| `shift` | `BEFORE` (default for most), `AFTER`, `BY` (with `by=N`; keep small, avoid offsets beyond 3). |
+| `opcode` | ASM opcode int for FIELD and JUMP (e.g. `Opcodes.GETFIELD`, `Opcodes.IFEQ`). |
+| `remap` | `true` (default) remaps target through mappings. Set `false` for non-Minecraft methods. |
+| `args` | Extra args for CONSTANT and INVOKE_STRING (see above). |
+| `slice` | ID of a named `@Slice` to restrict the search region. |
+
+### `@Slice`
+
+Narrows the bytecode region an injection point searches in. Use when `ordinal` alone
+can't disambiguate (e.g., same method called in two distinct code paths).
+
+```java
+@Inject(
+    method = "tick",
+    slice = @Slice(from = @At(value = "INVOKE", target = "Lnet/...;startPhase()V"),
+                   to = @At(value = "INVOKE", target = "Lnet/...;endPhase()V")),
+    at = @At(value = "INVOKE", target = "Lnet/...;process()V")
+)
+```
+
+- `from`/`to` are both **inclusive**. Defaults: `from = @At("HEAD")`, `to = @At("TAIL")`.
+- Named slices: give `@Slice(id = "mySlice")`, reference from `@At(slice = "mySlice")`.
+- For multi-match `from`/`to`, use specifiers like `@At(value = "INVOKE:LAST", ...)`.
+
+### Local Variable Capture (`@Local`)
+
+Use MixinExtras `@Local` instead of `locals = LocalCapture.CAPTURE_FAILHARD`:
+
+```java
+@Inject(method = "use", at = @At(value = "INVOKE", target = "..."))
+private void onUse(CallbackInfoReturnable<?> cir, @Local ItemStack stack) {
+    stack.shrink(1);
+}
+```
+
+The traditional `LocalCapture` approach requires listing every preceding local in
+parameter order — fragile when the target method changes. `@Local` selects by type
+(or `@Local(ordinal = N)` if ambiguous).
+
+For mutable capture use `LocalRef<T>` / `LocalIntRef` / `LocalDoubleRef` etc.:
+```java
+@Inject(method = "target", at = @At(...))
+private void mutateLocals(CallbackInfo ci,
+                          @Local LocalRef<String> name,
+                          @Local LocalIntRef color) {
+    name.set("modified");
+    color.set(0xFF0000);
+}
+```
+
+### Sharing Values Between Handlers (`@Share`)
+
+Thread-safe value sharing between handlers in the same target method (no mixin fields):
+```java
+@ModifyArg(method = "target", at = @At(value = "INVOKE", target = "..."))
+private int captureArg(int arg, @Share("myArg") LocalIntRef ref) {
+    ref.set(arg);
+    return arg;
+}
+
+@Inject(method = "target", at = @At("TAIL"))
+private void useArg(CallbackInfo ci, @Share("myArg") LocalIntRef ref) {
+    doSomething(ref.get());
+}
+```
+
+### `@Cancellable` Sugar
+
+Any MixinExtras injector can receive `@Cancellable CallbackInfo(Returnable)` to
+cancel the enclosing method without a separate `@Inject`:
+```java
+@ModifyExpressionValue(method = "render", at = @At(value = "INVOKE", target = "..."))
+private Identifier skipPoison(Identifier texture, @Cancellable CallbackInfo ci) {
+    if (shouldSkip(texture)) ci.cancel();
+    return texture;
+}
+```
+
+### MixinExtras Expressions
+
+For targeting complex bytecode patterns (comparisons, instanceof, compound expressions)
+unreachable by standard `@At`:
+
+```java
+@Definition(id = "AbstractArrow", type = AbstractArrow.class)
+@Expression("? instanceof AbstractArrow")
+@WrapOperation(method = "hurt", at = @At("MIXINEXTRAS:EXPRESSION"))
+private boolean modifyArrowCheck(Object entity, Operation<Boolean> original) {
+    return original.call(entity) && someCondition();
+}
+```
+
+Key rules:
+- `@At` value must be `"MIXINEXTRAS:EXPRESSION"` — the real target is in `@Expression`.
+- `@Definition` binds identifiers to fields, methods, types, or locals.
+- `?` = wildcard for parts you don't care about matching.
+- Strings use single quotes inside `@Expression` (already in a Java annotation string).
+- `this` is built-in, doesn't need `@Definition`.
+- Targets the "last" instruction of the expression unless you mark with `@(...)`.
+
+### Accessor and Invoker Patterns
+
+Interface mixins for accessing private members without reflection:
+
+```java
+@Mixin(LivingEntity.class)
+public interface LivingEntityAccessor {
+    @Accessor("health")
+    float getHealth();
+
+    @Accessor("health")
+    void setHealth(float health);
+
+    @Invoker("actuallyHurt")
+    void invokeActuallyHurt(DamageSource source, float amount);
+}
+```
+
+- `@Accessor` generates a getter and/or setter for a private field.
+- `@Invoker` generates a delegating call to a private method.
+- Use from external code: `((LivingEntityAccessor) entity).getHealth()`.
+- `@Coerce` does NOT work on `@Accessor`/`@Invoker`.
+
+### Interface Injection (Duck Typing)
+
+A mixin can add interfaces to the target class:
+
+```java
+@Mixin(LivingEntity.class)
+public abstract class LivingEntityMixin implements CustomInterface {
+    @Unique
+    private int myMod$customField;
+
+    @Override
+    public int getCustomValue() { return myMod$customField; }
+}
+```
+
+Cast to access: `((CustomInterface) entity).getCustomValue()`.
+If the target already has a method matching the interface signature, make the mixin
+abstract or use `@Intrinsic` on the matching method to tell Mixin to use the target's
+existing implementation.
+
+### Obscure Features
+
+**`@Pseudo`** — Target class may not exist at compile or runtime (optional mod compat).
+Applied to the mixin class. Implies `remap = false`. Use `targets = "com.example.Class"`
+(string, not class literal). Mixin is silently skipped at runtime if the target is absent.
+
+**`@Coerce`** — Use a supertype or interface when the real type is inaccessible
+(package-private, etc.). Applied to handler parameters or on the method (return type
+coercion). Works with `@Inject` (local capture) and `@Redirect`. Does NOT work on
+`@Accessor`/`@Invoker`. MixinExtras injector support is unconfirmed — test before relying.
+
+**`@Dynamic`** — Purely documentation. Annotates handlers/shadows targeting members
+added by other mods or generated at runtime. Does NOT suppress missing-target warnings;
+use `@SuppressWarnings` for that.
+
+**`@Shadow` + `@Final` + `@Mutable`** — To read a target's field: `@Shadow private Type field`.
+To modify a final field: `@Shadow @Final @Mutable private Type field`. Omitting `@Mutable`
+on a final field causes a runtime crash.
+
+**`@Unique`** — Marks fields/methods as belonging solely to this mixin. Prevents name
+collision if the target already has a member with the same name. Always prefix mixin-added
+members with your modid: `mymod$fieldName`.
+
+### Pitfalls
+
+- **`@At` target owner**: Always use the bytecode owner class, not where the method is
+  declared in source. Use `mixin_method_bytecode` to verify — the INVOKE* owner may be a
+  subclass of the declaring class.
+- **`remap = false`**: Required on `@At(target = "...")` and `@Inject(method = "...")` when
+  targeting non-Minecraft methods (mod APIs, other mods). Minecraft methods are remapped by
+  the toolchain; everything else is not. Forgetting this causes "target not found" at runtime.
+- **Constructor injection**: `@Inject` into `<init>` can only inject **after** the `super()`
+  call. You cannot inject before `super()`. `RETURN` in a constructor means end of `<init>`,
+  not an early return.
+- **`@ModifyArg` index**: When the target call has multiple arguments, you MUST specify
+  `index` (0-based) to identify which argument to modify. Omitting it is ambiguous for
+  multi-arg calls.
+- **`@ModifyVariable` index vs ordinal**: `index` is the raw LVT slot number — `this`
+  takes slot 0 in instance methods, and `long`/`double` consume two slots. Use `ordinal`
+  (Nth variable of the matching type, 0-based) instead to avoid off-by-one errors.
+- **`@Unique` field thread safety**: `@Unique` fields are shared across ALL instances of the
+  target class on ALL threads. Do not assume single-threaded access. Use `@Share` for
+  per-invocation values.
+- **Handler naming**: Prefix mixin handler methods with your modid (`mymod$onTick`) to avoid
+  collision with other mods' mixins targeting the same class.
+- **`require` and `expect`**: `require = 1` (default) crashes if the injection target isn't
+  found. Use `require = 0` for targets that may not exist in all versions. `expect` logs a
+  warning instead of crashing.
+- **`@WrapOperation`**: You MUST call `original.call(...)` to preserve the original behavior
+  (and let other mods' wraps run). Only skip the call if you genuinely want to suppress the
+  operation.
+- **Priority**: `@Mixin(priority = N)` controls merge order. Higher priority mixins are
+  applied later and "win" conflicts. Default is 1000. Adjusting priority is a last resort —
+  it doesn't compose well across mods.

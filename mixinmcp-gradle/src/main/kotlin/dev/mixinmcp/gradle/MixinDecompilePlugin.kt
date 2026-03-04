@@ -17,6 +17,7 @@ class MixinDecompilePlugin : Plugin<Project> {
         project.tasks.register("mixinDecompile", MixinDecompileTask::class.java) {
             it.group = "mixinmcp"
             it.description = "Decompiles dependency JARs without sources into ~/.cache/mixinmcp/decompiled/"
+            it.projectDir = project.projectDir
 
             // Resolve configuration at configuration time (not execution) for configuration cache compatibility
             val config = findClasspathConfiguration(project)
