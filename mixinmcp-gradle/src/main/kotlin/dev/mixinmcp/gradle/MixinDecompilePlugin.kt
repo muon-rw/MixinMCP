@@ -2,6 +2,13 @@ package dev.mixinmcp.gradle
 
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedDependencyResult
+import org.gradle.api.artifacts.result.ResolvedArtifactResult
+import org.gradle.internal.DefaultTaskExecutionRequest
+import org.gradle.jvm.JvmLibrary
+import org.gradle.language.base.artifact.SourcesArtifact
+
 /**
  * Gradle plugin that registers the mixinDecompile task.
  * Decompiles dependency JARs without -sources.jar into ~/.cache/mixinmcp/decompiled/.
@@ -14,21 +21,68 @@ import org.gradle.api.Project
 class MixinDecompilePlugin : Plugin<Project> {
 
     override fun apply(project: Project) {
-        project.tasks.register("mixinDecompile", MixinDecompileTask::class.java) {
+        val taskProvider = project.tasks.register("mixinDecompile", MixinDecompileTask::class.java) {
             it.group = "mixinmcp"
             it.description = "Decompiles dependency JARs without sources into ~/.cache/mixinmcp/decompiled/"
             it.projectDir = project.projectDir
 
-            // Resolve configuration at configuration time (not execution) for configuration cache compatibility
             val config = findClasspathConfiguration(project)
             if (config != null) {
                 val artifactCollection = config.incoming.artifacts
                 it.resolvedArtifactsProvider = artifactCollection.resolvedArtifacts
+
+                // Query which dependencies have published sources.
+                // This is done lazily via a Provider so it only resolves when the task runs.
+                it.modulesWithSourcesProvider = project.provider {
+                    findModulesWithSources(project, config)
+                }
+            }
+        }
+
+        // When IntelliJ is syncing the Gradle project, inject mixinDecompile into the
+        // task execution plan so it runs automatically as part of sync.
+        // Technique borrowed from NeoForge MDG / Fabric Loom.
+        if (java.lang.Boolean.getBoolean("idea.sync.active")) {
+            project.afterEvaluate {
+                val startParameter = project.gradle.startParameter
+                val taskRequests = ArrayList(startParameter.taskRequests)
+                taskRequests.add(DefaultTaskExecutionRequest(listOf(taskProvider.name)))
+                startParameter.setTaskRequests(taskRequests)
             }
         }
     }
 
     private fun findClasspathConfiguration(project: Project): org.gradle.api.artifacts.Configuration? {
         return project.configurations.findByName("runtimeClasspath")
+    }
+
+    /**
+     * Uses ArtifactResolutionQuery to find which modules on the classpath have
+     * published -sources.jar artifacts. Returns a set of "group:module:version" strings.
+     */
+    private fun findModulesWithSources(
+        project: Project,
+        config: org.gradle.api.artifacts.Configuration
+    ): Set<String> {
+        val componentIds = config.incoming.resolutionResult.allDependencies
+            .filterIsInstance<ResolvedDependencyResult>()
+            .mapNotNull { it.selected.id as? ModuleComponentIdentifier }
+            .toSet()
+
+        if (componentIds.isEmpty()) return emptySet()
+
+        val result = project.dependencies.createArtifactResolutionQuery()
+            .forComponents(componentIds)
+            .withArtifacts(JvmLibrary::class.java, SourcesArtifact::class.java)
+            .execute()
+
+        return result.resolvedComponents
+            .filter { component ->
+                component.getArtifacts(SourcesArtifact::class.java)
+                    .any { it is ResolvedArtifactResult }
+            }
+            .mapNotNull { it.id as? ModuleComponentIdentifier }
+            .map { "${it.group}:${it.module}:${it.version}" }
+            .toSet()
     }
 }

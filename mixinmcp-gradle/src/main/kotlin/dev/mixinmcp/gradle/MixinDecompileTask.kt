@@ -1,6 +1,7 @@
 package dev.mixinmcp.gradle
 
 import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.result.ResolvedArtifactResult
 import org.gradle.api.provider.Provider
@@ -46,6 +47,10 @@ abstract class MixinDecompileTask : DefaultTask() {
     @get:Option(option = "threads", description = "Vineflower decompiler threads (default 2). Lower = less memory.")
     var threads: Int = 2
 
+    @get:Input
+    @get:Option(option = "force", description = "Skip OOM pre-flight confirmation; proceed with decompilation even when heap may be insufficient.")
+    var force: Boolean = false
+
     /**
      * Set by MixinDecompilePlugin at configuration time. Uses ArtifactCollection.resolvedArtifacts
      * Provider for configuration cache compatibility (no project access at execution).
@@ -56,6 +61,10 @@ abstract class MixinDecompileTask : DefaultTask() {
     /** Set by MixinDecompilePlugin at configuration time. */
     @get:Internal
     var projectDir: File? = null
+
+    /** Set of "group:module:version" strings for modules that have published sources. */
+    @get:Internal
+    var modulesWithSourcesProvider: Provider<Set<String>>? = null
 
     private val globalCacheRoot: Path
         get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
@@ -74,24 +83,68 @@ abstract class MixinDecompileTask : DefaultTask() {
         evictStaleCacheEntries()
 
         val resolvedArtifacts = provider.get()
-        val artifactsByModule = resolvedArtifacts
+        val modulesWithSources = modulesWithSourcesProvider?.get() ?: emptySet()
+
+        val withoutSources = resolvedArtifacts
             .filter { it.variant.owner is ModuleComponentIdentifier }
-            .groupBy { artifact ->
+            .filter { artifact ->
                 val owner = artifact.variant.owner as ModuleComponentIdentifier
-                "${owner.group}:${owner.module}:${owner.version}"
+                val coordinate = "${owner.group}:${owner.module}:${owner.version}"
+                coordinate !in modulesWithSources
+            }
+            .filter { it.file.extension.equals("jar", ignoreCase = true) }
+            .filter { !isJdkJar(it.file) }
+            .sortedBy { it.file.length() }
+
+        val skippedWithSources = resolvedArtifacts
+            .filter { it.variant.owner is ModuleComponentIdentifier }
+            .count { artifact ->
+                val owner = artifact.variant.owner as ModuleComponentIdentifier
+                "${owner.group}:${owner.module}:${owner.version}" in modulesWithSources
             }
 
-        val withoutSources = artifactsByModule
-            .filter { (_, artifacts) ->
-                artifacts.none { isSourcesArtifact(it) }
+        // Pre-flight memory check: warn if large uncached JARs may OOM the daemon
+        val uncachedJars = withoutSources.filter { artifact ->
+            val hash = DecompilationManifest.computeArtifactHash(
+                artifact.file.absolutePath, artifact.file.length(), artifact.file.lastModified()
+            )
+            val cacheDir = globalCacheRoot.resolve(hash).toFile()
+            !(cacheDir.isDirectory && cacheDir.list()?.isNotEmpty() == true)
+        }
+
+        if (uncachedJars.isNotEmpty()) {
+            val largestArtifact = uncachedJars.maxByOrNull { it.file.length() }!!
+            val largestOwner = largestArtifact.variant.owner as ModuleComponentIdentifier
+            val largestLibraryName = "${largestOwner.group}:${largestOwner.module}:${largestOwner.version}"
+            val largestUncachedMb = largestArtifact.file.length() / 1024 / 1024
+            val maxHeapMb = Runtime.getRuntime().maxMemory() / 1024 / 1024
+            // Heuristic: each Vineflower thread needs ~800MB for large JARs,
+            // plus ~500MB baseline for the Gradle daemon itself.
+            val estimatedNeedMb = (threads * 800L) + 500L
+
+            if (largestUncachedMb >= 15 && maxHeapMb < estimatedNeedMb && !force) {
+                val message = "Only ${maxHeapMb}MB is allocated to the Gradle daemon, and $largestLibraryName (${largestUncachedMb}MB) without a sources jar may cause decompilation to fail."
+                val recommendations = "Set org.gradle.jvmargs=-Xmx${estimatedNeedMb + 512}m in gradle.properties, or run with --threads=1. Use --force to skip this check."
+
+                val console = System.console()
+                if (console != null) {
+                    console.writer().println()
+                    console.writer().println("MixinMCP: $message")
+                    console.writer().println("Recommendations: $recommendations")
+                    console.writer().println()
+                    console.writer().print("Would you like to proceed with decompilation? [Y/N] ")
+                    console.writer().flush()
+                    val response = console.readLine()?.trim()?.uppercase()
+                    if (response != "Y" && response != "YES") {
+                        throw GradleException("Decompilation aborted by user.")
+                    }
+                } else {
+                    throw GradleException(
+                        "$message $recommendations (Run interactively to confirm and proceed.)"
+                    )
+                }
             }
-            .flatMap { (_, artifacts) ->
-                artifacts.filter { it.file.extension.equals("jar", ignoreCase = true) }
-            }
-            .filter { artifact ->
-                !isJdkJar(artifact.file)
-            }
-            .sortedBy { it.file.length() }
+        }
 
         var manifest = DecompilationManifest().load(projectManifestRoot)
         val currentJarHashes = mutableSetOf<String>()
@@ -100,7 +153,7 @@ abstract class MixinDecompileTask : DefaultTask() {
         var failed = 0
         val total = withoutSources.size
 
-        logger.lifecycle("MixinMCP: ${total} JARs without sources, threads=$threads")
+        logger.lifecycle("MixinMCP: ${total} JARs without sources ($skippedWithSources skipped — sources available), threads=$threads")
 
         for ((index, artifact) in withoutSources.withIndex()) {
             val jarFile = artifact.file
@@ -218,12 +271,6 @@ abstract class MixinDecompileTask : DefaultTask() {
         try {
             Files.setLastModifiedTime(dir, FileTime.fromMillis(System.currentTimeMillis()))
         } catch (_: Exception) {}
-    }
-
-    private fun isSourcesArtifact(artifact: ResolvedArtifactResult): Boolean {
-        val name = artifact.file.name.lowercase()
-        val displayName = artifact.id.displayName.lowercase()
-        return name.contains("-sources") || displayName.contains("sources")
     }
 
     private fun isJdkJar(jarFile: File): Boolean {

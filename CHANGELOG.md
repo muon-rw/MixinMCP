@@ -1,6 +1,11 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.5.2]
+- Automatically run decompile on project sync
+- Detect and warn if the decompile task is likely to fail due to OOM
+- Properly skip sources jars for decompilation
+
 ## [0.5.1]
 - Fix decompilation cache handling in multiloader environments
 - Each Gradle subproject now writes its own manifest; decompiled output is shared via a global content-addressed store

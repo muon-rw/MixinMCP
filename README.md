@@ -150,12 +150,20 @@ changing dependencies.
 ### Memory tuning
 
 Vineflower's SSA analysis can use significant memory on large JARs. The task
-defaults to 2 decompiler threads to keep memory usage reasonable. If you hit
-`OutOfMemoryError`, you have two knobs:
+defaults to 2 decompiler threads to keep memory usage reasonable.
+
+**Pre-flight check:** Before decompiling large uncached JARs (≥15MB), the task
+checks whether the Gradle daemon heap is likely sufficient. If not, it blocks
+and prompts for confirmation. In non-interactive environments (CI, IntelliJ sync),
+the task fails with recommendations instead of hanging. Use `--force` to skip this
+check and proceed regardless:
 
 ```bash
 # Reduce threads (less memory, slower)
 ./gradlew mixinDecompile --threads=1
+
+# Skip OOM pre-flight confirmation (e.g. when you know heap is sufficient)
+./gradlew mixinDecompile --force
 
 # Increase heap (more memory available)
 # Add to your mod project's gradle.properties:
