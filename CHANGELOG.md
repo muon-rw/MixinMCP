@@ -1,6 +1,9 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.6.2]
+- Auto gitignore injected rules
+
 ## [0.6.1]
 - Only refresh the cursor rules dir when injecting rules
 

@@ -63,6 +63,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
         }
 
         if (written.isNotEmpty()) {
+            addToGitignore(projectRoot, written)
             LocalFileSystem.getInstance().refreshAndFindFileByNioFile(rulesDir)
             LOG.info("MixinMCP: injected cursor rules: ${written.joinToString()}")
             showRuleNotification(project, written, settings)
@@ -113,8 +114,33 @@ class RuleInjectionStartupActivity : ProjectActivity {
             .notify(project)
     }
 
+    private fun addToGitignore(projectRoot: Path, written: List<String>) {
+        val gitignore = projectRoot.resolve(".gitignore")
+        if (!Files.exists(gitignore)) return
+
+        try {
+            val content = Files.readString(gitignore)
+            val missing = written.filter { ".cursor/rules/$it" !in content }
+            if (missing.isEmpty()) return
+
+            val block = buildString {
+                if (!content.endsWith("\n")) append("\n")
+                if (GITIGNORE_MARKER !in content) append("\n$GITIGNORE_MARKER\n")
+                for (name in missing) {
+                    appendLine(".cursor/rules/$name")
+                }
+            }
+
+            Files.writeString(gitignore, block, StandardOpenOption.APPEND)
+        } catch (e: IOException) {
+            LOG.warn("MixinMCP: failed to update .gitignore: ${e.message}")
+        }
+    }
+
     companion object {
         private val LOG = Logger.getInstance(RuleInjectionStartupActivity::class.java)
+
+        private const val GITIGNORE_MARKER = "# MixinMCP auto-injected rules"
 
         private val RULE_FILES = listOf("mixinmcp.mdc", "mixin-reference.mdc")
 
