@@ -24,5 +24,16 @@
             implementation="dev.mixinmcp.cache.MixinDecompileCacheSyncListener"/>
         <postStartupActivity
             implementation="dev.mixinmcp.cache.MixinDecompileCacheStartupActivity"/>
+        <postStartupActivity
+            implementation="dev.mixinmcp.rules.RuleInjectionStartupActivity"/>
+
+        <projectConfigurable
+            parentId="tools"
+            instance="dev.mixinmcp.settings.MixinMcpSettingsConfigurable"
+            id="dev.mixinmcp.settings"
+            displayName="MixinMCP"/>
+        <notificationGroup
+            id="MixinMCP"
+            displayType="BALLOON"/>
     </extensions>
 </idea-plugin>

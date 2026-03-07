@@ -6,8 +6,8 @@ Minecraft mod development — dependency navigation, semantic code analysis,
 bytecode inspection, and automatic decompilation of compiled-only dependencies.
 
 IntelliJ's built-in MCP Server excludes libraries and dependencies from its tools. MixinMCP
-adds 12 tools that search across your entire classpath, resolve type hierarchies,
-and inspect bytecode — including the synthetic lambda methods that are invisible in
+adds tools that search across your entire classpath, resolve type hierarchies,
+and inspect bytecode — notably useful for synthetic lambda methods that are invisible in
 decompiled source but essential for mixin targeting. A companion Gradle plugin
 decompiles dependencies without published sources via Vineflower so every library
 is searchable.
@@ -84,7 +84,7 @@ exists in compiled bytecode. No existing MCP plugin exposes this.
 | Tool | Description |
 |------|-------------|
 | `mixin_sync_project` | Trigger Gradle sync. The decompilation cache is re-read automatically after sync. |
-| `mixin_debug_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
+| `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
 
 ## Decompilation Cache
 
@@ -192,195 +192,40 @@ server. If the `mixin_*` tools don't appear, check that (1) MixinMCP is
 installed in IntelliJ, (2) the MCP Server plugin is enabled, and (3) your MCP
 client is connected.
 
-For best results, add a rule to your mod project that teaches the LLM when and
-how to use each tool.
-
 ### Cursor
 
 In Cursor, IntelliJ's MCP server is named **`user-jetbrains`** (the `user-`
 prefix is added by Cursor to all user-configured servers). Tools are invoked via
 `CallMcpTool` with `server: "user-jetbrains"`.
 
-Create `.cursor/rules/mixinmcp.mdc` in your **mod project**:
+**Automatic rule injection:** When MixinMCP detects a Minecraft mod project
+(Fabric, Forge, NeoForge, Quilt, Architectury), it automatically writes
+`.cursor/rules/mixinmcp.mdc` and `.cursor/rules/mixin-reference.mdc` into your
+project on open. These teach the LLM when and how to use each tool, common
+pitfalls, and a mixin workflow checklist. Rules are kept in sync with the plugin
+version by default — no manual setup needed.
 
-```markdown
----
-alwaysApply: true
----
-This is a Minecraft mod project using [Fabric/NeoForge/Forge] with extensive
-mixin usage and many dependencies.
+MixinMCP will also warn if the Gradle decompilation plugin is not detected in
+your project (see [Decompilation Cache](#decompilation-cache)).
 
-You have access to MixinMCP tools via the IntelliJ MCP server. **Prefer these
-over grep, read_file, or jar extraction** when working with mod/dependency code.
-They search and read inside dependency jars natively; grep cannot see jar contents.
-Dependencies without published sources are decompiled via the MixinMCP Gradle
-plugin (Vineflower) so every library on the classpath is searchable. Native
-sources are always preferred — decompiled output lacks comments and meaningful
-variable names. Run `./gradlew mixinDecompile` after adding new dependencies.
+Configure in **Settings > Tools > MixinMCP**:
 
-## Invoking Tools
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Automatically add Cursor rules | On | Master toggle — disables all rule injection |
+| Overwrite existing rules on project open | On | When off, only writes rules that don't already exist |
+| Warn when Gradle plugin is not detected | On | Shows a notification if `dev.mixinmcp.decompile` is missing |
 
-MixinMCP tools are on the **user-jetbrains** MCP server. Use CallMcpTool:
-
-    CallMcpTool(server="user-jetbrains", toolName="<tool>", arguments={...})
-
-**Arguments must be valid JSON.** No trailing commas, no single quotes, no
-unescaped special characters. An empty or malformed `arguments` object will
-produce a parse error.
-
-Tool descriptions document all parameters and defaults — read them before calling.
-
-### Examples
-
-Look up a class:
-
-    CallMcpTool(
-      server="user-jetbrains",
-      toolName="mixin_find_class",
-      arguments={"className": "net.minecraft.world.level.Level", "includeMembers": true}
-    )
-
-Search dependency sources, then read the result:
-
-    CallMcpTool(
-      server="user-jetbrains",
-      toolName="mixin_search_in_deps",
-      arguments={"regexPattern": "destroyBlock", "fileMask": "*Level*"}
-    )
-    // Results include `url:` lines — pass that url to mixin_get_dep_source:
-    CallMcpTool(
-      server="user-jetbrains",
-      toolName="mixin_get_dep_source",
-      arguments={
-        "url": "<url from mixin_search_in_deps result>",
-        "lineNumber": 42, "linesBefore": 10, "linesAfter": 20
-      }
-    )
-
-Read source by known path (without searching first):
-
-    CallMcpTool(
-      server="user-jetbrains",
-      toolName="mixin_get_dep_source",
-      arguments={
-        "path": "io/redspace/ironsspellbooks/player/ServerPlayerEvents.java",
-        "lineNumber": 360, "linesBefore": 20, "linesAfter": 20
-      }
-    )
-
-## Tool Selection
-
-| Goal | Tool |
-|------|------|
-| Look up a class by FQCN | mixin_find_class |
-| Search names across classpath | mixin_search_symbols |
-| Grep dependency sources by regex | mixin_search_in_deps → then mixin_get_dep_source with returned `url` |
-| Read a known dependency file | mixin_get_dep_source (pass `path`, e.g. `io/redspace/.../Utils.java`) |
-| Inheritance chain | mixin_type_hierarchy |
-| All implementors | mixin_find_impls |
-| All usages of a class/method | mixin_find_references |
-| All call sites across MC + all deps | mixin_find_references (more complete than mixin_search_in_deps for call-site enumeration) |
-| Cross-mod mixin conflicts on a target | mixin_find_targeting_mixins — finds all @Mixin classes + their injection points |
-| Call graph | mixin_call_hierarchy |
-| Method origin in hierarchy | mixin_super_methods |
-| Synthetic/lambda method names | mixin_class_bytecode (filter="synthetic") |
-| Exact @At(target) for an INVOKE | mixin_method_bytecode — read the owner class from INVOKE* instructions |
-| Bytecode for a specific method | mixin_method_bytecode |
-| Diagnose missing source roots | mixin_debug_roots — lists all roots searched by dep tools |
-
-## Common Pitfalls
-
-**mixin_search_in_deps:**
-- fileMask is a glob matched against the **file path inside the jar** (e.g.
-  `net/minecraft/world/entity/LivingEntity.java`). It does NOT match jar names
-  or Maven coordinates.
-    - `*LivingEntity*` — good, matches that class specifically
-    - `*minecraft*` — broad, matches any path containing "minecraft"; prefer
-      narrower masks when you know the class name
-    - `*.java` — effectively no filter
-- Prefer simple single-term regex patterns. Complex alternation (e.g.
-  `addEffect.*dimension|changeDimension`) is fragile — make separate calls.
-- Broad searches can time out. Increase `timeout` (e.g. 20000–30000) for
-  searches without a fileMask or on projects with 50+ dependencies.
-
-**mixin_get_dep_source:**
-- `url`: copy the exact `url:` string from mixin_search_in_deps output. This is
-  the most reliable method after a search.
-- `path`: use the class's package path with `/` separators and `.java` extension
-  (e.g. `io/redspace/ironsspellbooks/api/util/Utils.java`). This is NOT a
-  filesystem path. Convenient when you already know the class location.
-- If a path is not found, fall back to mixin_search_in_deps to locate the file,
-  then use the returned `url`.
-- **Vanilla Minecraft classes** (e.g. `net/minecraft/server/level/ServerPlayer.java`)
-  may not resolve via `path` because they live in the merged forge jar, not the
-  decompiled cache. Use `mixin_search_in_deps` to get the `url` from the jar, or
-  prefer `mixin_find_class` / `mixin_method_bytecode` for vanilla classes.
-
-**mixin_find_references / mixin_call_hierarchy / mixin_super_methods:**
-- Two ways to disambiguate overloaded methods:
-    - `"parameterTypes": ["MobEffectInstance", "Entity"]` — simple type names
-    - `"methodDescriptor": "(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z"` — JVM descriptor, same format as in mixin `@Inject(method = "...")`
-    - `"parameterTypes": []` — for parameterless methods
-- If disambiguation fails, the error message lists all available overloads with
-  ready-to-copy `parameterTypes` values.
-- `mixin_find_references` returns both runtime call sites AND string references
-  inside mixin annotations (e.g. `@Inject(method = "addEffect...")`).
-- For dedicated cross-mod mixin conflict analysis, prefer `mixin_find_targeting_mixins`
-  — it returns structured results with injection types and `@At` targets.
-
-**mixin_search_symbols:**
-- The required parameter is `query` (a single name substring), NOT `symbolName`
-  or `symbolKind`. It matches symbol names *containing* the query. Search for one
-  name at a time: `{"query": "getEffect", "kind": "method"}`, not combined strings.
-
-**mixin_class_bytecode:**
-- Decompiled source does NOT show synthetic method names. If you need to target
-  a lambda in @Redirect or @Inject, you MUST use this tool with filter="synthetic".
-
-**mixin_method_bytecode:**
-- Each INVOKE* instruction in the output shows the real owner class, not the
-  declaring class from source. The owner in bytecode may differ from what the
-  source suggests (e.g. `INVOKEVIRTUAL GauntletEntity.getAttributeValue` even
-  though `getAttributeValue` is declared in `LivingEntity`). Always use the
-  owner from bytecode when writing @At(target = "...") strings.
-
-## Mixin Workflow
-1. Before writing @Mixin: ALWAYS check mixin_type_hierarchy first.
-2. When targeting lambdas: ALWAYS use mixin_class_bytecode with filter="synthetic".
-   Decompiled source DOES NOT show synthetic method names.
-3. When writing @At(target): ALWAYS use mixin_method_bytecode to get the exact
-   INVOKE* owner class from bytecode. Do NOT assume the target owner from
-   decompiled source — the bytecode owner may be a subclass of the declaring class.
-4. When unsure about method origin: use mixin_super_methods.
-5. After writing any mixin: use the built-in get_file_problems to validate.
-6. After changing build.gradle deps: run `./gradlew mixinDecompile` to decompile
-   new dependencies, then call mixin_sync_project to refresh IntelliJ's project model.
-
-**Note:** All tools accept an optional `projectPath` parameter. You don't need
-it when only one project is open in IntelliJ (the common case). If you have
-multiple projects open and tools target the wrong one, pass the workspace root
-path as `projectPath` to disambiguate.
-
-## Troubleshooting
-**If `mixin_*` tools are not found or the server is unavailable:**
-The `user-jetbrains` MCP server only appears after Cursor connects to IntelliJ's
-MCP Server. If you get "MCP server does not exist: user-jetbrains", try:
-1. Ensure IntelliJ is running with the project open
-2. Check IntelliJ: Settings → Plugins → verify both "MCP Server" and "MixinMCP"
-   are enabled
-3. **Restart Cursor** — the MCP server list is cached at startup and may not
-   reflect a newly-started IntelliJ instance
-```
-
-Replace `[Fabric/NeoForge/Forge]` with your actual loader.
+**Manual setup:** If you prefer to manage rules yourself (or for non-Minecraft
+projects), copy the templates from [`example/.cursor/rules/`](example/.cursor/rules/)
+into your mod project's `.cursor/rules/` directory.
 
 ### Claude Code / Claude Desktop
 
-Add equivalent instructions to your `CLAUDE.md` or MCP client system prompt.
-The MCP server name will depend on your client's configuration — check your
-MCP client docs for the identifier assigned to the IntelliJ/JetBrains server.
-The tool descriptions are self-documenting, but the workflow rules and common
-pitfalls above significantly improve mixin authoring accuracy.
+Add the contents of [`example/.cursor/rules/mixinmcp.mdc`](example/.cursor/rules/mixinmcp.mdc)
+to your `CLAUDE.md` or MCP client system prompt. Adjust the MCP server name to match your client's
+configuration. The tool descriptions are self-documenting, but the workflow rules
+and common pitfalls significantly improve mixin authoring accuracy.
 
 ## Building from Source
 
@@ -465,20 +310,6 @@ export PUBLISH_TOKEN="your-marketplace-token"
 
 Get your token from your JetBrains Marketplace profile → **My Tokens** →
 **Generate Token**.
-
-To publish to a beta channel first:
-
-```kotlin
-// build.gradle.kts
-intellijPlatform {
-    publishing {
-        channels = listOf("beta")
-    }
-}
-```
-
-Users would need to add `https://plugins.jetbrains.com/plugins/beta/<pluginId>`
-as a custom plugin repository to receive beta builds.
 
 ## License
 

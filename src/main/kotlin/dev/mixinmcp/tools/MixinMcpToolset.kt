@@ -57,7 +57,7 @@ import java.util.regex.Pattern
 class MixinMcpToolset : McpToolset {
 
     @McpTool
-    @McpDescription("Look up any class by fully-qualified name — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location. includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code — can be very large, prefer includeMembers for API overview.")
+    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location. includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code — can be very large, prefer includeMembers for API overview.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
@@ -122,7 +122,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Find classes, methods, or fields by name substring across project and dependencies. kind: class (default), method, field, all. scope: all (default), project, libraries. Returns FQCN for classes, class#method(…) for methods, class.field for fields. maxResults defaults to 50.")
+    @McpDescription("Use when you don't know the full class name — search by substring across project and dependencies. kind: class (default), method, field, all. scope: all (default), project, libraries. Returns FQCN for classes, class#method(…) for methods, class.field for fields. maxResults defaults to 50.")
     @Suppress("unused")
     suspend fun mixin_search_symbols(
         query: String,
@@ -213,7 +213,7 @@ class MixinMcpToolset : McpToolset {
     @McpTool
     @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar) and MixinMCP decompiled cache. Use this to diagnose why vanilla Minecraft or other dependency sources may not appear in search. Shows root URL, type, and sample file paths per root. maxSamplesPerRoot: 5 default.")
     @Suppress("unused")
-    suspend fun mixin_debug_roots(
+    suspend fun mixin_list_source_roots(
         maxSamplesPerRoot: Int = 5,
         projectPath: String? = null,
     ): McpToolCallResult {
@@ -552,7 +552,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns bytecode-level class overview including synthetic methods, lambda targets, method descriptors, and access flags. Use this tool when decompiled source hides the real method names you need for mixin targets. filter: all (default), synthetic (only compiler-generated: lambdas, bridges, access methods), methods, fields. includeInstructions: javap -c style bytecode per method (large output). Use filter=synthetic to discover lambda mixin target names (e.g. lambda\$tick\$0).")
+    @McpDescription("Returns bytecode-level class overview including synthetic methods, lambda targets, method descriptors, and access flags. Use this tool when decompiled source hides the real method names you need for mixin targets. filter: all (default), synthetic (only compiler-generated: lambdas, bridges, access methods), methods, fields. includeInstructions: javap -c style bytecode per method (large output). Use filter=synthetic to discover lambda mixin target names (e.g. lambda\$tick\$0). For method-level bytecode use mixin_method_bytecode.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_class_bytecode(
         className: String,
@@ -640,7 +640,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor — use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor to disambiguate overloads.")
+    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor — use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor to disambiguate overloads. For class-level bytecode overview use mixin_class_bytecode.")
     @Suppress("unused")
     suspend fun mixin_method_bytecode(
         className: String,

@@ -306,7 +306,7 @@ bytecode extraction via `analyzeMethod()` returning javap-style output.
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` | All indexed symbols |
 | `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000` | Sources jars + decompiled cache |
 | `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` | Sources jars + decompiled cache |
-| `mixin_debug_roots` | `maxSamplesPerRoot=5` | Diagnostic: lists all source roots with types and sample paths |
+| `mixin_list_source_roots` | `maxSamplesPerRoot=5` | Diagnostic: lists all source roots with types and sample paths |
 
 **Important:** `mixin_search_in_deps` and `mixin_get_dep_source` only search/read from
 `OrderRootType.SOURCES` (attached `-sources.jar` files). They do **not** search decompiled
@@ -1069,7 +1069,7 @@ currently accept `parameterTypes`. If provided, it takes precedence over `parame
 
 ### 13.2 Vanilla Minecraft Source Root Coverage — PARTIAL (diagnostic tool done)
 
-> **Step 1 implemented:** `mixin_debug_roots` tool lists all source roots with types and sample paths.
+> **Step 1 implemented:** `mixin_list_source_roots` tool lists all source roots with types and sample paths.
 
 **Problem:** `mixin_search_in_deps` and `mixin_get_dep_source` search
 `OrderRootType.SOURCES` roots and `AdditionalLibraryRootsProvider` synthetic roots.
@@ -1088,7 +1088,7 @@ excluded from decompilation because the mod loader already provides a form of so
 **Investigation steps:**
 
 1. **Diagnostic tool/logging:** Add a debug mode to `mixin_search_in_deps` (or a
-   separate `mixin_debug_roots` tool) that lists all source roots with their types
+   separate `mixin_list_source_roots` tool) that lists all source roots with their types
    and sample file paths. This reveals exactly what the search covers on each loader.
 
 2. **Test matrix:** Test `collectAllSourceRoots` output on:

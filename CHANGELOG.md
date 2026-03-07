@@ -1,6 +1,12 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.6.0]
+- Automatically inject recommended rules for Cursor into Minecraft projects on open
+- Warn when opening a Minecraft project that doesn't contain the MixinMCP-Decompile plugin
+- Clean up tool descriptions a bit more
+- Renamed `mixin_debug_roots` ->  `mixin_list_source_roots` 
+
 ## [0.5.2]
 - Automatically run decompile on project sync
 - Detect and warn if the decompile task is likely to fail due to OOM
