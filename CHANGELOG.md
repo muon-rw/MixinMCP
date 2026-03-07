@@ -1,6 +1,9 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.6.1]
+- Only refresh the cursor rules dir when injecting rules
+
 ## [0.6.0]
 - Automatically inject recommended rules for Cursor into Minecraft projects on open
 - Warn when opening a Minecraft project that doesn't contain the MixinMCP-Decompile plugin

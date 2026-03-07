@@ -63,7 +63,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
         }
 
         if (written.isNotEmpty()) {
-            LocalFileSystem.getInstance().refresh(true)
+            LocalFileSystem.getInstance().refreshAndFindFileByNioFile(rulesDir)
             LOG.info("MixinMCP: injected cursor rules: ${written.joinToString()}")
             showRuleNotification(project, written, settings)
         }
