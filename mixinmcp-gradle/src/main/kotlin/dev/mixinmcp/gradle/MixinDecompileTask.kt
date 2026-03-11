@@ -2,6 +2,7 @@ package dev.mixinmcp.gradle
 
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
+import org.gradle.api.artifacts.ArtifactCollection
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.result.ResolvedArtifactResult
 import org.gradle.api.provider.Provider
@@ -38,8 +39,8 @@ import java.util.concurrent.TimeUnit
  * Gradle daemon heap in gradle.properties:
  *   org.gradle.jvmargs=-Xmx4g
  *
- * Configuration cache: resolvedArtifactsProvider is set at configuration time by
- * the plugin. No Task.project access at execution time.
+ * Configuration cache: artifactCollection is set at configuration time by the
+ * plugin. No Task.project access at execution time.
  */
 abstract class MixinDecompileTask : DefaultTask() {
 
@@ -52,11 +53,12 @@ abstract class MixinDecompileTask : DefaultTask() {
     var force: Boolean = false
 
     /**
-     * Set by MixinDecompilePlugin at configuration time. Uses ArtifactCollection.resolvedArtifacts
-     * Provider for configuration cache compatibility (no project access at execution).
+     * Set by MixinDecompilePlugin at configuration time. Lenient artifact collection
+     * so that transform failures (e.g. missing mapping data) are captured as failures
+     * rather than crashing the entire resolution.
      */
     @get:Internal
-    var resolvedArtifactsProvider: Provider<Set<ResolvedArtifactResult>>? = null
+    var artifactCollection: ArtifactCollection? = null
 
     /** Set by MixinDecompilePlugin at configuration time. */
     @get:Internal
@@ -69,20 +71,25 @@ abstract class MixinDecompileTask : DefaultTask() {
     private val globalCacheRoot: Path
         get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
 
+    companion object {
+        const val UNRESOLVED_MARKER_FILE = "unresolved.txt"
+    }
+
     private val projectManifestRoot: Path
         get() = projectDir?.toPath()?.resolve(".gradle")?.resolve("mixinmcp")
             ?: globalCacheRoot
 
     @TaskAction
     fun decompile() {
-        val provider = resolvedArtifactsProvider ?: run {
+        val collection = artifactCollection ?: run {
             logger.lifecycle("No runtimeClasspath/compileClasspath configuration found, skipping decompilation")
             return
         }
 
         evictStaleCacheEntries()
 
-        val resolvedArtifacts = provider.get()
+        val resolvedArtifacts = collection.resolvedArtifacts.get()
+        val resolutionFailures = collection.failures
         val modulesWithSources = modulesWithSourcesProvider?.get() ?: emptySet()
 
         val withoutSources = resolvedArtifacts
@@ -238,6 +245,19 @@ abstract class MixinDecompileTask : DefaultTask() {
 
         logger.lifecycle("MixinMCP decompilation complete: " +
             "$decompiled decompiled, $cached cached, $failed failed (of $total)")
+
+        val unresolvedMarker = projectManifestRoot.resolve(UNRESOLVED_MARKER_FILE)
+        if (resolutionFailures.isNotEmpty()) {
+            logger.warn("")
+            logger.warn("MixinMCP: ${resolutionFailures.size} artifact(s) could not be resolved " +
+                "(likely due to missing mapping data during first sync).")
+            logger.warn("MixinMCP: Run './gradlew mixinDecompile' manually after a successful Gradle sync to decompile them.")
+            logger.warn("")
+            Files.createDirectories(projectManifestRoot)
+            Files.writeString(unresolvedMarker, resolutionFailures.size.toString())
+        } else {
+            Files.deleteIfExists(unresolvedMarker)
+        }
     }
 
     /**

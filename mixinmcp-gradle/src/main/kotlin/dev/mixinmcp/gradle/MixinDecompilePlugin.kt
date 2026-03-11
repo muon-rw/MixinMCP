@@ -28,8 +28,15 @@ class MixinDecompilePlugin : Plugin<Project> {
 
             val config = findClasspathConfiguration(project)
             if (config != null) {
-                val artifactCollection = config.incoming.artifacts
-                it.resolvedArtifactsProvider = artifactCollection.resolvedArtifacts
+                // Use lenient resolution so that artifact transform failures (e.g.
+                // ModDevGradle's RemappingTransform needing intermediateToNamed.zip
+                // before it's been generated) don't crash the entire task. Failed
+                // artifacts are captured via ArtifactCollection.getFailures() and
+                // reported as a warning instead.
+                val artifactView = config.incoming.artifactView { view ->
+                    view.lenient(true)
+                }
+                it.artifactCollection = artifactView.artifacts
 
                 // Query which dependencies have published sources.
                 // This is done lazily via a Provider so it only resolves when the task runs.
