@@ -204,7 +204,7 @@ MixinMCP/
 │   ├── build.gradle.kts
 │   └── src/main/kotlin/dev/mixinmcp/gradle/
 │       ├── MixinDecompilePlugin.kt    # Plugin entry point
-│       ├── MixinDecompileTask.kt      # ./gradlew mixinDecompile
+│       ├── MixinDecompileTask.kt      # ./gradlew genDependencySources
 │       ├── DecompilationManifest.kt   # Manifest format (Gson)
 │       └── CacheEntry.kt             # Cache entry data class
 └── src/test/kotlin/dev/mixinmcp/
@@ -416,7 +416,7 @@ Can be slow with 100+ dependencies. Always use `maxResults` limits.
 ### Decompiled Source Search
 `mixin_search_in_deps` and `mixin_get_dep_source` search both SOURCES roots (attached
 `-sources.jar`) and decompiled cache roots (from `AdditionalLibraryRootsProvider`).
-Run `./gradlew mixinDecompile` to populate the cache for compiled-only dependencies.
+Run `./gradlew genDependencySources` to populate the cache for compiled-only dependencies.
 
 ### Large Output
 Full decompiled source or `includeInstructions=true` can produce very large responses.
@@ -462,7 +462,7 @@ artifacts as published — if no `-sources.jar` was published, none is cached.
 
 A **Gradle plugin** (`dev.mixinmcp.decompile`) decompiles all library JARs that lack
 SOURCES roots and writes the output to a persistent file cache. Running
-`./gradlew mixinDecompile` completes decompilation as a blocking step — before the IDE
+`./gradlew genDependencySources` completes decompilation as a blocking step — before the IDE
 opens or the LLM invokes tools — giving deterministic, CI-friendly results.
 
 An `AdditionalLibraryRootsProvider` in the IntelliJ plugin exposes the cached
@@ -481,7 +481,7 @@ design.
 ┌─────────────────────────────────────────────────────────────────────┐
 │  GRADLE SIDE (blocking, runs before IDE)                            │
 │                                                                     │
-│  ./gradlew mixinDecompile                                           │
+│  ./gradlew genDependencySources                                      │
 │        │                                                            │
 │        ▼                                                            │
 │  ┌────────────────────────────────────────────────────────────┐     │
@@ -705,7 +705,7 @@ dependency on editor state. It's also the same decompiler IntelliJ bundles (Fern
 4. ~~**Timing: tools vs. background decompilation**~~ → **Resolved: Move
    decompilation to a Gradle task** (Section 11.10, 11.11). Background decompilation
    in the IDE creates a race condition where MCP tools execute before decompilation
-   finishes. The Gradle plugin (`./gradlew mixinDecompile`) makes decompilation a
+   finishes. The Gradle plugin (`./gradlew genDependencySources`) makes decompilation a
    blocking build step, eliminating the timing gap. The IntelliJ plugin becomes a
    read-only cache consumer.
 
@@ -845,7 +845,7 @@ Exposing a "decompilation in progress" status adds complexity to the tool protoc
 and shifts the burden to the LLM to retry.
 
 **Resolution: Move decompilation to Gradle (Section 11.11).** A Gradle task
-(`./gradlew mixinDecompile`) runs decompilation as a blocking build step. The cache
+(`./gradlew genDependencySources`) runs decompilation as a blocking build step. The cache
 is fully populated before the IDE opens or the user starts working. The IntelliJ
 plugin becomes a read-only cache consumer — it never decompiles, only reads the
 manifest and exposes roots. This eliminates the timing gap entirely.
@@ -869,7 +869,7 @@ remains the "guaranteed complete" path.
 |---------|-----------------------------------|-------------|
 | **Determinism** | Tools can run before decompilation finishes | Task completes before IDE opens |
 | **Visibility** | Silent background task; errors logged to `idea.log` | Progress and errors in Gradle console output |
-| **CI support** | Requires a running IDE | `./gradlew mixinDecompile` in any environment |
+| **CI support** | Requires a running IDE | `./gradlew genDependencySources` in any environment |
 | **User control** | Automatic on sync; no way to run on demand | Explicit: run when needed, skip when not |
 | **Reproducibility** | Cache state depends on when the IDE was last open | Cache state depends on dependency resolution — reproducible |
 
@@ -883,10 +883,10 @@ plugins {
 }
 ```
 
-The plugin registers a `mixinDecompile` task:
+The plugin registers a `genDependencySources` task:
 
 ```bash
-./gradlew mixinDecompile
+./gradlew genDependencySources
 ```
 
 After dependency resolution, this task:
@@ -966,7 +966,7 @@ As an alternative to making the IntelliJ plugin fully read-only:
 
 - **Gradle task** is the "guaranteed complete" path — deterministic, CI-friendly.
 - **IntelliJ plugin** retains background decompilation as a **convenience fallback**
-  for users who haven't run `./gradlew mixinDecompile` yet.
+  for users who haven't run `./gradlew genDependencySources` yet.
 - The plugin checks the manifest before decompiling: if the Gradle task has already
   populated a cache entry for a given JAR hash, the plugin skips it.
 - The Gradle task is authoritative: if it has run, the plugin defers entirely.
@@ -1082,7 +1082,7 @@ Whether vanilla Minecraft classes appear depends on how the mod loader registers
   not available at all via `OrderRootType.SOURCES`.
 
 The decompilation cache (Vineflower Gradle plugin) is designed to fill this gap, but
-the user may not have run `./gradlew mixinDecompile`, or the Minecraft jar may be
+the user may not have run `./gradlew genDependencySources`, or the Minecraft jar may be
 excluded from decompilation because the mod loader already provides a form of sources.
 
 **Investigation steps:**

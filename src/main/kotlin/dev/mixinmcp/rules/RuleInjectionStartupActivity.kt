@@ -98,7 +98,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
                 "MixinMCP",
                 "Gradle plugin not detected — dependencies without published sources won't be searchable. " +
                     "Add <code>id(\"dev.mixinmcp.decompile\")</code> to your build.gradle.kts plugins block " +
-                    "and run <code>./gradlew mixinDecompile</code>. " +
+                    "and run <code>./gradlew genDependencySources</code>. " +
                     "<a href=\"https://github.com/muon-rpc/MixinMCP#decompilation-cache\">Setup guide</a>",
                 NotificationType.WARNING,
             )

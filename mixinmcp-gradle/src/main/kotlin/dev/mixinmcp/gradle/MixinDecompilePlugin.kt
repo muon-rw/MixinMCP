@@ -10,7 +10,7 @@ import org.gradle.jvm.JvmLibrary
 import org.gradle.language.base.artifact.SourcesArtifact
 
 /**
- * Gradle plugin that registers the mixinDecompile task.
+ * Gradle plugin that registers the genDependencySources task.
  * Decompiles dependency JARs without -sources.jar into ~/.cache/mixinmcp/decompiled/.
  * See DESIGN.md Section 11.11.
  *
@@ -21,7 +21,7 @@ import org.gradle.language.base.artifact.SourcesArtifact
 class MixinDecompilePlugin : Plugin<Project> {
 
     override fun apply(project: Project) {
-        val taskProvider = project.tasks.register("mixinDecompile", MixinDecompileTask::class.java) {
+        val taskProvider = project.tasks.register("genDependencySources", MixinDecompileTask::class.java) {
             it.group = "mixinmcp"
             it.description = "Decompiles dependency JARs without sources into ~/.cache/mixinmcp/decompiled/"
             it.projectDir = project.projectDir
@@ -46,7 +46,13 @@ class MixinDecompilePlugin : Plugin<Project> {
             }
         }
 
-        // When IntelliJ is syncing the Gradle project, inject mixinDecompile into the
+        project.tasks.register("cleanSourcesCache", CleanCacheTask::class.java) {
+            it.group = "mixinmcp"
+            it.description = "Deletes MixinMCP decompilation cache for this project (use --global for all projects)"
+            it.projectDir = project.projectDir
+        }
+
+        // When IntelliJ is syncing the Gradle project, inject genDependencySources into the
         // task execution plan so it runs automatically as part of sync.
         // Technique borrowed from NeoForge MDG / Fabric Loom.
         if (java.lang.Boolean.getBoolean("idea.sync.active")) {

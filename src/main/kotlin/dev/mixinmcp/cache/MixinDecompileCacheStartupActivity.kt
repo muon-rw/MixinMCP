@@ -32,7 +32,7 @@ class MixinDecompileCacheStartupActivity : ProjectActivity {
             }
             LOG.info("MixinMCP: fireAdditionalLibraryChanged completed")
         } else {
-            LOG.info("MixinMCP: no cached roots found — run ./gradlew mixinDecompile in the project")
+            LOG.info("MixinMCP: no cached roots found — run ./gradlew genDependencySources in the project")
         }
     }
 

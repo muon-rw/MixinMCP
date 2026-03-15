@@ -1,6 +1,11 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.6.4]
+- Fix issues with decompilation state
+- Rename `mixinDecompile` gradle task -> `genDependencySources`
+- Add `cleanSourcesCache`
+
 ## [0.6.3]
 - Fix unresolvable dependencies preventing full gradle sync due to decompile task
 - Show pop-up warning when some dependencies were not decompiled

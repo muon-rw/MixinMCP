@@ -9,7 +9,7 @@ They search and read inside dependency jars natively; grep cannot see jar conten
 Dependencies without published sources are decompiled via the MixinMCP Gradle
 plugin (Vineflower) so every library on the classpath is searchable. Native
 sources are always preferred — decompiled output lacks comments and meaningful
-variable names. Run `./gradlew mixinDecompile` after adding new dependencies.
+variable names. Run `./gradlew genDependencySources` after adding new dependencies.
 
 ## Invoking Tools
 
@@ -105,9 +105,18 @@ Read source by known path (without searching first):
 - If a path is not found, fall back to mixin_search_in_deps to locate the file,
   then use the returned `url`.
 - **Vanilla Minecraft classes** (e.g. `net/minecraft/server/level/ServerPlayer.java`)
-  may not resolve via `path` because they live in the merged forge jar, not the
+  may not resolve via `path` because they live in the merged jar, not the
   decompiled cache. Use `mixin_search_in_deps` to get the `url` from the jar, or
   prefer `mixin_find_class` / `mixin_method_bytecode` for vanilla classes.
+- **If Minecraft sources are missing entirely** (mixin_search_in_deps finds nothing
+  under `net/minecraft/`, mixin_list_source_roots shows no Minecraft root), the
+  mod loader hasn't generated decompiled sources yet. Ask the user to run:
+    - **Fabric Loom:** `./gradlew genSources`
+    - **NeoForge MDG:** `./gradlew downloadAssets` (or check MDG source generation)
+    - **Any loader:** `./gradlew genDependencySources --force` (MixinMCP's own
+      decompiler — works for any dependency including Minecraft, but needs
+      sufficient heap: `org.gradle.jvmargs=-Xmx4g` in gradle.properties)
+  Then call `mixin_sync_project` to refresh IntelliJ's project model.
 
 **mixin_find_references / mixin_call_hierarchy / mixin_super_methods:**
 - Two ways to disambiguate overloaded methods:
@@ -146,7 +155,7 @@ Read source by known path (without searching first):
    decompiled source — the bytecode owner may be a subclass of the declaring class.
 4. When unsure about method origin: use mixin_super_methods.
 5. After writing any mixin: use the built-in get_file_problems to validate.
-6. After changing build.gradle deps: run `./gradlew mixinDecompile` to decompile
+6. After changing build.gradle deps: run `./gradlew genDependencySources` to decompile
    new dependencies, then call mixin_sync_project to refresh IntelliJ's project model.
 
 **Note:** All tools accept an optional `projectPath` parameter. You don't need
@@ -163,3 +172,12 @@ MCP Server. If you get "MCP server does not exist: user-jetbrains", try:
    are enabled
 3. **Restart Cursor** — the MCP server list is cached at startup and may not
    reflect a newly-started IntelliJ instance
+
+**If `net.minecraft` classes are not found in dependency sources:**
+Run `mixin_list_source_roots` to check if Minecraft sources are listed. If not:
+1. **Fabric Loom:** `./gradlew genSources` generates decompiled Minecraft sources
+2. **NeoForge MDG:** `./gradlew downloadAssets` or check MDG source generation
+3. **Any loader:** `./gradlew genDependencySources --force` decompiles large JARs
+   including Minecraft (needs `org.gradle.jvmargs=-Xmx4g` in gradle.properties)
+4. After generating sources, call `mixin_sync_project` to refresh the project model
+5. If caches are stale, `./gradlew cleanSourcesCache` resets the decompilation cache

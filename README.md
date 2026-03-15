@@ -120,7 +120,7 @@ plugins {
 **3. Run decompilation:**
 
 ```bash
-./gradlew mixinDecompile
+./gradlew genDependencySources
 ```
 
 **For local development** (before publishing), you can use `mavenLocal()` instead:
@@ -133,7 +133,7 @@ plugins {
 
 ### How it works
 
-- `./gradlew mixinDecompile` scans your resolved dependencies for JARs without
+- `./gradlew genDependencySources` scans your resolved dependencies for JARs without
   a corresponding `-sources.jar`.
 - Each missing-sources JAR is decompiled to `~/.cache/mixinmcp/decompiled/<hash>/`.
 - A manifest (`manifest.json`) tracks artifact identity so unchanged JARs are
@@ -144,7 +144,7 @@ plugins {
 
 Decompilation is a **blocking Gradle task**, not a background IDE operation. This
 means tools never run against a half-populated cache — by the time you open the
-project, every dependency is searchable. Re-run `./gradlew mixinDecompile` after
+project, every dependency is searchable. Re-run `./gradlew genDependencySources` after
 changing dependencies.
 
 ### Memory tuning
@@ -160,10 +160,10 @@ check and proceed regardless:
 
 ```bash
 # Reduce threads (less memory, slower)
-./gradlew mixinDecompile --threads=1
+./gradlew genDependencySources --threads=1
 
 # Skip OOM pre-flight confirmation (e.g. when you know heap is sufficient)
-./gradlew mixinDecompile --force
+./gradlew genDependencySources --force
 
 # Increase heap (more memory available)
 # Add to your mod project's gradle.properties:

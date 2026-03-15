@@ -1,7 +1,6 @@
 package dev.mixinmcp.gradle
 
 import org.gradle.api.DefaultTask
-import org.gradle.api.GradleException
 import org.gradle.api.artifacts.ArtifactCollection
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.result.ResolvedArtifactResult
@@ -110,53 +109,11 @@ abstract class MixinDecompileTask : DefaultTask() {
                 "${owner.group}:${owner.module}:${owner.version}" in modulesWithSources
             }
 
-        // Pre-flight memory check: warn if large uncached JARs may OOM the daemon
-        val uncachedJars = withoutSources.filter { artifact ->
-            val hash = DecompilationManifest.computeArtifactHash(
-                artifact.file.absolutePath, artifact.file.length(), artifact.file.lastModified()
-            )
-            val cacheDir = globalCacheRoot.resolve(hash).toFile()
-            !(cacheDir.isDirectory && cacheDir.list()?.isNotEmpty() == true)
-        }
-
-        if (uncachedJars.isNotEmpty()) {
-            val largestArtifact = uncachedJars.maxByOrNull { it.file.length() }!!
-            val largestOwner = largestArtifact.variant.owner as ModuleComponentIdentifier
-            val largestLibraryName = "${largestOwner.group}:${largestOwner.module}:${largestOwner.version}"
-            val largestUncachedMb = largestArtifact.file.length() / 1024 / 1024
-            val maxHeapMb = Runtime.getRuntime().maxMemory() / 1024 / 1024
-            // Heuristic: each Vineflower thread needs ~800MB for large JARs,
-            // plus ~500MB baseline for the Gradle daemon itself.
-            val estimatedNeedMb = (threads * 800L) + 500L
-
-            if (largestUncachedMb >= 15 && maxHeapMb < estimatedNeedMb && !force) {
-                val message = "Only ${maxHeapMb}MB is allocated to the Gradle daemon, and $largestLibraryName (${largestUncachedMb}MB) without a sources jar may cause decompilation to fail."
-                val recommendations = "Set org.gradle.jvmargs=-Xmx${estimatedNeedMb + 512}m in gradle.properties, or run with --threads=1. Use --force to skip this check."
-
-                val console = System.console()
-                if (console != null) {
-                    console.writer().println()
-                    console.writer().println("MixinMCP: $message")
-                    console.writer().println("Recommendations: $recommendations")
-                    console.writer().println()
-                    console.writer().print("Would you like to proceed with decompilation? [Y/N] ")
-                    console.writer().flush()
-                    val response = console.readLine()?.trim()?.uppercase()
-                    if (response != "Y" && response != "YES") {
-                        throw GradleException("Decompilation aborted by user.")
-                    }
-                } else {
-                    throw GradleException(
-                        "$message $recommendations (Run interactively to confirm and proceed.)"
-                    )
-                }
-            }
-        }
-
         var manifest = DecompilationManifest().load(projectManifestRoot)
         val currentJarHashes = mutableSetOf<String>()
         var decompiled = 0
         var cached = 0
+        var skipped = 0
         var failed = 0
         val total = withoutSources.size
 
@@ -195,6 +152,18 @@ abstract class MixinDecompileTask : DefaultTask() {
                 touchDirectory(cacheDir.toPath())
                 logger.lifecycle("$progress Already cached: $libraryName ($sizeStr) Skipping...")
                 cached++
+                continue
+            }
+
+            // Per-jar OOM skip: skip large jars that may exceed available heap
+            val jarSizeMb = jarFile.length() / 1024 / 1024
+            val maxHeapMb = Runtime.getRuntime().maxMemory() / 1024 / 1024
+            val estimatedNeedMb = (threads * 800L) + 500L
+
+            if (jarSizeMb >= 15 && maxHeapMb < estimatedNeedMb && !force) {
+                logger.warn("$progress Skipping $libraryName ($sizeStr) — may exceed ${maxHeapMb}MB heap. " +
+                    "Run with --force or set org.gradle.jvmargs=-Xmx${estimatedNeedMb + 512}m")
+                skipped++
                 continue
             }
 
@@ -244,14 +213,22 @@ abstract class MixinDecompileTask : DefaultTask() {
         manifest.save(projectManifestRoot)
 
         logger.lifecycle("MixinMCP decompilation complete: " +
-            "$decompiled decompiled, $cached cached, $failed failed (of $total)")
+            "$decompiled decompiled, $cached cached, $skipped skipped, $failed failed (of $total)")
+
+        if (skipped > 0) {
+            logger.warn("")
+            logger.warn("MixinMCP: $skipped JAR(s) skipped due to memory constraints.")
+            logger.warn("To decompile them, run: ./gradlew genDependencySources --force")
+            logger.warn("Or increase heap: org.gradle.jvmargs=-Xmx${(threads * 800L) + 1012}m in gradle.properties")
+            logger.warn("")
+        }
 
         val unresolvedMarker = projectManifestRoot.resolve(UNRESOLVED_MARKER_FILE)
         if (resolutionFailures.isNotEmpty()) {
             logger.warn("")
             logger.warn("MixinMCP: ${resolutionFailures.size} artifact(s) could not be resolved " +
                 "(likely due to missing mapping data during first sync).")
-            logger.warn("MixinMCP: Run './gradlew mixinDecompile' manually after a successful Gradle sync to decompile them.")
+            logger.warn("MixinMCP: Run './gradlew genDependencySources' manually after a successful Gradle sync to decompile them.")
             logger.warn("")
             Files.createDirectories(projectManifestRoot)
             Files.writeString(unresolvedMarker, resolutionFailures.size.toString())

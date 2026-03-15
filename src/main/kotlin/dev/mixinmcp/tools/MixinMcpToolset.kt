@@ -226,8 +226,11 @@ class MixinMcpToolset : McpToolset {
                 appendLine("=== Source roots (mixin_search_in_deps / mixin_get_dep_source scope) ===")
                 appendLine()
                 appendLine("These roots are searched by mixin_search_in_deps and mixin_get_dep_source.")
-                appendLine("If vanilla Minecraft (net/minecraft/*) is missing, run ./gradlew mixinDecompile")
-                appendLine("or check that your mod loader attaches Minecraft sources.")
+                appendLine("If vanilla Minecraft (net/minecraft/*) is missing:")
+                appendLine("  - Fabric Loom: run ./gradlew genSources to generate Minecraft sources")
+                appendLine("  - NeoForge MDG: run ./gradlew downloadAssets or check MDG source generation")
+                appendLine("  - Any loader: run ./gradlew genDependencySources --force to decompile large JARs")
+                appendLine("  - Then call mixin_sync_project to refresh IntelliJ's project model")
                 appendLine()
 
                 for ((i, info: SourceRootInfo) in roots.withIndex()) {
@@ -246,7 +249,7 @@ class MixinMcpToolset : McpToolset {
                 }
 
                 if (roots.isEmpty()) {
-                    appendLine("No source roots found. Add dependencies and run ./gradlew mixinDecompile for compiled-only jars.")
+                    appendLine("No source roots found. Add dependencies and run ./gradlew genDependencySources for compiled-only jars.")
                 }
             }
         }
@@ -518,7 +521,9 @@ class MixinMcpToolset : McpToolset {
                     "Vanilla Minecraft classes may not be available via path lookup " +
                         "(they live in the merged jar, not the decompiled cache). " +
                         "Use mixin_find_class with includeSource=true to read the source, " +
-                        "or mixin_search_in_deps to get the jar url."
+                        "or mixin_search_in_deps to get the jar url. " +
+                        "If Minecraft sources are missing entirely, the user may need to run " +
+                        "./gradlew genSources (Fabric) or ./gradlew genDependencySources --force."
                 } else {
                     "Path not found in dependency sources. " +
                         "Use mixin_search_in_deps to find the file, then pass its `url` to this tool."

@@ -70,7 +70,7 @@ class MixinDecompileCacheSyncListener : ExternalSystemTaskNotificationListener {
                     "MixinMCP",
                     "$totalUnresolved dependency artifact(s) couldn't be resolved during sync " +
                         "(likely missing mapping data on first load). " +
-                        "Run <code>./gradlew mixinDecompile</code> to decompile them.",
+                        "Run <code>./gradlew genDependencySources</code> to decompile them.",
                     NotificationType.WARNING,
                 )
                 .notify(project)
