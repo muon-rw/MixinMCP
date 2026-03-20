@@ -1,6 +1,9 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.6.6]
+- Improve some default mixin reference tips in the injected ruleset
+
 ## [0.6.5]
 - Mirror published `-sources.jar` into the decompilation cache, to ensure dependencies using
   transformed/remapped classpath jars are always searchable

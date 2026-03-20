@@ -228,8 +228,9 @@ added by other mods or generated at runtime. Does NOT suppress missing-target wa
 use `@SuppressWarnings` for that.
 
 **`@Shadow` + `@Final` + `@Mutable`** — To read a target's field: `@Shadow private Type field`.
-To modify a final field: `@Shadow @Final @Mutable private Type field`. Omitting `@Mutable`
-on a final field causes a runtime crash.
+For final fields, always add `@Final`: `@Shadow @Final private Type field`. To *modify* a
+final field, also add `@Mutable`: `@Shadow @Final @Mutable private Type field`. Omitting
+`@Mutable` when writing to a final field causes a runtime crash.
 
 **`@Unique`** — Marks fields/methods as belonging solely to this mixin. Prevents name
 collision if the target already has a member with the same name. Always prefix mixin-added
@@ -237,6 +238,10 @@ members with your modid: `mymod$fieldName`.
 
 ### Pitfalls
 
+- **`@Shadow` and superclass members**: `@Shadow` can only target members declared directly
+  on the target class, not inherited members. To access inherited fields/methods, have the
+  mixin class extend the target's superclass (with a dummy `super(...)` constructor if needed).
+  Use `abstract` on the mixin class to avoid implementing the parent's interface methods.
 - **`@At` target owner**: Always use the bytecode owner class, not where the method is
   declared in source. Use `mixin_method_bytecode` to verify — the INVOKE* owner may be a
   subclass of the declaring class.
