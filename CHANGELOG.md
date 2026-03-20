@@ -1,6 +1,9 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.6.7]
+- More mixin reference tips
+
 ## [0.6.6]
 - Improve some default mixin reference tips in the injected ruleset
 

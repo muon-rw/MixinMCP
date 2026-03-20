@@ -218,14 +218,10 @@ existing implementation.
 Applied to the mixin class. Implies `remap = false`. Use `targets = "com.example.Class"`
 (string, not class literal). Mixin is silently skipped at runtime if the target is absent.
 
-**`@Coerce`** — Use a supertype or interface when the real type is inaccessible
+**`@Coerce`** — Use a supertype, interface, or inner class when the real type is inaccessible
 (package-private, etc.). Applied to handler parameters or on the method (return type
 coercion). Works with `@Inject` (local capture) and `@Redirect`. Does NOT work on
 `@Accessor`/`@Invoker`. MixinExtras injector support is unconfirmed — test before relying.
-
-**`@Dynamic`** — Purely documentation. Annotates handlers/shadows targeting members
-added by other mods or generated at runtime. Does NOT suppress missing-target warnings;
-use `@SuppressWarnings` for that.
 
 **`@Shadow` + `@Final` + `@Mutable`** — To read a target's field: `@Shadow private Type field`.
 For final fields, always add `@Final`: `@Shadow @Final private Type field`. To *modify* a
@@ -269,5 +265,13 @@ members with your modid: `mymod$fieldName`.
   (and let other mods' wraps run). Only skip the call if you genuinely want to suppress the
   operation.
 - **Priority**: `@Mixin(priority = N)` controls merge order. Higher priority mixins are
-  applied later and "win" conflicts. Default is 1000. Adjusting priority is a last resort —
-  it doesn't compose well across mods.
+  applied later and "win" conflicts. Lower priority can be used to apply before a @Redirect
+  or @Overwrite from another mod to prevent a crash, but can result in your mixin being overwritten.
+  Generally, for such cases. Default is 1000. Adjusting priority is a last resort, and usually a sign
+  that there is a better alternative.
+- **Modifying other mods' Mixins**: Requires the MixinSquared library (by Bawnorton) as a
+  project dependency. Can cancel mixin classes/methods or target their injectors in mixins using target
+  handlers. MixinSquared does NOT require explicit bootstrap — only to register cancellers and
+  adjusters (if used) in your mixin plugin. For API details, search the MixinSquared wiki. Feature
+  requests to the mod are usually better if it's still maintained, but this is often the best solution
+  to complex mixin conflicts on older game versions.
