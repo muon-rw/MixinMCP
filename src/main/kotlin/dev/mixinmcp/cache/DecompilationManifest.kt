@@ -78,7 +78,7 @@ data class DecompilationManifest(
  * @param jarSize Size in bytes of the JAR at decompilation time
  * @param jarModified Last modified timestamp of the JAR at decompilation time
  * @param cachePath Absolute path to the decompiled output directory
- * @param decompilerVersion Decompiler version used (e.g. "vineflower-1.11.2")
+ * @param decompilerVersion Decompiler version (e.g. "vineflower-1.11.2") or "published-sources"
  * @param createdAt Timestamp when this entry was created
  */
 @Serializable

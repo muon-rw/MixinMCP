@@ -113,7 +113,7 @@ pluginManagement {
 ```kotlin
 plugins {
     // ... your existing plugins ...
-    id("dev.mixinmcp.decompile") version "0.4.0"
+    id("dev.mixinmcp.decompile") version "0.6.5"
 }
 ```
 
@@ -135,6 +135,9 @@ plugins {
 
 - `./gradlew genDependencySources` scans your resolved dependencies for JARs without
   a corresponding `-sources.jar`.
+- Dependencies that **do** publish `-sources.jar` still get those jars unpacked into the
+  same cache. Gradle/IntelliJ often use a remapped/transformed classes JAR on the classpath
+  without attaching sources; mirroring fixes search and MCP tools for those libraries.
 - Each missing-sources JAR is decompiled to `~/.cache/mixinmcp/decompiled/<hash>/`.
 - A manifest (`manifest.json`) tracks artifact identity so unchanged JARs are
   never re-decompiled (incremental).

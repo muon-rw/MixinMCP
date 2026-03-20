@@ -1,6 +1,11 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.6.5]
+- Mirror published `-sources.jar` into the decompilation cache, to ensure dependencies using
+  transformed/remapped classpath jars are always searchable
+- Also index `.kt` sources from published source jars
+
 ## [0.6.4]
 - Fix issues with decompilation state
 - Rename `mixinDecompile` gradle task -> `genDependencySources`

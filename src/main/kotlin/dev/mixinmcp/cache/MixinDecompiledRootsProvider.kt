@@ -3,7 +3,6 @@ package dev.mixinmcp.cache
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.AdditionalLibraryRootsProvider
 import com.intellij.openapi.roots.SyntheticLibrary
-import com.intellij.openapi.roots.SyntheticLibrary.ExcludeFileCondition
 import com.intellij.openapi.vfs.VirtualFile
 
 /**
@@ -23,7 +22,7 @@ class MixinDecompiledRootsProvider : AdditionalLibraryRootsProvider() {
                 emptyList(),
                 emptySet(),
                 SyntheticLibrary.ExcludeFileCondition { isDir, filename, _, _, _ ->
-                    !isDir && !filename.endsWith(".java")
+                    !isDir && !(filename.endsWith(".java") || filename.endsWith(".kt"))
                 },
             )
         }

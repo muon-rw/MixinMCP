@@ -17,11 +17,15 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.FileTime
+import java.util.zip.ZipFile
 import java.util.concurrent.TimeUnit
 
 /**
  * Decompiles dependency JARs without -sources.jar into ~/.cache/mixinmcp/decompiled/.
+ * Published `-sources.jar` artifacts are extracted into the same cache so the IDE can
+ * index them even when the Gradle model uses a transformed classes JAR without linked sources.
  * See DESIGN.md Section 11.11.
  *
  * Each Gradle (sub)project writes its own manifest at <projectDir>/.gradle/mixinmcp/manifest.json,
@@ -63,9 +67,9 @@ abstract class MixinDecompileTask : DefaultTask() {
     @get:Internal
     var projectDir: File? = null
 
-    /** Set of "group:module:version" strings for modules that have published sources. */
+    /** "group:module:version" -> Gradle-resolved `-sources.jar` file. */
     @get:Internal
-    var modulesWithSourcesProvider: Provider<Set<String>>? = null
+    var publishedSourcesJarsProvider: Provider<Map<String, File>>? = null
 
     private val globalCacheRoot: Path
         get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
@@ -89,25 +93,28 @@ abstract class MixinDecompileTask : DefaultTask() {
 
         val resolvedArtifacts = collection.resolvedArtifacts.get()
         val resolutionFailures = collection.failures
-        val modulesWithSources = modulesWithSourcesProvider?.get() ?: emptySet()
+        val publishedSourcesJars = publishedSourcesJarsProvider?.get() ?: emptyMap()
 
         val withoutSources = resolvedArtifacts
             .filter { it.variant.owner is ModuleComponentIdentifier }
             .filter { artifact ->
                 val owner = artifact.variant.owner as ModuleComponentIdentifier
                 val coordinate = "${owner.group}:${owner.module}:${owner.version}"
-                coordinate !in modulesWithSources
+                coordinate !in publishedSourcesJars
             }
             .filter { it.file.extension.equals("jar", ignoreCase = true) }
             .filter { !isJdkJar(it.file) }
             .sortedBy { it.file.length() }
 
-        val skippedWithSources = resolvedArtifacts
+        val withPublishedSources = resolvedArtifacts
             .filter { it.variant.owner is ModuleComponentIdentifier }
-            .count { artifact ->
+            .filter { it.file.extension.equals("jar", ignoreCase = true) }
+            .filter { !isJdkJar(it.file) }
+            .filter { artifact ->
                 val owner = artifact.variant.owner as ModuleComponentIdentifier
-                "${owner.group}:${owner.module}:${owner.version}" in modulesWithSources
+                "${owner.group}:${owner.module}:${owner.version}" in publishedSourcesJars
             }
+            .sortedBy { it.file.length() }
 
         var manifest = DecompilationManifest().load(projectManifestRoot)
         val currentJarHashes = mutableSetOf<String>()
@@ -115,9 +122,15 @@ abstract class MixinDecompileTask : DefaultTask() {
         var cached = 0
         var skipped = 0
         var failed = 0
+        var publishedMirrored = 0
+        var publishedCached = 0
+        var publishedFailed = 0
         val total = withoutSources.size
+        val publishedTotal = withPublishedSources.size
 
-        logger.lifecycle("MixinMCP: ${total} JARs without sources ($skippedWithSources skipped — sources available), threads=$threads")
+        logger.lifecycle(
+            "MixinMCP: $total JAR(s) to decompile, $publishedTotal published source JAR(s) to mirror, threads=$threads",
+        )
 
         for ((index, artifact) in withoutSources.withIndex()) {
             val jarFile = artifact.file
@@ -209,11 +222,72 @@ abstract class MixinDecompileTask : DefaultTask() {
             System.gc()
         }
 
+        for ((index, artifact) in withPublishedSources.withIndex()) {
+            val jarFile = artifact.file
+            val jarPath = jarFile.absolutePath
+            val jarSize = jarFile.length()
+            val jarModified = jarFile.lastModified()
+            val hash = DecompilationManifest.computeArtifactHash(jarPath, jarSize, jarModified)
+            currentJarHashes.add(hash)
+
+            val owner = artifact.variant.owner as ModuleComponentIdentifier
+            val libraryName = "${owner.group}:${owner.module}:${owner.version}"
+            val sourcesJar = publishedSourcesJars[libraryName]!!
+            val progress = "[published ${index + 1}/$publishedTotal]"
+
+            val cacheDir = globalCacheRoot.resolve(hash).toFile()
+
+            if (cacheDir.isDirectory && cacheDir.list()?.isNotEmpty() == true) {
+                if (hash !in manifest.entries) {
+                    val entry = CacheEntry(
+                        libraryName = libraryName,
+                        classesJarPath = jarPath,
+                        jarSize = jarSize,
+                        jarModified = jarModified,
+                        cachePath = cacheDir.absolutePath + File.separator,
+                        decompilerVersion = "published-sources",
+                        createdAt = System.currentTimeMillis(),
+                    )
+                    manifest = DecompilationManifest(manifest.entries + (hash to entry))
+                }
+                touchDirectory(cacheDir.toPath())
+                logger.lifecycle("$progress Already cached: $libraryName (published sources)")
+                publishedCached++
+                continue
+            }
+
+            Files.createDirectories(cacheDir.toPath())
+            logger.lifecycle("$progress Mirroring published sources: $libraryName")
+
+            try {
+                extractPublishedSourcesJar(sourcesJar, cacheDir)
+                val entry = CacheEntry(
+                    libraryName = libraryName,
+                    classesJarPath = jarPath,
+                    jarSize = jarSize,
+                    jarModified = jarModified,
+                    cachePath = cacheDir.absolutePath + File.separator,
+                    decompilerVersion = "published-sources",
+                    createdAt = System.currentTimeMillis(),
+                )
+                manifest = DecompilationManifest(manifest.entries + (hash to entry))
+                manifest.save(projectManifestRoot)
+                publishedMirrored++
+                logger.lifecycle("$progress Done! $libraryName")
+            } catch (e: Exception) {
+                logger.warn("$progress Failed mirroring sources for $libraryName — ${e.message}")
+                deleteRecursively(cacheDir)
+                publishedFailed++
+            }
+        }
+
         manifest = DecompilationManifest(manifest.entries.filterKeys { it in currentJarHashes })
         manifest.save(projectManifestRoot)
 
-        logger.lifecycle("MixinMCP decompilation complete: " +
-            "$decompiled decompiled, $cached cached, $skipped skipped, $failed failed (of $total)")
+        logger.lifecycle(
+            "MixinMCP complete: decompile — $decompiled new, $cached cached, $skipped skipped (heap), $failed failed (of $total); " +
+                "published sources — $publishedMirrored mirrored, $publishedCached cached, $publishedFailed failed (of $publishedTotal)",
+        )
 
         if (skipped > 0) {
             logger.warn("")
@@ -281,5 +355,23 @@ abstract class MixinDecompileTask : DefaultTask() {
             file.listFiles()?.forEach { deleteRecursively(it) }
         }
         file.delete()
+    }
+
+    /**
+     * Unzips a `-sources.jar` into [destDir] (defensive against zip-slip).
+     */
+    private fun extractPublishedSourcesJar(sourcesJar: File, destDir: File) {
+        val destRoot = destDir.toPath().normalize()
+        ZipFile(sourcesJar).use { zip ->
+            for (entry in zip.entries().asSequence()) {
+                if (entry.isDirectory) continue
+                val target = destRoot.resolve(entry.name).normalize()
+                if (!target.startsWith(destRoot)) continue
+                Files.createDirectories(target.parent)
+                zip.getInputStream(entry).use { input ->
+                    Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        }
     }
 }

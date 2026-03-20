@@ -396,7 +396,7 @@ class MixinMcpToolset : McpToolset {
             for (child in vf.children) {
                 collectSamplePathsRecursive(child, root, samples, maxSamples)
             }
-        } else if (vf.name.endsWith(".java")) {
+        } else if (vf.name.endsWith(".java") || vf.name.endsWith(".kt")) {
             samples.add(getPathForMask(root, vf))
         }
     }

@@ -8,10 +8,12 @@ import org.gradle.api.artifacts.result.ResolvedArtifactResult
 import org.gradle.internal.DefaultTaskExecutionRequest
 import org.gradle.jvm.JvmLibrary
 import org.gradle.language.base.artifact.SourcesArtifact
+import java.io.File
 
 /**
  * Gradle plugin that registers the genDependencySources task.
- * Decompiles dependency JARs without -sources.jar into ~/.cache/mixinmcp/decompiled/.
+ * Decompiles dependency JARs without `-sources.jar` and mirrors published source JARs
+ * into ~/.cache/mixinmcp/decompiled/ (for IDE indexing when Gradle uses transformed jars).
  * See DESIGN.md Section 11.11.
  *
  * Configuration is resolved at configuration time and passed via Provider to avoid
@@ -23,7 +25,7 @@ class MixinDecompilePlugin : Plugin<Project> {
     override fun apply(project: Project) {
         val taskProvider = project.tasks.register("genDependencySources", MixinDecompileTask::class.java) {
             it.group = "mixinmcp"
-            it.description = "Decompiles dependency JARs without sources into ~/.cache/mixinmcp/decompiled/"
+            it.description = "Decompile jars without sources and mirror published -sources.jar into ~/.cache/mixinmcp/decompiled/"
             it.projectDir = project.projectDir
 
             val config = findClasspathConfiguration(project)
@@ -38,10 +40,10 @@ class MixinDecompilePlugin : Plugin<Project> {
                 }
                 it.artifactCollection = artifactView.artifacts
 
-                // Query which dependencies have published sources.
-                // This is done lazily via a Provider so it only resolves when the task runs.
-                it.modulesWithSourcesProvider = project.provider {
-                    findModulesWithSources(project, config)
+                // Map "group:module:version" -> resolved -sources.jar file (Gradle cache).
+                // Lazily resolved when the task runs (configuration-cache safe).
+                it.publishedSourcesJarsProvider = project.provider {
+                    findPublishedSourcesJars(project, config)
                 }
             }
         }
@@ -70,32 +72,34 @@ class MixinDecompilePlugin : Plugin<Project> {
     }
 
     /**
-     * Uses ArtifactResolutionQuery to find which modules on the classpath have
-     * published -sources.jar artifacts. Returns a set of "group:module:version" strings.
+     * Resolves published `-sources.jar` per module. IntelliJ often attaches the
+     * transformed/remapped classes JAR without linking sources; we mirror these jars
+     * into the MixinMCP cache so SyntheticLibrary roots see real sources.
      */
-    private fun findModulesWithSources(
+    private fun findPublishedSourcesJars(
         project: Project,
         config: org.gradle.api.artifacts.Configuration
-    ): Set<String> {
+    ): Map<String, File> {
         val componentIds = config.incoming.resolutionResult.allDependencies
             .filterIsInstance<ResolvedDependencyResult>()
             .mapNotNull { it.selected.id as? ModuleComponentIdentifier }
             .toSet()
 
-        if (componentIds.isEmpty()) return emptySet()
+        if (componentIds.isEmpty()) return emptyMap()
 
         val result = project.dependencies.createArtifactResolutionQuery()
             .forComponents(componentIds)
             .withArtifacts(JvmLibrary::class.java, SourcesArtifact::class.java)
             .execute()
 
-        return result.resolvedComponents
-            .filter { component ->
-                component.getArtifacts(SourcesArtifact::class.java)
-                    .any { it is ResolvedArtifactResult }
-            }
-            .mapNotNull { it.id as? ModuleComponentIdentifier }
-            .map { "${it.group}:${it.module}:${it.version}" }
-            .toSet()
+        return result.resolvedComponents.mapNotNull { component ->
+            val id = component.id as? ModuleComponentIdentifier ?: return@mapNotNull null
+            val sourcesFile = component.getArtifacts(SourcesArtifact::class.java)
+                .filterIsInstance<ResolvedArtifactResult>()
+                .firstOrNull()
+                ?.file
+                ?: return@mapNotNull null
+            "${id.group}:${id.module}:${id.version}" to sourcesFile
+        }.toMap()
     }
 }
