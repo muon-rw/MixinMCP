@@ -15,8 +15,8 @@ is searchable.
 
 ## Why?
 
-Minecraft mod projects often have 50+ dependencies (remapped Minecraft
-sources, mod APIs, libraries). The built-in MCP Server's tools explicitly exclude
+Minecraft mod projects often have many dependencies (remapped Minecraft
+sources, mod APIs, libraries, other mods added for integration or compatibility). The built-in MCP Server's tools explicitly exclude
 all of them — your LLM can't look up a Minecraft class, search mod APIs, or trace
 inheritance chains across libraries.
 
