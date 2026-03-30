@@ -1,6 +1,13 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.7.0]
+- Rewrite decompilation cache to use proper content-based hash, fixing unnecessary re-decompilation
+- Improve regex handling in tools
+- Fix compileOnly dependencies without published source jars not being indexed or decompiled
+- Fix runtimeOnly dependencies being decompiled and indexed
+- Downgrade required JDK to 17
+
 ## [0.6.7]
 - More mixin reference tips
 

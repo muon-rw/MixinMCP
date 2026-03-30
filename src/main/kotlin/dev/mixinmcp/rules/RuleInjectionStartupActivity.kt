@@ -11,6 +11,7 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.util.concurrent.TimeUnit
 
 class RuleInjectionStartupActivity : ProjectActivity {
 
@@ -119,10 +120,11 @@ class RuleInjectionStartupActivity : ProjectActivity {
         if (!Files.exists(gitignore)) return
 
         try {
-            val content = Files.readString(gitignore)
-            val missing = written.filter { ".cursor/rules/$it" !in content }
+            val alreadyIgnored = gitCheckIgnore(projectRoot, written.map { ".cursor/rules/$it" })
+            val missing = written.filter { ".cursor/rules/$it" !in alreadyIgnored }
             if (missing.isEmpty()) return
 
+            val content = Files.readString(gitignore)
             val block = buildString {
                 if (!content.endsWith("\n")) append("\n")
                 if (GITIGNORE_MARKER !in content) append("\n$GITIGNORE_MARKER\n")
@@ -134,6 +136,30 @@ class RuleInjectionStartupActivity : ProjectActivity {
             Files.writeString(gitignore, block, StandardOpenOption.APPEND)
         } catch (e: IOException) {
             LOG.warn("MixinMCP: failed to update .gitignore: ${e.message}")
+        }
+    }
+
+    /**
+     * Returns the subset of [paths] that git already considers ignored.
+     * Falls back to an empty set if git is not available or the command fails.
+     */
+    private fun gitCheckIgnore(projectRoot: Path, paths: List<String>): Set<String> {
+        return try {
+            val process = ProcessBuilder("git", "check-ignore", *paths.toTypedArray())
+                .directory(projectRoot.toFile())
+                .redirectErrorStream(true)
+                .start()
+            val exited = process.waitFor(5, TimeUnit.SECONDS)
+            if (!exited) {
+                process.destroyForcibly()
+                return emptySet()
+            }
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            }
+        } catch (e: Exception) {
+            LOG.info("MixinMCP: git check-ignore unavailable, skipping gitignore update: ${e.message}")
+            emptySet()
         }
     }
 

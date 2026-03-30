@@ -57,13 +57,12 @@ import java.util.regex.Pattern
 class MixinMcpToolset : McpToolset {
 
     @McpTool
-    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location. includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code — can be very large, prefer includeMembers for API overview.")
+    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind (Library SOURCES, Decompiled cache (MixinMCP), Project source, or Classes JAR (binary) — if binary, prefer reading via mixin_search_in_deps or mixin_get_dep_source which only search proper source roots). includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code — can be very large, prefer includeMembers for API overview.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
         includeMembers: Boolean = true,
         includeSource: Boolean = false,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -86,7 +85,9 @@ class MixinMcpToolset : McpToolset {
                     appendLine("Interfaces: ${interfaces.joinToString { it.qualifiedName ?: it.name ?: "?" }}")
                 }
                 psiClass.containingFile?.virtualFile?.let { vf ->
+                    val sourceKind = classifySourceFile(project, vf)
                     appendLine("Source: ${vf.path}")
+                    appendLine("SourceKind: $sourceKind")
                 }
                 appendLine()
 
@@ -122,7 +123,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Use when you don't know the full class name — search by substring across project and dependencies. kind: class (default), method, field, all. scope: all (default), project, libraries. Returns FQCN for classes, class#method(…) for methods, class.field for fields. maxResults defaults to 50.")
+    @McpDescription("Use when you don't know the full class name — search by short name substring across project and dependencies. Pass a simple name like 'LivingEntity' or 'getHealth', NOT a fully-qualified name (FQCNs are auto-simplified). kind: class (default), method, field, all. scope: all (default), project, libraries. Returns FQCN for classes, class#method(params) for methods, class.field: type for fields. maxResults defaults to 50.")
     @Suppress("unused")
     suspend fun mixin_search_symbols(
         query: String,
@@ -130,7 +131,6 @@ class MixinMcpToolset : McpToolset {
         scope: String = "all",
         caseSensitive: Boolean = false,
         maxResults: Int = 50,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -141,15 +141,22 @@ class MixinMcpToolset : McpToolset {
             else -> GlobalSearchScope.allScope(project)
         }
 
+        val effectiveQuery: String = extractSimpleName(query)
+
         val result: String = ReadAction.compute<String, Throwable> {
             val cache: PsiShortNamesCache = PsiShortNamesCache.getInstance(project)
-            val q: String = if (caseSensitive) query else query.lowercase()
+            val q: String = if (caseSensitive) effectiveQuery else effectiveQuery.lowercase()
             fun matches(name: String): Boolean {
                 val n = if (caseSensitive) name else name.lowercase()
                 return n.contains(q)
             }
 
             buildString {
+                if (effectiveQuery != query) {
+                    appendLine("(query '$query' looks like an FQCN — searching short names for '$effectiveQuery')")
+                    appendLine()
+                }
+
                 if (kind == "class" || kind == "all") {
                     appendLine("--- Classes ---")
                     val allClassNames: Array<String> = cache.allClassNames
@@ -179,7 +186,9 @@ class MixinMcpToolset : McpToolset {
                         for (m: PsiMethod in methods) {
                             if (count >= maxResults) break
                             val declClass: PsiClass? = m.containingClass
-                            appendLine("  ${declClass?.qualifiedName ?: "?"}#$name(...)")
+                            val params: String = m.parameterList.parameters
+                                .joinToString(", ") { it.type.presentableText }
+                            appendLine("  ${declClass?.qualifiedName ?: "?"}#$name($params)")
                             count++
                         }
                     }
@@ -198,7 +207,7 @@ class MixinMcpToolset : McpToolset {
                         for (f: PsiField in fields) {
                             if (count >= maxResults) break
                             val declClass: PsiClass? = f.containingClass
-                            appendLine("  ${declClass?.qualifiedName ?: "?"}.$name")
+                            appendLine("  ${declClass?.qualifiedName ?: "?"}.${f.name}: ${f.type.presentableText}")
                             count++
                         }
                     }
@@ -215,7 +224,6 @@ class MixinMcpToolset : McpToolset {
     @Suppress("unused")
     suspend fun mixin_list_source_roots(
         maxSamplesPerRoot: Int = 5,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -258,7 +266,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Searches dependency/library sources with a regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Returns url (pass to mixin_get_dep_source) and matching line snippets with matches in ||markers||. regexPattern: prefer simple single-term patterns; make separate calls for multiple patterns. fileMask: glob matched against the full file path inside the jar (e.g. *minecraft* matches net/minecraft/…/Level.java; *LivingEntity* matches that specific class); defaults to all files. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default.")
+    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). Defaults to all files. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
@@ -266,7 +274,6 @@ class MixinMcpToolset : McpToolset {
         caseSensitive: Boolean = true,
         maxResults: Int = 100,
         timeout: Long = 15000,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -280,27 +287,17 @@ class MixinMcpToolset : McpToolset {
             return McpToolCallResult.error("Invalid regex: ${e.message}")
         }
 
-        val maskGlob: String = fileMask ?: "*"
-        val matchesMask: (String) -> Boolean = { fileName ->
-            if (maskGlob == "*") true
-            else {
-                val regex: String = maskGlob
-                    .replace(".", "\\.")
-                    .replace("*", ".*")
-                    .replace("?", ".")
-                Regex(regex, RegexOption.IGNORE_CASE).matches(fileName)
-            }
-        }
+        val matchesMask: (String) -> Boolean = buildFileMaskMatcher(fileMask)
 
-        val results: MutableList<String> = mutableListOf()
+        val hits: MutableList<DepSearchHit> = mutableListOf()
         val startTime: Long = System.currentTimeMillis()
         var timedOut = false
 
         ReadAction.compute<Unit, Throwable> {
-            for (root in collectAllSourceRoots(project)) {
+            for (info in collectSourceRootsWithMetadata(project)) {
                 if (System.currentTimeMillis() - startTime > timeout) { timedOut = true; break }
-                if (results.size >= maxResults) break
-                collectRegexMatches(root, root, pattern, matchesMask, results, maxResults, startTime, timeout)
+                if (hits.size >= maxResults) break
+                collectRegexHits(info.root, info.root, pattern, matchesMask, hits, maxResults, startTime, timeout, info.typeLabel)
             }
             if (!timedOut && System.currentTimeMillis() - startTime > timeout) timedOut = true
         }
@@ -309,17 +306,15 @@ class MixinMcpToolset : McpToolset {
         val result: String = buildString {
             appendLine("=== Regex search in dependencies: $regexPattern ===")
             appendLine()
-            if (results.isEmpty()) {
+            if (hits.isEmpty()) {
                 appendLine("No matches found.")
                 if (timedOut) {
                     appendLine("(search timed out after ${elapsed}ms — try a more specific pattern, add fileMask, or increase timeout)")
                 }
             } else {
-                for (line: String in results) {
-                    appendLine(line)
-                }
-                if (results.size >= maxResults) {
-                    appendLine("  ... (truncated at $maxResults results)")
+                formatGroupedHits(this, hits)
+                if (hits.size >= maxResults) {
+                    appendLine("  ... (truncated at $maxResults matches)")
                 }
                 if (timedOut) {
                     appendLine("  ... (search timed out after ${elapsed}ms — not all files were searched)")
@@ -377,6 +372,25 @@ class MixinMcpToolset : McpToolset {
     private data class SourceRootInfo(val root: VirtualFile, val typeLabel: String)
 
     /**
+     * Determines which source root type a VirtualFile belongs to.
+     * Must be called inside ReadAction.
+     */
+    private fun classifySourceFile(project: Project, vf: VirtualFile): String {
+        val vfUrl = vf.url
+        for (info in collectSourceRootsWithMetadata(project)) {
+            val rootUrl = info.root.url.trimEnd('/')
+            if (vfUrl.startsWith(rootUrl)) {
+                return info.typeLabel
+            }
+        }
+        val projectPath = project.basePath?.replace('\\', '/')
+        if (projectPath != null && vf.path.replace('\\', '/').startsWith(projectPath)) {
+            return "Project source"
+        }
+        return "Classes JAR (binary)"
+    }
+
+    /**
      * Collects up to maxSamples .java file paths from a root (for diagnostic output).
      */
     private fun collectSamplePaths(root: VirtualFile, maxSamples: Int): List<String> {
@@ -432,6 +446,52 @@ class MixinMcpToolset : McpToolset {
     }
 
     /**
+     * If the query looks like an FQCN (contains dots with lowercase segments, e.g.
+     * "net.minecraft.world.entity.LivingEntity"), extracts the simple name so it
+     * can be matched against PsiShortNamesCache which only stores short names.
+     * Also handles slash-separated paths ("net/minecraft/.../LivingEntity").
+     */
+    private fun extractSimpleName(query: String): String {
+        val trimmed = query.trim()
+        if ('/' in trimmed) return trimmed.substringAfterLast('/')
+        if ('.' in trimmed) {
+            val parts = trimmed.split('.')
+            if (parts.size >= 3 && parts.dropLast(1).any { it.first().isLowerCase() }) {
+                return parts.last()
+            }
+        }
+        return trimmed
+    }
+
+    /**
+     * Builds a file-mask matcher from user input. Supports three modes:
+     * - null / blank / "*" → match everything
+     * - No glob characters (* ?) → case-insensitive substring match against the
+     *   full path, so bare names like "LivingEntity" or "LivingEntity.java" work
+     *   without requiring agents to wrap in wildcards.
+     * - Contains glob characters → convert glob to regex anchored on the full path
+     *   (single `*` crosses `/`, matching the documented behavior).
+     * The regex is pre-compiled once instead of per-file.
+     */
+    private fun buildFileMaskMatcher(fileMask: String?): (String) -> Boolean {
+        val mask = fileMask?.trim()
+        if (mask.isNullOrBlank() || mask == "*") return { true }
+
+        val hasGlob = '*' in mask || '?' in mask
+        if (!hasGlob) {
+            val lower = mask.lowercase()
+            return { path -> path.lowercase().contains(lower) }
+        }
+
+        val regex: String = mask
+            .replace(".", "\\.")
+            .replace("*", ".*")
+            .replace("?", ".")
+        val compiled = Regex(regex, RegexOption.IGNORE_CASE)
+        return { path -> compiled.containsMatchIn(path) }
+    }
+
+    /**
      * Returns the path used for fileMask matching: for JAR entries, the path inside
      * the jar (e.g. net/minecraft/world/entity/LivingEntity.java); for directory
      * roots (decompiled cache), the path relative to root.
@@ -448,22 +508,31 @@ class MixinMcpToolset : McpToolset {
         }
     }
 
-    private fun collectRegexMatches(
+    private data class DepSearchHit(
+        val url: String,
+        val filePath: String,
+        val rootLabel: String,
+        val lineNum: Int,
+        val highlighted: String,
+    )
+
+    private fun collectRegexHits(
         vf: VirtualFile,
         root: VirtualFile,
         pattern: Pattern,
         matchesMask: (String) -> Boolean,
-        results: MutableList<String>,
+        hits: MutableList<DepSearchHit>,
         maxResults: Int,
         startTime: Long,
         timeout: Long,
+        rootLabel: String = "",
     ) {
-        if (results.size >= maxResults) return
+        if (hits.size >= maxResults) return
         if (System.currentTimeMillis() - startTime > timeout) return
 
         if (vf.isDirectory) {
             for (child in vf.children) {
-                collectRegexMatches(child, root, pattern, matchesMask, results, maxResults, startTime, timeout)
+                collectRegexHits(child, root, pattern, matchesMask, hits, maxResults, startTime, timeout, rootLabel)
             }
         } else {
             val pathToMatch: String = getPathForMask(root, vf)
@@ -475,20 +544,40 @@ class MixinMcpToolset : McpToolset {
             }
             val lines: List<String> = content.lines()
             for ((i, line) in lines.withIndex()) {
-                if (results.size >= maxResults) return
+                if (hits.size >= maxResults) return
                 val matcher = pattern.matcher(line)
                 if (matcher.find()) {
-                    val highlighted: String = matcher.replaceAll("||\$0||")
-                    val lineNum: Int = i + 1
-                    results.add("url: ${vf.url}")
-                    results.add("  line $lineNum: $highlighted")
+                    hits.add(DepSearchHit(
+                        url = vf.url,
+                        filePath = pathToMatch,
+                        rootLabel = rootLabel,
+                        lineNum = i + 1,
+                        highlighted = matcher.replaceAll("||\$0||"),
+                    ))
                 }
             }
         }
     }
 
+    /**
+     * Formats search hits grouped by file. Each file header shows the logical
+     * path and URL once; matching lines are listed compactly underneath.
+     */
+    private fun formatGroupedHits(sb: StringBuilder, hits: List<DepSearchHit>) {
+        val grouped: Map<String, List<DepSearchHit>> = hits.groupBy { it.url }
+        for ((_, fileHits) in grouped) {
+            val first = fileHits.first()
+            sb.appendLine("--- ${first.filePath} [${first.rootLabel}] ---")
+            sb.appendLine("url: ${first.url}")
+            for (hit in fileHits) {
+                sb.appendLine("  ${hit.lineNum}: ${hit.highlighted}")
+            }
+            sb.appendLine()
+        }
+    }
+
     @McpTool
-    @McpDescription("Reads source from dependency jars or decompiled cache. Use this tool to view library code that grep/read_file cannot access. Pass url (exact string from mixin_search_in_deps results, e.g. jar://…/sources.jar!/path/File.java) or path (package path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java — not a filesystem path). url takes precedence if both given. lineNumber, linesBefore (default 30), linesAfter (default 70) define a window around a specific line.")
+    @McpDescription("Reads source from dependency jars or decompiled cache. Use this tool to view library code that grep/read_file cannot access. Pass url (exact url: string from mixin_search_in_deps results — may be jar://…!/path/File.java or file://…/path/File.java) or path (package path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java — not a filesystem path). url takes precedence if both given. lineNumber, linesBefore (default 30), linesAfter (default 70) define a window around a specific line.")
     @Suppress("unused")
     suspend fun mixin_get_dep_source(
         url: String? = null,
@@ -496,7 +585,6 @@ class MixinMcpToolset : McpToolset {
         lineNumber: Int = 1,
         linesBefore: Int = 30,
         linesAfter: Int = 70,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -538,12 +626,16 @@ class MixinMcpToolset : McpToolset {
             return McpToolCallResult.error("Failed to read file: ${e.message}")
         }
 
+        val sourceKind: String = ReadAction.compute<String, Throwable> {
+            classifySourceFile(project, vf)
+        }
+
         val lines: List<String> = content.lines()
         val start: Int = (lineNumber - linesBefore).coerceAtLeast(1)
         val end: Int = (lineNumber + linesAfter).coerceAtMost(lines.size)
 
         val result: String = buildString {
-            appendLine("=== ${vf.name} (lines $start-$end) ===")
+            appendLine("=== ${vf.name} (lines $start-$end) [sourceKind: $sourceKind] ===")
             appendLine()
             for (i in start..end) {
                 if (i >= 1 && i <= lines.size) {
@@ -563,7 +655,6 @@ class MixinMcpToolset : McpToolset {
         className: String,
         filter: String = "all",
         includeInstructions: Boolean = false,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -645,13 +736,12 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor — use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor to disambiguate overloads. For class-level bytecode overview use mixin_class_bytecode.")
+    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor — use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor in JVM format to disambiguate overloads (e.g. (Lnet/minecraft/world/entity/Entity;)V, or ()V for no-arg methods). For class-level bytecode overview use mixin_class_bytecode.")
     @Suppress("unused")
     suspend fun mixin_method_bytecode(
         className: String,
         methodName: String,
         methodDescriptor: String? = null,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -701,7 +791,6 @@ class MixinMcpToolset : McpToolset {
         direction: String = "both",
         maxDepth: Int = 10,
         includeInterfaces: Boolean = true,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -765,7 +854,6 @@ class MixinMcpToolset : McpToolset {
     suspend fun mixin_find_impls(
         className: String,
         maxResults: Int = 50,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -811,7 +899,6 @@ class MixinMcpToolset : McpToolset {
         className: String,
         methodName: String? = null,
         maxResults: Int = 50,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -1040,14 +1127,13 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Returns the super method declaration chain for a method. Use this tool to confirm where a method is originally declared before targeting it in a mixin. Shows all overrides from most specific to most general. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z) — same as in @Inject(method = \"...\"). For parameterless methods, pass parameterTypes: [].")
+    @McpDescription("Returns the super method declaration chain for a method. Use this tool to confirm where a method is originally declared before targeting it in a mixin. Shows all overrides from most specific to most general. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z) — same as in @Inject(method = \"...\"). For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\".")
     @Suppress("unused")
     suspend fun mixin_super_methods(
         className: String,
         methodName: String,
         parameterTypes: List<String>? = null,
         methodDescriptor: String? = null,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -1088,7 +1174,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Find all references to a class or member across project and dependencies. Without memberName: references to the class. With memberName: references to that method/field. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods, pass parameterTypes: []. maxResults: 100 default.")
+    @McpDescription("Find all references to a class or member across project and dependencies. Without memberName: references to the class. With memberName: references to that method/field. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\". maxResults: 100 default.")
     @Suppress("unused")
     suspend fun mixin_find_references(
         className: String,
@@ -1096,7 +1182,6 @@ class MixinMcpToolset : McpToolset {
         parameterTypes: List<String>? = null,
         methodDescriptor: String? = null,
         maxResults: Int = 100,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
@@ -1187,7 +1272,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Finds callers or callees of a method. Use this tool to trace execution flow when writing mixins. direction: callers (default) — finds call sites; callees — walks method body for outgoing calls. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods, pass parameterTypes: []. maxDepth: 3 default, maxResults: 50 default.")
+    @McpDescription("Finds callers or callees of a method. Use this tool to trace execution flow when writing mixins. direction: callers (default) — finds call sites; callees — walks method body for outgoing calls. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\". maxResults: 50 default.")
     @Suppress("unused")
     suspend fun mixin_call_hierarchy(
         className: String,
@@ -1197,7 +1282,6 @@ class MixinMcpToolset : McpToolset {
         direction: String = "callers",
         maxDepth: Int = 3,
         maxResults: Int = 50,
-        projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")

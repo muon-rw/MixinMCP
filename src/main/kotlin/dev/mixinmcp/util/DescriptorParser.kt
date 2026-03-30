@@ -29,18 +29,20 @@ object DescriptorParser {
      * Suitable for matching against PsiParameter.type.canonicalText.
      *
      * @param descriptor JVM descriptor (e.g. "(Lnet/minecraft/world/entity/Entity;)Z")
-     * @return List of canonical parameter type names, or empty list if parsing fails
+     * @return List of canonical parameter type names (empty for no-arg methods like
+     *         `()V`), or **null** if the descriptor is malformed / cannot be parsed.
      */
-    fun parseParameterTypes(descriptor: String): List<String> {
+    fun parseParameterTypes(descriptor: String): List<String>? {
         val trimmed: String = descriptor.trim()
-        if (!trimmed.startsWith("(") || !trimmed.contains(")")) return emptyList()
+        if (!trimmed.startsWith("(") || !trimmed.contains(")")) return null
         val endParen: Int = trimmed.indexOf(')')
         val paramsPart: String = trimmed.substring(1, endParen)
+        if (paramsPart.isEmpty()) return emptyList()
         val internalNames: MutableList<String> = mutableListOf()
         var i: Int = 0
         while (i < paramsPart.length) {
             val parsed: Pair<Int, String> = parseFieldDescriptor(paramsPart, i)
-                ?: return emptyList()
+                ?: return null
             i += parsed.first
             internalNames.add(parsed.second)
         }

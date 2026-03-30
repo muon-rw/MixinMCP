@@ -6,7 +6,6 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
-import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -50,22 +49,10 @@ class DecompilationCacheService(private val project: Project) {
     fun getCachedRoots(): List<CachedLibraryInfo> {
         val mergedEntries = loadMergedManifestEntries()
         val result = mutableListOf<CachedLibraryInfo>()
-        var invalidJar = 0
         var missingCache = 0
         var noVirtualFile = 0
 
         for ((hash, entry) in mergedEntries) {
-            val jarFile = File(entry.classesJarPath)
-            if (!entry.isValid(jarFile)) {
-                if (invalidJar == 0) {
-                    LOG.info("MixinMCP: first invalid JAR: ${entry.classesJarPath} " +
-                        "(exists=${jarFile.exists()}, size=${jarFile.length()}/${entry.jarSize}, " +
-                        "modified=${jarFile.lastModified()}/${entry.jarModified})")
-                }
-                invalidJar++
-                continue
-            }
-
             val cachePath = Paths.get(entry.cachePath)
             if (!Files.exists(cachePath) || !Files.isDirectory(cachePath)) {
                 missingCache++
@@ -81,7 +68,7 @@ class DecompilationCacheService(private val project: Project) {
         }
 
         LOG.info("MixinMCP: getCachedRoots() → ${result.size} valid, " +
-            "$invalidJar invalid JAR, $missingCache missing cache dir, " +
+            "$missingCache missing cache dir, " +
             "$noVirtualFile no VirtualFile (of ${mergedEntries.size} total)")
         return result
     }

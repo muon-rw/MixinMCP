@@ -18,7 +18,9 @@ import java.io.File
  *
  * Configuration is resolved at configuration time and passed via Provider to avoid
  * Task.project access at execution time (required for Gradle configuration cache).
- * Supports runtimeClasspath, compileClasspath for Java/Neoforge MDG projects.
+ * Resolves compileClasspath to cover all compile-visible dependency scopes
+ * (implementation, api, compileOnly, compileOnlyApi). runtimeOnly deps are
+ * excluded — they can't be referenced in code or targeted by mixins.
  */
 class MixinDecompilePlugin : Plugin<Project> {
 
@@ -28,22 +30,21 @@ class MixinDecompilePlugin : Plugin<Project> {
             it.description = "Decompile jars without sources and mirror published -sources.jar into ~/.cache/mixinmcp/decompiled/"
             it.projectDir = project.projectDir
 
-            val config = findClasspathConfiguration(project)
-            if (config != null) {
+            val configs = findClasspathConfigurations(project)
+            if (configs.isNotEmpty()) {
                 // Use lenient resolution so that artifact transform failures (e.g.
                 // ModDevGradle's RemappingTransform needing intermediateToNamed.zip
                 // before it's been generated) don't crash the entire task. Failed
                 // artifacts are captured via ArtifactCollection.getFailures() and
                 // reported as a warning instead.
-                val artifactView = config.incoming.artifactView { view ->
-                    view.lenient(true)
+                it.artifactCollections = configs.map { config ->
+                    config.incoming.artifactView { view -> view.lenient(true) }.artifacts
                 }
-                it.artifactCollection = artifactView.artifacts
 
                 // Map "group:module:version" -> resolved -sources.jar file (Gradle cache).
                 // Lazily resolved when the task runs (configuration-cache safe).
                 it.publishedSourcesJarsProvider = project.provider {
-                    findPublishedSourcesJars(project, config)
+                    findPublishedSourcesJars(project, configs)
                 }
             }
         }
@@ -67,23 +68,27 @@ class MixinDecompilePlugin : Plugin<Project> {
         }
     }
 
-    private fun findClasspathConfiguration(project: Project): org.gradle.api.artifacts.Configuration? {
-        return project.configurations.findByName("runtimeClasspath")
+    private fun findClasspathConfigurations(project: Project): List<org.gradle.api.artifacts.Configuration> {
+        return listOfNotNull(
+            project.configurations.findByName("compileClasspath"),
+        )
     }
 
     /**
-     * Resolves published `-sources.jar` per module. IntelliJ often attaches the
-     * transformed/remapped classes JAR without linking sources; we mirror these jars
-     * into the MixinMCP cache so SyntheticLibrary roots see real sources.
+     * Resolves published `-sources.jar` per module across all classpath configurations.
+     * IntelliJ often attaches the transformed/remapped classes JAR without linking
+     * sources; we mirror these jars into the MixinMCP cache so SyntheticLibrary roots
+     * see real sources.
      */
     private fun findPublishedSourcesJars(
         project: Project,
-        config: org.gradle.api.artifacts.Configuration
+        configs: List<org.gradle.api.artifacts.Configuration>
     ): Map<String, File> {
-        val componentIds = config.incoming.resolutionResult.allDependencies
-            .filterIsInstance<ResolvedDependencyResult>()
-            .mapNotNull { it.selected.id as? ModuleComponentIdentifier }
-            .toSet()
+        val componentIds = configs.flatMap { config ->
+            config.incoming.resolutionResult.allDependencies
+                .filterIsInstance<ResolvedDependencyResult>()
+                .mapNotNull { it.selected.id as? ModuleComponentIdentifier }
+        }.toSet()
 
         if (componentIds.isEmpty()) return emptyMap()
 

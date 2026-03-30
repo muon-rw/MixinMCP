@@ -1,10 +1,11 @@
 ---
 alwaysApply: true
 ---
-This is a Minecraft mod project with extensive mixin usage and many dependencies.
+This is a Minecraft mod project.
 
-You have access to MixinMCP tools via the IntelliJ MCP server. **Prefer these
-over grep, read_file, or jar extraction** when working with mod/dependency code.
+You have access to MixinMCP tools via the IntelliJ MCP server, which can intelligently
+search Minecraft sources and dependency sources more efficiently than other tooling. **ALWAYS prefer
+these over grep, read_file, or jar extraction** when working with minecraft/mod/dependency code.
 They search and read inside dependency jars natively; grep cannot see jar contents.
 Dependencies without published sources are decompiled via the MixinMCP Gradle
 plugin (Vineflower) so every library on the classpath is searchable. Native
@@ -38,9 +39,10 @@ Search dependency sources, then read the result:
     CallMcpTool(
       server="user-jetbrains",
       toolName="mixin_search_in_deps",
-      arguments={"regexPattern": "destroyBlock", "fileMask": "*Level*"}
+      arguments={"regexPattern": "destroyBlock", "fileMask": "Level"}
     )
-    // Results include `url:` lines — pass that url to mixin_get_dep_source:
+    // Results are grouped by file. Each group shows a `url:` line once —
+    // pass that url to mixin_get_dep_source:
     CallMcpTool(
       server="user-jetbrains",
       toolName="mixin_get_dep_source",
@@ -65,7 +67,7 @@ Read source by known path (without searching first):
 
 | Goal | Tool |
 |------|------|
-| Look up a class by FQCN | mixin_find_class |
+| Look up a class by FQCN | mixin_find_class (check SourceKind — if "Classes JAR (binary)", use mixin_get_dep_source for better source) |
 | Search names across classpath | mixin_search_symbols |
 | Grep dependency sources by regex | mixin_search_in_deps → then mixin_get_dep_source with returned `url` |
 | Read a known dependency file | mixin_get_dep_source (pass `path`, e.g. `io/redspace/.../Utils.java`) |
@@ -84,24 +86,32 @@ Read source by known path (without searching first):
 ## Common Pitfalls
 
 **mixin_search_in_deps:**
-- fileMask is a glob matched against the **file path inside the jar** (e.g.
-  `net/minecraft/world/entity/LivingEntity.java`). It does NOT match jar names
-  or Maven coordinates.
-    - `*LivingEntity*` — good, matches that class specifically
-    - `*minecraft*` — broad, matches any path containing "minecraft"; prefer
-      narrower masks when you know the class name
-    - `*.java` — effectively no filter
-- Prefer simple single-term regex patterns. Complex alternation (e.g.
-  `addEffect.*dimension|changeDimension`) is fragile — make separate calls.
+- `regexPattern` is **Java regex**. For literal matching, escape regex
+  metacharacters: `addEffect\\(` not `addEffect(`. Parentheses, brackets,
+  `$`, `+`, `*` are all regex-special. Prefer simple patterns; make separate
+  calls for different search terms instead of complex alternation.
+- Each result's `url:` line includes a `[rootKind: ...]` annotation showing the
+  source type (e.g. `Library SOURCES: ...` for published `-sources.jar`,
+  `Decompiled cache (MixinMCP)` for Vineflower decompiled). When the same file
+  appears from multiple roots, prefer Library SOURCES hits over decompiled ones.
+- fileMask filters which files are searched, matched against the **file path
+  inside the jar** (e.g. `net/minecraft/world/entity/LivingEntity.java`):
+    - **No wildcards** → case-insensitive substring match: `LivingEntity`
+      matches `net/minecraft/…/LivingEntity.java` automatically
+    - **With wildcards** → glob: `*minecraft*` matches paths containing
+      "minecraft", `*.java` effectively no filter
+    - It does NOT match jar names or Maven coordinates.
 - Broad searches can time out. Increase `timeout` (e.g. 20000–30000) for
   searches without a fileMask or on projects with 50+ dependencies.
 
 **mixin_get_dep_source:**
-- `url`: copy the exact `url:` string from mixin_search_in_deps output. This is
-  the most reliable method after a search.
+- `url`: copy the exact `url:` string from mixin_search_in_deps output (strip
+  the `[rootKind: ...]` suffix). This is the most reliable method after a search.
 - `path`: use the class's package path with `/` separators and `.java` extension
   (e.g. `io/redspace/ironsspellbooks/api/util/Utils.java`). This is NOT a
   filesystem path. Convenient when you already know the class location.
+- The response header includes `[sourceKind: ...]` indicating the source quality
+  (Library SOURCES, Decompiled cache, etc.).
 - If a path is not found, fall back to mixin_search_in_deps to locate the file,
   then use the returned `url`.
 - **Vanilla Minecraft classes** (e.g. `net/minecraft/server/level/ServerPlayer.java`)
@@ -122,7 +132,7 @@ Read source by known path (without searching first):
 - Two ways to disambiguate overloaded methods:
     - `"parameterTypes": ["MobEffectInstance", "Entity"]` — simple type names
     - `"methodDescriptor": "(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z"` — JVM descriptor, same format as in mixin `@Inject(method = "...")`
-    - `"parameterTypes": []` — for parameterless methods
+    - For parameterless methods: `"parameterTypes": []` or `"methodDescriptor": "()V"`
 - If disambiguation fails, the error message lists all available overloads with
   ready-to-copy `parameterTypes` values.
 - `mixin_find_references` returns both runtime call sites AND string references
@@ -131,9 +141,14 @@ Read source by known path (without searching first):
   — it returns structured results with injection types and `@At` targets.
 
 **mixin_search_symbols:**
+- Searches **short names** (simple class/method/field names), NOT fully-qualified
+  names. Pass `LivingEntity` not `net.minecraft.world.entity.LivingEntity`
+  (FQCNs are auto-simplified but a simple name is preferred).
 - The required parameter is `query` (a single name substring), NOT `symbolName`
   or `symbolKind`. It matches symbol names *containing* the query. Search for one
   name at a time: `{"query": "getEffect", "kind": "method"}`, not combined strings.
+- Method results now include parameter types (e.g. `Class#method(Entity, int)`)
+  for easier disambiguation when calling other tools.
 
 **mixin_class_bytecode:**
 - Decompiled source does NOT show synthetic method names. If you need to target
@@ -158,10 +173,8 @@ Read source by known path (without searching first):
 6. After changing build.gradle deps: run `./gradlew genDependencySources` to decompile
    new dependencies, then call mixin_sync_project to refresh IntelliJ's project model.
 
-**Note:** All tools accept an optional `projectPath` parameter. You don't need
-it when only one project is open in IntelliJ (the common case). If you have
-multiple projects open and tools target the wrong one, pass the workspace root
-path as `projectPath` to disambiguate.
+**Note:** Only `mixin_sync_project` accepts an optional `projectPath` parameter
+(for multi-root setups). All other tools automatically use the open project.
 
 ## Troubleshooting
 **If `mixin_*` tools are not found or the server is unavailable:**

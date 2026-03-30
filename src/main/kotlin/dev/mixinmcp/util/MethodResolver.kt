@@ -62,7 +62,7 @@ object MethodResolver {
             if (methods.isEmpty()) return@compute null
 
             val canonicalTypes: List<String> = DescriptorParser.parseParameterTypes(descriptor)
-            if (canonicalTypes.isEmpty()) return@compute null
+                ?: return@compute null
 
             val parameterTypes: List<String> = DescriptorParser.toParameterTypesFormat(canonicalTypes)
             val psiMatched: List<PsiMethod> = methods.filter { matchesDescriptorTypes(it, canonicalTypes, parameterTypes) }
@@ -136,10 +136,10 @@ object MethodResolver {
 
             val effectiveTypes: List<String>? = when {
                 !methodDescriptor.isNullOrBlank() -> {
-                    val canonical: List<String> = DescriptorParser.parseParameterTypes(methodDescriptor)
-                    if (canonical.isEmpty()) {
+                    val canonical: List<String>? = DescriptorParser.parseParameterTypes(methodDescriptor)
+                    if (canonical == null) {
                         return@compute Resolution.Error(
-                            "Invalid method descriptor: '$methodDescriptor'. Expected format: (params)returnType, e.g. (Lnet/minecraft/world/entity/Entity;)V",
+                            "Invalid method descriptor: '$methodDescriptor'. Expected format: (params)returnType, e.g. (Lnet/minecraft/world/entity/Entity;)V or ()V for no-arg methods",
                         )
                     }
                     DescriptorParser.toParameterTypesFormat(canonical)

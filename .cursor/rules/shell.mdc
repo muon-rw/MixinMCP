@@ -1,0 +1,7 @@
+---
+description: Default shell is PowerShell on Windows
+alwaysApply: true
+---
+The default shell on this system is PowerShell. Use PowerShell syntax for all shell
+commands — do not use Unix utilities (`wc`, `grep`, `cat`, `sed`, etc.) unless
+explicitly available via installed tools like ripgrep (`rg`).

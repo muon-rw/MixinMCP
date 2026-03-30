@@ -56,12 +56,14 @@ abstract class MixinDecompileTask : DefaultTask() {
     var force: Boolean = false
 
     /**
-     * Set by MixinDecompilePlugin at configuration time. Lenient artifact collection
-     * so that transform failures (e.g. missing mapping data) are captured as failures
-     * rather than crashing the entire resolution.
+     * Set by MixinDecompilePlugin at configuration time. Lenient artifact collections
+     * (one per classpath configuration) so that transform failures (e.g. missing
+     * mapping data) are captured as failures rather than crashing the entire resolution.
+     * Resolves compileClasspath to cover all compile-visible scopes (implementation,
+     * api, compileOnly). runtimeOnly deps are excluded by design.
      */
     @get:Internal
-    var artifactCollection: ArtifactCollection? = null
+    var artifactCollections: List<ArtifactCollection> = emptyList()
 
     /** Set by MixinDecompilePlugin at configuration time. */
     @get:Internal
@@ -84,15 +86,19 @@ abstract class MixinDecompileTask : DefaultTask() {
 
     @TaskAction
     fun decompile() {
-        val collection = artifactCollection ?: run {
-            logger.lifecycle("No runtimeClasspath/compileClasspath configuration found, skipping decompilation")
+        if (artifactCollections.isEmpty()) {
+            logger.lifecycle("No compileClasspath configuration found, skipping decompilation")
             return
         }
 
         evictStaleCacheEntries()
 
-        val resolvedArtifacts = collection.resolvedArtifacts.get()
-        val resolutionFailures = collection.failures
+        val hashMemo = DecompilationManifest.loadHashMemo(projectManifestRoot)
+
+        val resolvedArtifacts = artifactCollections
+            .flatMap { it.resolvedArtifacts.get() }
+            .distinctBy { it.file.absolutePath }
+        val resolutionFailures = artifactCollections.flatMap { it.failures }
         val publishedSourcesJars = publishedSourcesJarsProvider?.get() ?: emptyMap()
 
         val withoutSources = resolvedArtifacts
@@ -137,7 +143,7 @@ abstract class MixinDecompileTask : DefaultTask() {
             val jarPath = jarFile.absolutePath
             val jarSize = jarFile.length()
             val jarModified = jarFile.lastModified()
-            val hash = DecompilationManifest.computeArtifactHash(jarPath, jarSize, jarModified)
+            val hash = DecompilationManifest.computeArtifactHashMemoized(jarFile, hashMemo)
             currentJarHashes.add(hash)
 
             val owner = artifact.variant.owner as ModuleComponentIdentifier
@@ -227,7 +233,7 @@ abstract class MixinDecompileTask : DefaultTask() {
             val jarPath = jarFile.absolutePath
             val jarSize = jarFile.length()
             val jarModified = jarFile.lastModified()
-            val hash = DecompilationManifest.computeArtifactHash(jarPath, jarSize, jarModified)
+            val hash = DecompilationManifest.computeArtifactHashMemoized(jarFile, hashMemo)
             currentJarHashes.add(hash)
 
             val owner = artifact.variant.owner as ModuleComponentIdentifier
@@ -283,6 +289,10 @@ abstract class MixinDecompileTask : DefaultTask() {
 
         manifest = DecompilationManifest(manifest.entries.filterKeys { it in currentJarHashes })
         manifest.save(projectManifestRoot)
+        DecompilationManifest.saveHashMemo(
+            projectManifestRoot,
+            hashMemo.filterValues { it in currentJarHashes },
+        )
 
         logger.lifecycle(
             "MixinMCP complete: decompile — $decompiled new, $cached cached, $skipped skipped (heap), $failed failed (of $total); " +
