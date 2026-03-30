@@ -113,7 +113,7 @@ pluginManagement {
 ```kotlin
 plugins {
     // ... your existing plugins ...
-    id("dev.mixinmcp.decompile") version "0.6.7"
+    id("dev.mixinmcp.decompile") version "0.7.0"
 }
 ```
 
