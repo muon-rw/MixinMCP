@@ -15,7 +15,7 @@ class MixinMcpSettingsConfigurable(private val project: Project) : BoundConfigur
             lateinit var masterCheckbox: com.intellij.ui.dsl.builder.Cell<javax.swing.JCheckBox>
             row {
                 masterCheckbox = checkBox(
-                    "Automatically add Cursor (.cursor) and Claude (./claude) skills and rules to Minecraft projects",
+                    "Automatically add Cursor (.cursor) and Claude (.claude) skills and rules to Minecraft projects",
                 )
                     .bindSelected(settings::autoInjectCursorRules)
             }

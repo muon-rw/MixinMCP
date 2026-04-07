@@ -1,9 +1,25 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
-## [0.7.1]
-- Migrate rule injection to use skills+references as much as possible. 
-- Add support for Claude Code
+## [0.8.0]
+### Added
+- **Claude Code support** — skill and rule injection now works with Claude Code in addition to Cursor
+- Automatically clean up old injected rules on startup
+- **`mixin_find_references` field support** — `memberName` now resolves fields (e.g. `DATA_HEALTH_ID`), not just methods
+- **`mixin_search_in_deps` new parameters** — `pathPrefix` (e.g. `net/minecraft/`) to scope searches, `roots` to select `library`/`decompiled`/`all`; automatic deduplication when library sources and decompiled cache overlap
+- **`mixin_call_hierarchy` bytecode fallback** — callees direction now extracts INVOKE targets from bytecode when the source body is unavailable (binary merged JAR classes)
+- **`mixin_list_source_roots` toolchain detection** — detects MDG merged JARs, categorizes roots by type, and auto-detects whether vanilla MC is searchable or binary-only
+
+### Fixed
+- `mixin_find_class` SourceKind no longer labels MDG/Forge merged JARs as "Project source" — now correctly reports "MDG/Forge merged artifact"
+- `mixin_type_hierarchy` no longer emits `null` entries for anonymous/inner classes in subclass listings
+- `mixin_super_methods` / `mixin_call_hierarchy` / `mixin_find_references` no longer show duplicate identical overloads in disambiguation errors; now includes declaring class
+- `mixin_method_bytecode` error for non-existent methods now shows fuzzy matches and truncates large method lists instead of dumping hundreds of names
+
+### Improved
+- Migrate rule injection to use skills + references instead of inline rules
+- `mixin_search_in_deps` regex errors now include a hint suggesting which metacharacters to escape
+- SKILL.md rewritten with toolchain-specific guidance (ForgeGradle vs MDG vs Fabric Loom), new parameter docs, and field reference examples
 
 ## [0.7.0]
 - Rewrite decompilation cache to use proper content-based hash, fixing unnecessary re-decompilation

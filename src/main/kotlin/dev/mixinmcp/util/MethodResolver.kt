@@ -234,12 +234,16 @@ object MethodResolver {
     }
 
     private fun formatOverloads(methods: List<PsiMethod>): List<String> {
-        return methods.map { method ->
+        val seen = mutableSetOf<String>()
+        return methods.mapNotNull { method ->
             val params: String = method.parameterList.parameters
                 .joinToString(", ") { "${it.type.presentableText} ${it.name}" }
             val typeList: String = method.parameterList.parameters
                 .joinToString(", ") { "\"${it.type.presentableText}\"" }
-            "${method.name}($params)  →  parameterTypes: [$typeList]"
+            val sig = "${method.name}($params)"
+            if (!seen.add(sig)) return@mapNotNull null
+            val declClass = method.containingClass?.qualifiedName ?: "?"
+            "$sig  →  parameterTypes: [$typeList]  (declared in $declClass)"
         }
     }
 }

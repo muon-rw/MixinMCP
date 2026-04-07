@@ -204,7 +204,7 @@ prefix is added by Cursor to all user-configured servers). Tools are invoked via
 **Automatic assistant file injection:** When MixinMCP detects a Minecraft mod project
 (Fabric, Forge, NeoForge, Quilt, Architectury), it copies bundled resources into
 your project on open: **Cursor** files under `.cursor/` (rules and skills), and
-**Claude Code** skills under `claude/skills/`. These teach the LLM when and how to
+**Claude Code** skills under `.claude/skills/`. These teach the LLM when and how to
 use each tool, common pitfalls, and a mixin workflow checklist. Files are kept in
 sync with the plugin version by default — no manual setup needed. New paths are
 appended under a `# MixinMCP auto-injected rules` block in `.gitignore` when a
@@ -217,7 +217,7 @@ Configure in **Settings > Tools > MixinMCP**:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Automatically add Cursor and Claude project files | On | Master toggle — disables all injection (`.cursor/` and `claude/`) |
+| Automatically add Cursor and Claude project files | On | Master toggle — disables all injection (`.cursor/` and `.claude/`) |
 | Overwrite existing files on project open | On | When off, only writes files that don't already exist |
 | Warn when Gradle plugin is not detected | On | Shows a notification if `dev.mixinmcp.decompile` is missing |
 
@@ -225,12 +225,12 @@ Configure in **Settings > Tools > MixinMCP**:
 projects), copy the trees from the plugin sources at
 [`src/main/resources/inject/cursor/`](src/main/resources/inject/cursor/) and
 [`src/main/resources/inject/claude/`](src/main/resources/inject/claude/) into
-`.cursor/` and `claude/` in your mod project, respectively.
+`.cursor/` and `.claude/` in your mod project, respectively.
 
 ### Claude Code / Claude Desktop
 
 With injection enabled, Claude Code picks up the same bundled content from
-`./claude/skills/` in your project. For Claude Desktop or other clients without
+`.claude/skills/` in your project. For Claude Desktop or other clients without
 that layout, copy the skill markdown from
 [`src/main/resources/inject/claude/skills/`](src/main/resources/inject/claude/skills/)
 into your workflow or add summaries to `CLAUDE.md`. Adjust the MCP server name to
