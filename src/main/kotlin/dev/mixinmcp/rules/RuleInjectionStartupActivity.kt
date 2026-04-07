@@ -10,8 +10,12 @@ import dev.mixinmcp.settings.MixinMcpSettings
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipFile
+import kotlin.io.path.extension
+import kotlin.io.path.isRegularFile
 
 class RuleInjectionStartupActivity : ProjectActivity {
 
@@ -26,7 +30,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
         }
 
         if (settings.autoInjectCursorRules) {
-            injectCursorRules(projectRoot, settings, project)
+            injectAssistantFiles(projectRoot, settings, project)
         }
 
         if (settings.warnMissingGradlePlugin && !hasGradlePlugin(projectRoot)) {
@@ -34,50 +38,45 @@ class RuleInjectionStartupActivity : ProjectActivity {
         }
     }
 
-    private fun injectCursorRules(projectRoot: Path, settings: MixinMcpSettings, project: Project) {
-        val rulesDir = projectRoot.resolve(".cursor").resolve("rules")
+    private fun injectAssistantFiles(projectRoot: Path, settings: MixinMcpSettings, project: Project) {
+        val overwrite = settings.overwriteExistingRules
         val written = mutableListOf<String>()
 
-        for (ruleName in RULE_FILES) {
-            val target = rulesDir.resolve(ruleName)
-            if (!settings.overwriteExistingRules && Files.exists(target)) {
-                continue
-            }
+        written += copyBundledTree(
+            projectRoot = projectRoot,
+            bundlePrefix = BUNDLE_CURSOR,
+            destinationRoot = projectRoot.resolve(".cursor"),
+            overwrite = overwrite,
+        )
+        written += copyBundledTree(
+            projectRoot = projectRoot,
+            bundlePrefix = BUNDLE_CLAUDE,
+            destinationRoot = projectRoot.resolve("claude"),
+            overwrite = overwrite,
+        )
 
-            val content = loadBundledRule(ruleName)
-            if (content == null) {
-                LOG.warn("MixinMCP: bundled rule '$ruleName' not found in plugin resources")
-                continue
-            }
+        if (written.isEmpty()) return
 
-            try {
-                Files.createDirectories(target.parent)
-                Files.writeString(
-                    target, content,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                )
-                written.add(ruleName)
-            } catch (e: IOException) {
-                LOG.warn("MixinMCP: failed to write rule '$ruleName': ${e.message}")
+        addToGitignore(projectRoot, written)
+
+        val refreshDirs = listOf(projectRoot.resolve(".cursor"), projectRoot.resolve("claude"))
+        for (dir in refreshDirs) {
+            if (Files.isDirectory(dir)) {
+                LocalFileSystem.getInstance().refreshAndFindFileByNioFile(dir)
             }
         }
 
-        if (written.isNotEmpty()) {
-            addToGitignore(projectRoot, written)
-            LocalFileSystem.getInstance().refreshAndFindFileByNioFile(rulesDir)
-            LOG.info("MixinMCP: injected cursor rules: ${written.joinToString()}")
-            showRuleNotification(project, written, settings)
-        }
+        LOG.info("MixinMCP: injected assistant files: ${written.joinToString()}")
+        showRuleNotification(project, written, settings)
     }
 
     private fun showRuleNotification(project: Project, written: List<String>, settings: MixinMcpSettings) {
-        val fileList = written.joinToString(", ") { it }
+        val fileList = written.joinToString(", ")
         NotificationGroupManager.getInstance()
             .getNotificationGroup("MixinMCP")
             .createNotification(
                 "MixinMCP",
-                "Injected Cursor rules: $fileList",
+                "Injected Cursor + Claude project files: $fileList",
                 NotificationType.INFORMATION,
             )
             .addAction(object : com.intellij.notification.NotificationAction("Don't do this again") {
@@ -120,16 +119,19 @@ class RuleInjectionStartupActivity : ProjectActivity {
         if (!Files.exists(gitignore)) return
 
         try {
-            val alreadyIgnored = gitCheckIgnore(projectRoot, written.map { ".cursor/rules/$it" })
-            val missing = written.filter { ".cursor/rules/$it" !in alreadyIgnored }
+            val alreadyIgnored = gitCheckIgnore(projectRoot, written)
+            val content = Files.readString(gitignore)
+            val existingLines = content.lineSequence().map { it.trim() }.toSet()
+            val missing = written.filter { rel ->
+                rel !in alreadyIgnored && rel !in existingLines
+            }
             if (missing.isEmpty()) return
 
-            val content = Files.readString(gitignore)
             val block = buildString {
                 if (!content.endsWith("\n")) append("\n")
                 if (GITIGNORE_MARKER !in content) append("\n$GITIGNORE_MARKER\n")
-                for (name in missing) {
-                    appendLine(".cursor/rules/$name")
+                for (path in missing) {
+                    appendLine(path)
                 }
             }
 
@@ -163,12 +165,101 @@ class RuleInjectionStartupActivity : ProjectActivity {
         }
     }
 
+    /**
+     * Copies everything under classpath [bundlePrefix] (e.g. `inject/cursor`) into [destinationRoot],
+     * preserving subdirectories. Returns project-relative POSIX paths for files written.
+     */
+    private fun copyBundledTree(
+        projectRoot: Path,
+        bundlePrefix: String,
+        destinationRoot: Path,
+        overwrite: Boolean,
+    ): List<String> {
+        val entries = listBundledResourcePaths(bundlePrefix)
+        if (entries.isEmpty()) {
+            LOG.info("MixinMCP: no bundled resources under '$bundlePrefix'")
+            return emptyList()
+        }
+
+        val classLoader = RuleInjectionStartupActivity::class.java.classLoader
+        val prefix = "$bundlePrefix/"
+        val written = mutableListOf<String>()
+
+        for (entry in entries) {
+            if (!entry.startsWith(prefix)) continue
+            val relativeInside = entry.removePrefix(prefix)
+            val target = destinationRoot.resolve(relativeInside)
+            if (!overwrite && Files.exists(target)) continue
+
+            val stream = classLoader.getResourceAsStream(entry) ?: run {
+                LOG.warn("MixinMCP: missing stream for bundled resource '$entry'")
+                continue
+            }
+
+            try {
+                Files.createDirectories(target.parent)
+                stream.use { input ->
+                    Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+                written += projectRoot.relativize(target).toString().replace('\\', '/')
+            } catch (e: IOException) {
+                LOG.warn("MixinMCP: failed to write '$target': ${e.message}")
+            }
+        }
+
+        return written
+    }
+
+    private fun listBundledResourcePaths(bundlePrefix: String): List<String> {
+        val normalized = bundlePrefix.trim().trim('/')
+        val searchPrefix = "$normalized/"
+
+        val codeSource = RuleInjectionStartupActivity::class.java.protectionDomain.codeSource
+        val location = codeSource?.location ?: run {
+            LOG.warn("MixinMCP: no code source location for bundled inject resources")
+            return emptyList()
+        }
+
+        val rootPath = try {
+            Path.of(location.toURI())
+        } catch (e: Exception) {
+            LOG.warn("MixinMCP: invalid code source URI: ${e.message}")
+            return emptyList()
+        }
+
+        return when {
+            rootPath.isRegularFile() && rootPath.extension.equals("jar", ignoreCase = true) ->
+                ZipFile(rootPath.toFile()).use { jar ->
+                    jar.entries().asSequence()
+                        .filter { !it.isDirectory && it.name.startsWith(searchPrefix) }
+                        .map { it.name }
+                        .sorted()
+                        .toList()
+                }
+            Files.isDirectory(rootPath) -> {
+                val base = rootPath.resolve(normalized)
+                if (!Files.isDirectory(base)) {
+                    emptyList()
+                } else {
+                    Files.walk(base)
+                        .filter { Files.isRegularFile(it) }
+                        .map { rootPath.relativize(it).toString().replace('\\', '/') }
+                        .filter { it.startsWith(normalized) }
+                        .sorted()
+                        .toList()
+                }
+            }
+            else -> emptyList()
+        }
+    }
+
     companion object {
         private val LOG = Logger.getInstance(RuleInjectionStartupActivity::class.java)
 
         private const val GITIGNORE_MARKER = "# MixinMCP auto-injected rules"
 
-        private val RULE_FILES = listOf("mixinmcp.mdc", "mixin-reference.mdc")
+        private const val BUNDLE_CURSOR = "inject/cursor"
+        private const val BUNDLE_CLAUDE = "inject/claude"
 
         private val MC_BUILD_PLUGIN_PATTERNS = listOf(
             "fabric-loom",
@@ -223,13 +314,6 @@ class RuleInjectionStartupActivity : ProjectActivity {
             } catch (_: IOException) {
                 false
             }
-        }
-
-        private fun loadBundledRule(name: String): String? {
-            val stream = RuleInjectionStartupActivity::class.java
-                .getResourceAsStream("/cursor-rules/$name")
-                ?: return null
-            return stream.bufferedReader().use { it.readText() }
         }
     }
 }

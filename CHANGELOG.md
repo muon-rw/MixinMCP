@@ -1,6 +1,10 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.7.1]
+- Migrate rule injection to use skills+references as much as possible. 
+- Add support for Claude Code
+
 ## [0.7.0]
 - Rewrite decompilation cache to use proper content-based hash, fixing unnecessary re-decompilation
 - Improve regex handling in tools

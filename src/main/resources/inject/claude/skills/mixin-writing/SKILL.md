@@ -1,14 +1,23 @@
 ---
-alwaysApply: true
+name: mixin-writing
+description: >
+  SpongePowered Mixin and MixinExtras writing reference for Minecraft mods.
+  Use this skill whenever writing, reviewing, debugging, or planning mixin code —
+  including injector selection, @At injection points, @Slice, @Local, @Share,
+  accessor/invoker patterns, interface injection, MixinExtras expressions,
+  or diagnosing mixin pitfalls and conflicts. Also use when the user asks
+  which injector to use, how to target a specific bytecode pattern, or
+  why a mixin isn't working.
 ---
-## Mixin Writing Reference
+
+# Mixin Writing Reference
 
 When writing SpongePowered Mixins, **always prefer MixinExtras injectors** over vanilla
 patterns. MixinExtras injectors chain when multiple mods target the same code; vanilla
 `@Overwrite`, `@Inject` at HEAD with cancel/return, `@Redirect`, and `@ModifyConstant`
 do not chain and will silently conflict with other mods.
 
-### Injector Selection
+## Injector Selection
 
 Pick the **most specific** MixinExtras injector that fits:
 
@@ -38,7 +47,28 @@ Exceptions exist — sometimes `@Inject` at HEAD with cancel is the only practic
   `method`, `at`, and `ordinal`/`name`/`index` to identify which local. Prefer `ordinal`
   over `index` — see pitfalls.
 
-### `@At` Injection Points
+## Targeting Bytecode
+
+This section covers how to tell an injector *where* to inject. Two mechanisms exist:
+standard `@At` values and MixinExtras `@Expression`. **Pick the right one:**
+
+### When to use which
+
+- **Simple, unambiguous targets** → standard `@At` is fine: `HEAD`, `TAIL`, `RETURN`,
+  a single `INVOKE` or `FIELD` that doesn't need `ordinal`.
+- **Anything requiring `ordinal > 0`, `@Slice`, `CONSTANT` args, or `shift = BY`** →
+  **stop and use `@Expression` instead.** Expressions match the *semantic structure* of
+  the code (comparisons, field access patterns, specific call + argument combinations),
+  making them far more precise and readable than positional bytecode offsets. An expression
+  that says `this.fallDistance > 0.0` is self-documenting; `@At(value = "JUMP", opcode = IFLE, ordinal = 2)` is not.
+- **Comparisons, instanceof, casts, array ops, instantiations, compound patterns** →
+  `@Expression` is the *only* clean option.
+
+> **Rule of thumb:** If you're about to add `ordinal`, `@Slice`, or `shift = BY` to an
+> `@At`, ask yourself whether an `@Expression` would match the target directly. It almost
+> always will.
+
+### `@At` Injection Points (simple targets)
 
 | Value | Targets | Key params |
 |---|---|---|
@@ -47,53 +77,108 @@ Exceptions exist — sometimes `@Inject` at HEAD with cancel is the only practic
 | `TAIL` | Before the **last** return only | — |
 | `INVOKE` | Before a method call | `target`, `ordinal` |
 | `INVOKE_ASSIGN` | After a method call's result is stored | `target`, `ordinal` |
-| `INVOKE_STRING` | Before an invoke with a single string arg | `target`, `args={"ldc=value"}` |
-| `FIELD` | Before a field get/set | `target`, `opcode` (GETFIELD/PUTFIELD/GETSTATIC/PUTSTATIC) |
-| `NEW` | Before a `new` instruction | `target` (FQCN or constructor descriptor) |
-| `CONSTANT` | Before a constant literal | `args` — see below |
-| `JUMP` | Before a jump instruction | `opcode` (IFEQ/IFNE/IFLT/GOTO/etc.), `ordinal` |
-| `MIXINEXTRAS:EXPRESSION` | MixinExtras expression target | Use with `@Expression` + `@Definition` |
+| `FIELD` | Before a field get/set | `target`, `opcode` |
+| `NEW` | Before a `new` instruction | `target` |
+| `MIXINEXTRAS:EXPRESSION` | Expression target | Use with `@Expression` + `@Definition` |
 
-**RETURN vs TAIL**: `RETURN` fires before *every* return statement (early returns too).
-`TAIL` fires only before the *final* return. Use TAIL for cleanup logic that runs once;
-use RETURN to intercept every exit.
+**RETURN vs TAIL**: `RETURN` fires before *every* return (including early returns).
+`TAIL` fires only before the *final* return.
 
-**CONSTANT args** (use exactly one discriminator):
-`intValue=N`, `floatValue=N`, `longValue=N`, `doubleValue=N`, `stringValue=text`,
-`classValue=fully/qualified/Name`, `nullValue=true`.
-Also: `expandZeroConditions=LESS_THAN_ZERO,GREATER_THAN_ZERO` to match zero in conditionals.
+> For the full `@At` parameter reference (`target` descriptor format, `shift`, `opcode`,
+> `remap`, `args`, `slice`), `@Slice` syntax, and `CONSTANT`/`INVOKE_STRING`/`JUMP`
+> details, see `references/at-reference.md`.
 
-### `@At` Parameters
+### MixinExtras Expressions (preferred for complex targets)
 
-| Parameter | Description |
-|---|---|
-| `target` | Bytecode member descriptor: `Lowner/Class;name(Lparam;)Lreturn;` for methods, `Lowner/Class;name:Ltype;` for fields. **Uses the bytecode owner**, which may differ from the source declaration — use `mixin_method_bytecode` to verify. |
-| `ordinal` | 0-based index when multiple instructions match. -1 (default) = match all. |
-| `shift` | `BEFORE` (default for most), `AFTER`, `BY` (with `by=N`; keep small, avoid offsets beyond 3). |
-| `opcode` | ASM opcode int for FIELD and JUMP (e.g. `Opcodes.GETFIELD`, `Opcodes.IFEQ`). |
-| `remap` | `true` (default) remaps target through mappings. Set `false` for non-Minecraft methods. |
-| `args` | Extra args for CONSTANT and INVOKE_STRING (see above). |
-| `slice` | ID of a named `@Slice` to restrict the search region. |
+Expressions use java-like strings to target complex bytecode patterns. They work with
+**bytecode, not source code** — you cannot just copy-paste Java. But they are far more
+readable and maintainable than positional `@At` targeting.
 
-### `@Slice`
+> For the full expression language spec (all literals, operators, syntax), read
+> `references/expressions-language.md`.
 
-Narrows the bytecode region an injection point searches in. Use when `ordinal` alone
-can't disambiguate (e.g., same method called in two distinct code paths).
+#### Core mechanics
+
+- `@At` value must be `"MIXINEXTRAS:EXPRESSION"` — the real target is in `@Expression`.
+- `@Definition` binds identifiers used in `@Expression` to fields, methods, types, or locals.
+- `?` = wildcard — matches any expression or identifier. Use for brevity or brittle locals.
+- `this` is built-in (no `@Definition` needed).
+- Strings use **single quotes** inside `@Expression` (already in a Java annotation string).
+- Works with any injector, but `@ModifyExpressionValue` and `@WrapOperation` are the most
+  natural fit. `@WrapOperation` additionally supports comparisons and array get/set.
+
+#### `@Definition` types
+
+| Parameter | What it defines | Format |
+|-----------|----------------|--------|
+| `field` | Field access | Same as `@At("FIELD")` target: `Lowner;name:Ltype;` |
+| `method` | Method call | Same as `@At("INVOKE")` target: `Lowner;name(Lparams;)Lret;` |
+| `type` | Class (for `new`, `instanceof`, casts, arrays) | Class literal: `type = BlockState.class` |
+| `local` | Local variable | `local = @Local(type = X.class)` or with `ordinal` |
+
+Static fields/methods have **no receiver** in the expression: `SOME_FIELD`, not `SomeClass.SOME_FIELD`.
+
+#### Targeting with `@(...)`
+
+By default, the expression targets its "last" instruction. Use `@(...)` to explicitly
+mark which sub-expression to target:
 
 ```java
-@Inject(
-    method = "tick",
-    slice = @Slice(from = @At(value = "INVOKE", target = "Lnet/...;startPhase()V"),
-                   to = @At(value = "INVOKE", target = "Lnet/...;endPhase()V")),
-    at = @At(value = "INVOKE", target = "Lnet/...;process()V")
-)
+// Target the instantiation, not the throw:
+@Expression("throw @(new IllegalStateException('Oh no!'))")
+
+// Target multiple things:
+@Expression("this.someMethod(@(value1), @(value2))")
 ```
 
-- `from`/`to` are both **inclusive**. Defaults: `from = @At("HEAD")`, `to = @At("TAIL")`.
-- Named slices: give `@Slice(id = "mySlice")`, reference from `@At(slice = "mySlice")`.
-- For multi-match `from`/`to`, use specifiers like `@At(value = "INVOKE:LAST", ...)`.
+#### Common patterns
 
-### Local Variable Capture (`@Local`)
+```java
+// Modify a comparison in an if-condition:
+@Definition(id = "fallDistance", field = "Lnet/minecraft/entity/Entity;fallDistance:F")
+@Expression("this.fallDistance > 0.0")
+@ModifyExpressionValue(method = "fall", at = @At("MIXINEXTRAS:EXPRESSION"))
+private boolean modifyFallCheck(boolean original) { ... }
+
+// Inject after a specific method call with a specific argument:
+@Definition(id = "emitGameEvent", method = "Lnet/...;emitGameEvent(Lnet/...;Lnet/...;)V")
+@Definition(id = "ENTITY_MOUNT", field = "Lnet/...;ENTITY_MOUNT:Lnet/...;")
+@Expression("this.emitGameEvent(ENTITY_MOUNT, ?)")
+@Inject(method = "addPassenger", at = @At(value = "MIXINEXTRAS:EXPRESSION", shift = At.Shift.AFTER))
+private void afterMount(CallbackInfo ci) { ... }
+
+// Modify a new-expression result:
+@Definition(id = "BlockStateParticleEffect", type = BlockStateParticleEffect.class)
+@Definition(id = "BLOCK", field = "Lnet/...;BLOCK:Lnet/...;")
+@Expression("new BlockStateParticleEffect(BLOCK, ?)")
+@ModifyExpressionValue(method = "spawnSprintingParticles", at = @At("MIXINEXTRAS:EXPRESSION"))
+private BlockStateParticleEffect modifyParticle(BlockStateParticleEffect original) { ... }
+```
+
+#### Quickfire expression examples
+
+| Java source | Expression |
+|---|---|
+| `this.pistonMovementDelta[i] = d;` | `this.pistonMovementDelta[?] = ?` |
+| `nbt.putShort("Fire", (short)this.fireTicks);` | `?.putShort('Fire', ?)` |
+| `entityKilled instanceof ServerPlayerEntity` | `? instanceof ServerPlayerEntity` |
+| `return this.distance < d * d;` | `return this.distance < ? * ?` |
+
+#### Expression gotchas
+
+- **Cannot match jumps**: `a && !b`, `a ? b : c` cannot be expressed directly. Use `?`
+  wildcards to match them as part of a wider expression.
+- **Comparisons must be top-level**: You cannot match `print(a == b)` — only `a == b` alone.
+- **Comparison inversion**: For non-float/double types, `x >= y` is indistinguishable from
+  `x < y` in bytecode. Make your expression specific enough to avoid ambiguity.
+- **`true`/`false` = `1`/`0`** in bytecode. `if (myBoolean)` looks like `? != 0`, and due
+  to inversion, `? == 0` also matches. Avoid wildcards for boolean comparisons.
+- **Don't target a wildcard** with `@ModifyExpressionValue` — you won't know the concrete
+  type. Use a different injector (e.g. `@ModifyArg` for `this.setX(?)`).
+- **No float/double distinction**: Use `0.0`, not `0.0F` in expressions.
+- Standard `@At` params (`shift`, `ordinal`, `@Slice`) all work normally with expressions.
+
+## Local Variable Capture (`@Local`)
 
 Use MixinExtras `@Local` instead of `locals = LocalCapture.CAPTURE_FAILHARD`:
 
@@ -119,7 +204,7 @@ private void mutateLocals(CallbackInfo ci,
 }
 ```
 
-### Sharing Values Between Handlers (`@Share`)
+## Sharing Values Between Handlers (`@Share`)
 
 Thread-safe value sharing between handlers in the same target method (no mixin fields):
 ```java
@@ -135,7 +220,7 @@ private void useArg(CallbackInfo ci, @Share("myArg") LocalIntRef ref) {
 }
 ```
 
-### `@Cancellable` Sugar
+## `@Cancellable` Sugar
 
 Any MixinExtras injector can receive `@Cancellable CallbackInfo(Returnable)` to
 cancel the enclosing method without a separate `@Inject`:
@@ -147,29 +232,7 @@ private Identifier skipPoison(Identifier texture, @Cancellable CallbackInfo ci) 
 }
 ```
 
-### MixinExtras Expressions
-
-For targeting complex bytecode patterns (comparisons, instanceof, compound expressions)
-unreachable by standard `@At`:
-
-```java
-@Definition(id = "AbstractArrow", type = AbstractArrow.class)
-@Expression("? instanceof AbstractArrow")
-@WrapOperation(method = "hurt", at = @At("MIXINEXTRAS:EXPRESSION"))
-private boolean modifyArrowCheck(Object entity, Operation<Boolean> original) {
-    return original.call(entity) && someCondition();
-}
-```
-
-Key rules:
-- `@At` value must be `"MIXINEXTRAS:EXPRESSION"` — the real target is in `@Expression`.
-- `@Definition` binds identifiers to fields, methods, types, or locals.
-- `?` = wildcard for parts you don't care about matching.
-- Strings use single quotes inside `@Expression` (already in a Java annotation string).
-- `this` is built-in, doesn't need `@Definition`.
-- Targets the "last" instruction of the expression unless you mark with `@(...)`.
-
-### Accessor and Invoker Patterns
+## Accessor and Invoker Patterns
 
 Interface mixins for accessing private members without reflection:
 
@@ -192,7 +255,7 @@ public interface LivingEntityAccessor {
 - Use from external code: `((LivingEntityAccessor) entity).getHealth()`.
 - `@Coerce` does NOT work on `@Accessor`/`@Invoker`.
 
-### Interface Injection (Duck Typing)
+## Interface Injection (Duck Typing)
 
 A mixin can add interfaces to the target class:
 
@@ -212,7 +275,7 @@ If the target already has a method matching the interface signature, make the mi
 abstract or use `@Intrinsic` on the matching method to tell Mixin to use the target's
 existing implementation.
 
-### Obscure Features
+## Obscure Features
 
 **`@Pseudo`** — Target class may not exist at compile or runtime (optional mod compat).
 Applied to the mixin class. Implies `remap = false`. Use `targets = "com.example.Class"`
@@ -232,7 +295,7 @@ final field, also add `@Mutable`: `@Shadow @Final @Mutable private Type field`. 
 collision if the target already has a member with the same name. Always prefix mixin-added
 members with your modid: `mymod$fieldName`.
 
-### Pitfalls
+## Pitfalls
 
 - **`@Shadow` and superclass members**: `@Shadow` can only target members declared directly
   on the target class, not inherited members. To access inherited fields/methods, have the
@@ -265,13 +328,7 @@ members with your modid: `mymod$fieldName`.
   (and let other mods' wraps run). Only skip the call if you genuinely want to suppress the
   operation.
 - **Priority**: `@Mixin(priority = N)` controls merge order. Higher priority mixins are
-  applied later and "win" conflicts. Lower priority can be used to apply before a @Redirect
-  or @Overwrite from another mod to prevent a crash, but can result in your mixin being overwritten.
-  Generally, for such cases. Default is 1000. Adjusting priority is a last resort, and usually a sign
-  that there is a better alternative.
-- **Modifying other mods' Mixins**: Requires the MixinSquared library (by Bawnorton) as a
-  project dependency. Can cancel mixin classes/methods or target their injectors in mixins using target
-  handlers. MixinSquared does NOT require explicit bootstrap — only to register cancellers and
-  adjusters (if used) in your mixin plugin. For API details, search the MixinSquared wiki. Feature
-  requests to the mod are usually better if it's still maintained, but this is often the best solution
-  to complex mixin conflicts on older game versions.
+  applied later and "win" conflicts. Default is 1000. Adjusting priority is a last resort.
+- **Modifying other mods' Mixins**: Requires the MixinSquared library (by Bawnorton).
+  Can cancel mixin classes/methods or target their injectors. MixinSquared does NOT require
+  explicit bootstrap — only to register cancellers and adjusters in your mixin plugin.

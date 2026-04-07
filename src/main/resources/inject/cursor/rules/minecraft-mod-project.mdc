@@ -1,0 +1,14 @@
+---
+alwaysApply: true
+---
+This is a Minecraft mod project using SpongePowered Mixins + MixinExtras.
+
+When writing, reviewing, or debugging mixin code, read the **mixin-writing** skill first.
+
+When searching dependency/vanilla/mod sources, checking bytecode, investigating class
+hierarchies, or diagnosing mixin conflicts, read the **mixinmcp-tools** skill first.
+ALWAYS prefer MixinMCP tools (on the `user-jetbrains` MCP server) over grep, read_file,
+or jar extraction. MixinMCP indexes the entire classpath including inside dependency jars
+(which grep cannot see), provides dedicated type hierarchy, call graph, and reference-finding
+tools that are faster and more accurate than text search, and returns clean, structured
+results that use less context than raw file dumps.
