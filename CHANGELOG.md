@@ -1,6 +1,13 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.8.1]
+### Added
+- Fallback hints and skill notes for agents attempting to access Forge/Neoforge merged sources
+
+### Improved
+- Improve adherence to MCP tools over built-in system-prompt/Cursor server tools for stupider agents
+
 ## [0.8.0]
 ### Added
 - **Claude Code support** — skill and rule injection now works with Claude Code in addition to Cursor

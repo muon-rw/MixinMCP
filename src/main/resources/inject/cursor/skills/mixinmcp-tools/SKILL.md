@@ -125,6 +125,13 @@ CallMcpTool(
 - **Fabric Loom**: Run `./gradlew genSources` to generate sources, then `mixin_sync_project`.
 - `mixin_list_source_roots` detects the toolchain and shows whether vanilla MC sources are searchable.
 
+### MDG: Forge & NeoForge universal API vs loader `-sources.jar`
+- **Forge:** much of the mod-facing API ships in **forge-*-universal** (often folded into `build/moddev/*-merged.jar`). **Legacy Forge MDG** often attaches **fmlloader / fmlcore / eventbus / …** as Library SOURCES while **not** attaching **forge-*-universal-sources.jar**, so `mixin_search_in_deps` can miss **any** `net/minecraftforge/...` package that lives only in universal (e.g. `net.minecraftforge.event.*` — a common canary, not the only package).
+- **NeoForge** (ModDevGradle 1.x / 2.x): the same pattern applies for **neoforge-*-universal** — **bus / coremods / …** may have `-sources.jar` while **`net/neoforged/neoforge/...`** game API (e.g. `net/neoforged/neoforge/event/`) is only in the merged/binary layer until **neoforge-*-universal-sources** is attached as Library SOURCES.
+- Universal `-sources.jar` files may still exist under `~/.gradle/caches` even when IntelliJ has no Library SOURCES root for them.
+- `mixin_list_source_roots` uses **`net/minecraftforge/event/`** and **`net/neoforged/neoforge/event/`** as **canaries** for Forge vs NeoForge universal attachment (same idea as vanilla `net/minecraft/`).
+- If grep under `net/minecraftforge/` or `net/neoforged/` is empty or wrong, use `mixin_find_class(includeSource=true)`, `mixin_search_symbols`, drop `pathPrefix` to search mod sources, or confirm roots with `mixin_list_source_roots`. `mixin_search_in_deps` adds hints on empty searches for those prefixes.
+
 ### mixin_get_dep_source
 - `url`: copy the exact `url:` string from search results (strip `[rootKind: ...]` suffix).
 - `path`: package path with `/` separators and `.java` extension (e.g. `io/redspace/.../Utils.java`). NOT a filesystem path.
