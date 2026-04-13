@@ -42,6 +42,7 @@ import com.intellij.psi.search.searches.ClassInheritorsSearch
 import com.intellij.psi.search.searches.MethodReferencesSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import dev.mixinmcp.cache.DecompilationCacheService
+import dev.mixinmcp.cache.SourceAutoAttacher
 import dev.mixinmcp.util.BytecodeAnalyzer
 import dev.mixinmcp.util.ClassFileLocator
 import dev.mixinmcp.util.FqcnResolver
@@ -58,14 +59,29 @@ class MixinMcpToolset : McpToolset {
 
     private companion object {
         /**
-         * Sample cap when scanning Library SOURCES roots for diagnostic path prefixes
-         * (vanilla / Forge game events) in [mixin_list_source_roots] and dep-search hints.
+         * Known `.java` paths (relative to a Library SOURCES jar root) used to detect whether
+         * vanilla / Forge / NeoForge game API sources are attached — avoids false negatives from
+         * sampling files in alphabetical tree order (e.g. `com/mojang/...` before `net/minecraft/...`).
          */
-        private const val SOURCE_ROOT_DIAGNOSTIC_SAMPLE_CAP = 20
+        private val VANILLA_LIBRARY_SOURCE_SENTINELS: List<String> = listOf(
+            "net/minecraft/world/level/Level.java",
+            "net/minecraft/world/item/Item.java",
+            "net/minecraft/core/Registry.java",
+        )
+
+        private val FORGE_EVENT_LIBRARY_SOURCE_SENTINELS: List<String> = listOf(
+            "net/minecraftforge/event/entity/EntityLeaveLevelEvent.java",
+            "net/minecraftforge/event/entity/EntityEvent.java",
+        )
+
+        private val NEOFORGE_NEOFORGE_EVENT_SOURCE_SENTINELS: List<String> = listOf(
+            "net/neoforged/neoforge/event/entity/EntityEvent.java",
+            "net/neoforged/neoforge/event/Event.java",
+        )
     }
 
     @McpTool
-    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (vanilla + loader game binary under build/ — includeSource returns Fernflower decompiled), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code — can be very large, prefer includeMembers for API overview.")
+    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code — can be very large, prefer includeMembers for API overview.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
@@ -228,7 +244,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar) and MixinMCP decompiled cache. Also detects MDG merged JARs under build/ (vanilla + loader game API often binary-only — accessible via mixin_find_class but not mixin_search_in_deps). Diagnoses vanilla (net/minecraft/*), Forge game API (net/minecraftforge/event/*), and NeoForge game API (net/neoforged/neoforge/event/*) attachment. Shows root URL, type, and sample file paths per root. maxSamplesPerRoot: 5 default.")
+    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar) and MixinMCP decompiled cache. Detects MDG merged JARs under build/moddev/; MixinMCP auto-attaches them as Library SOURCES after Gradle sync so vanilla/Forge/NeoForge .java files are usually searchable. Diagnoses vanilla (net/minecraft/*), Forge game API (net/minecraftforge/event/*), and NeoForge game API (net/neoforged/neoforge/event/*) plus last auto-attach run. Shows root URL, type, and sample file paths per root. maxSamplesPerRoot: 5 default.")
     @Suppress("unused")
     suspend fun mixin_list_source_roots(
         maxSamplesPerRoot: Int = 5,
@@ -242,21 +258,18 @@ class MixinMcpToolset : McpToolset {
                 appendLine("=== Source roots (mixin_search_in_deps / mixin_get_dep_source scope) ===")
                 appendLine()
                 appendLine("These roots are searched by mixin_search_in_deps and mixin_get_dep_source.")
-                appendLine("If vanilla Minecraft (net/minecraft/*) is missing from search results:")
+                appendLine("Prefer mixin_search_in_deps first for net/minecraft/, net/minecraftforge/, and net/neoforged/ —")
+                appendLine("MixinMCP auto-attaches MDG merged jars as Library SOURCES after Gradle sync (see section below).")
+                appendLine()
+                appendLine("If vanilla Minecraft (net/minecraft/*) is still missing from search results:")
                 appendLine("  - Fabric Loom: run ./gradlew genSources to generate Minecraft sources")
-                appendLine("  - NeoForge MDG: run ./gradlew downloadAssets or check MDG source generation")
+                appendLine("  - MDG: confirm Gradle sync finished and check the MDG auto-attach section for warnings")
                 appendLine("  - Any loader: run ./gradlew genDependencySources --force to decompile large JARs")
                 appendLine("  - Then call mixin_sync_project to refresh IntelliJ's project model")
                 appendLine()
-                appendLine("If Forge game API (net/minecraftforge/event/*) is missing from search:")
-                appendLine("  - Those types live in forge-*-universal (often merged into build/moddev/*-merged.jar).")
-                appendLine("  - Gradle may download forge-*-universal-sources.jar, but Legacy Forge MDG often does")
-                appendLine("    NOT attach it as a Library SOURCES root — only fmlloader, fmlcore, eventbus, etc.")
-                appendLine("If NeoForge game API (net/neoforged/neoforge/event/*) is missing from search:")
-                appendLine("  - Same pattern: types live in neoforge-*-universal (often in the MDG merged binary).")
-                appendLine("  - Loader/bus/coremod -sources.jar roots may be attached while universal sources are not.")
-                appendLine("  - Use mixin_find_class(includeSource=true), mixin_search_symbols, or search without")
-                appendLine("    pathPrefix to find mod code that imports loader APIs.")
+                appendLine("If Forge game API (net/minecraftforge/event/*) or NeoForge (net/neoforged/neoforge/event/*) is still missing:")
+                appendLine("  - Read the \"MDG merged-jar source auto-attach\" section below (warnings mean attachment failed).")
+                appendLine("  - Fallback: mixin_find_class(includeSource=true), mixin_search_symbols, or mixin_search_in_deps without pathPrefix.")
                 appendLine()
 
                 val libRoots = roots.filter { it.typeLabel.startsWith("Library SOURCES") }
@@ -264,7 +277,7 @@ class MixinMcpToolset : McpToolset {
 
                 val mergedJars = detectMergedJars(project)
                 val hasVanillaInLibSources = libRoots.any { info: SourceRootInfo ->
-                    collectSamplePaths(info.root, SOURCE_ROOT_DIAGNOSTIC_SAMPLE_CAP).any { it.startsWith("net/minecraft/") }
+                    libraryRootContainsAnySentinelJava(info.root, VANILLA_LIBRARY_SOURCE_SENTINELS)
                 }
                 val hasForgeGameEventsInLibSources = hasForgeGameEventApiInLibrarySources(libRoots)
                 val hasNeoForgeGameEventsInLibSources = hasNeoForgeNeoforgeEventApiInLibrarySources(libRoots)
@@ -274,35 +287,56 @@ class MixinMcpToolset : McpToolset {
                         appendLine("  $path")
                     }
                     appendLine()
+                    val attachReport: SourceAutoAttacher.Report? = SourceAutoAttacher.getLastReport(project)
+                    appendLine("=== MDG merged-jar source auto-attach (MixinMCP) ===")
+                    if (attachReport == null) {
+                        appendLine("  (no report yet — runs ~1.5s after Gradle sync or project open; try mixin_sync_project)")
+                    } else {
+                        appendLine("  Last run: reason=${attachReport.reason}, epochMs=${attachReport.runAtMillis}")
+                        if (attachReport.attached.isNotEmpty()) {
+                            appendLine("  Attached Library SOURCES roots:")
+                            for (line in attachReport.attached) {
+                                appendLine("    $line")
+                            }
+                        } else if (attachReport.hadMdgMergedCandidates) {
+                            appendLine("  No new roots attached (already present or nothing eligible this pass).")
+                        }
+                        if (attachReport.warnings.isNotEmpty()) {
+                            appendLine("  Warnings (auto-attach incomplete — include in bug reports):")
+                            for (w in attachReport.warnings) {
+                                appendLine("    $w")
+                            }
+                        }
+                    }
+                    appendLine()
                     if (hasVanillaInLibSources) {
-                        appendLine("Vanilla Minecraft sources ARE also available in Library SOURCES roots.")
+                        appendLine("Vanilla Minecraft sources ARE available in Library SOURCES roots (merged jar and/or other libs).")
                         appendLine("mixin_search_in_deps CAN search net/minecraft/ files.")
                     } else {
-                        appendLine("These JARs contain vanilla Minecraft classes (net.minecraft.*). They are")
-                        appendLine("accessible via mixin_find_class (with includeSource/includeMembers),")
-                        appendLine("mixin_method_bytecode, mixin_class_bytecode, and PSI-based tools")
-                        appendLine("(type_hierarchy, find_references, etc.) but are NOT searched by")
-                        appendLine("mixin_search_in_deps (they are binary .class files, not source roots).")
-                        appendLine("Use mixin_find_class with includeSource=true to read vanilla MC source.")
+                        appendLine("No vanilla Minecraft .java sentinels (e.g. net/minecraft/world/level/Level.java) were found")
+                        appendLine("in any Library SOURCES root. If the auto-attach section shows warnings, fix those first;")
+                        appendLine("the merged jar may omit .java when MDG disableRecompilation is true (Gradle *-sources.jar fallback).")
+                        appendLine("Fallback: mixin_find_class(includeSource=true), mixin_method_bytecode, mixin_class_bytecode.")
                     }
                     appendLine()
                     when {
                         hasForgeGameEventsInLibSources -> {
                             appendLine("Forge game event API sources (net.minecraftforge.event.*) ARE present in")
-                            appendLine("Library SOURCES (e.g. forge-*-universal-sources). mixin_search_in_deps CAN")
-                            appendLine("grep net/minecraftforge/event/ paths.")
+                            appendLine("Library SOURCES. mixin_search_in_deps CAN grep net/minecraftforge/event/ paths.")
                         }
                         hasNeoForgeGameEventsInLibSources -> {
                             appendLine("NeoForge game event API sources (net.neoforged.neoforge.event.*) ARE present in")
-                            appendLine("Library SOURCES (e.g. neoforge-*-universal-sources). mixin_search_in_deps CAN")
-                            appendLine("grep net/neoforged/neoforge/event/ paths.")
+                            appendLine("Library SOURCES. mixin_search_in_deps CAN grep net/neoforged/neoforge/event/ paths.")
                         }
                         else -> {
-                            appendLine("Neither net/minecraftforge/event/* nor net/neoforged/neoforge/event/* samples")
-                            appendLine("were found in Library SOURCES. Loader-only roots (FML, eventbus, NeoForge")
-                            appendLine("bus/coremods, …) may still be searchable; the mod-facing game API usually")
-                            appendLine("lives in the merged binary until universal -sources.jar is attached.")
-                            appendLine("Use mixin_find_class with includeSource=true or mixin_search_symbols.")
+                            appendLine("Neither Forge nor NeoForge game-event .java sentinels were found in Library SOURCES")
+                            appendLine("(e.g. net/minecraftforge/event/entity/EntityEvent.java, net/neoforged/neoforge/event/Event.java).")
+                            if (attachReport?.warnings?.isNotEmpty() == true) {
+                                appendLine("MixinMCP MDG source auto-attach reported warnings — see above; include them in bug reports.")
+                            } else {
+                                appendLine("If sources should be present, confirm Project Structure → Libraries; otherwise use")
+                                appendLine("mixin_find_class(includeSource=true) or mixin_search_symbols as a fallback.")
+                            }
                         }
                     }
                     appendLine()
@@ -316,9 +350,8 @@ class MixinMcpToolset : McpToolset {
                     appendLine()
                 } else if (!hasForgeGameEventsInLibSources && !hasNeoForgeGameEventsInLibSources) {
                     appendLine("=== No Forge / NeoForge game API event sources in Library SOURCES ===")
-                    appendLine("No net/minecraftforge/event/*.java or net/neoforged/neoforge/event/*.java samples")
-                    appendLine("were found in Library SOURCES roots. Loader pieces may still be searchable;")
-                    appendLine("game API sources may be missing from Project Structure → Libraries.")
+                    appendLine("Forge/NeoForge game-event .java sentinels were not found in any Library SOURCES root.")
+                    appendLine("Loader FML/bus -sources.jar trees may still be searchable; universal game API may be missing.")
                     appendLine()
                 }
 
@@ -366,7 +399,7 @@ class MixinMcpToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). Forge/NeoForge game API (net/minecraftforge/event/*, net/neoforged/neoforge/event/*) is often absent from Library SOURCES on MDG — empty results append hints; use mixin_list_source_roots or mixin_find_class. roots: all (default) — search Gradle library -sources.jar then MixinMCP cache; when all, cache files are skipped if the same path already matched in library sources (no duplicate FML/vanilla hits). library — only published -sources.jar roots. decompiled — only MixinMCP decompiled cache. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default.")
+    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync — try this tool first for vanilla/Forge/NeoForge; empty results append hints (check mixin_list_source_roots auto-attach section). roots: all (default) — search Gradle library -sources.jar then MixinMCP cache; when all, cache files are skipped if the same path already matched in library sources (no duplicate FML/vanilla hits). library — only published -sources.jar roots. decompiled — only MixinMCP decompiled cache. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
@@ -599,7 +632,8 @@ class MixinMcpToolset : McpToolset {
 
     /**
      * Detects MDG merged JARs (Forge or NeoForge) and similar Minecraft artifacts in the project build directory.
-     * These are binary-only but contain vanilla + loader game classes accessible via PSI and bytecode tools.
+     * They contain vanilla + loader game classes; MixinMCP also registers them as Library SOURCES when possible
+     * so dependency grep can see `.java` entries (or Gradle universal *-sources.jar fallback).
      */
     private fun detectMergedJars(project: Project): List<String> {
         val projectPath = project.basePath?.replace('\\', '/') ?: return emptyList()
@@ -621,27 +655,32 @@ class MixinMcpToolset : McpToolset {
     }
 
     /**
+     * True if a Library SOURCES root contains at least one of the given paths (slash-separated, relative to jar root).
+     */
+    private fun libraryRootContainsAnySentinelJava(root: VirtualFile, relativeJavaPaths: List<String>): Boolean {
+        for (rel: String in relativeJavaPaths) {
+            if (root.findFileByRelativePath(rel) != null) return true
+        }
+        return false
+    }
+
+    /**
      * True if Library SOURCES roots contain Forge **game** events (`net.minecraftforge.event.*`),
-     * distinct from `net.minecraftforge.eventbus` and `net.minecraftforge.fml` (often still have
-     * `-sources.jar` when forge-*-universal sources are not attached).
+     * distinct from `net.minecraftforge.eventbus` and `net.minecraftforge.fml`.
      */
     private fun hasForgeGameEventApiInLibrarySources(libRoots: List<SourceRootInfo>): Boolean {
         return libRoots.any { info: SourceRootInfo ->
-            collectSamplePaths(info.root, SOURCE_ROOT_DIAGNOSTIC_SAMPLE_CAP).any { path: String ->
-                path.startsWith("net/minecraftforge/event/")
-            }
+            libraryRootContainsAnySentinelJava(info.root, FORGE_EVENT_LIBRARY_SOURCE_SENTINELS)
         }
     }
 
     /**
-     * Canary for NeoForge **game** API sources (`net.neoforged.neoforge.event.*`), distinct from
-     * `net.neoforged.bus` and other small artifacts that often keep `-sources.jar` when universal does not.
+     * True if Library SOURCES roots contain NeoForge **game** API (`net.neoforged.neoforge.event.*`),
+     * distinct from `net.neoforged.bus` and other loader artifacts.
      */
     private fun hasNeoForgeNeoforgeEventApiInLibrarySources(libRoots: List<SourceRootInfo>): Boolean {
         return libRoots.any { info: SourceRootInfo ->
-            collectSamplePaths(info.root, SOURCE_ROOT_DIAGNOSTIC_SAMPLE_CAP).any { path: String ->
-                path.startsWith("net/neoforged/neoforge/event/")
-            }
+            libraryRootContainsAnySentinelJava(info.root, NEOFORGE_NEOFORGE_EVENT_SOURCE_SENTINELS)
         }
     }
 
@@ -670,9 +709,7 @@ class MixinMcpToolset : McpToolset {
         val hasForgeGameEvents: Boolean = hasForgeGameEventApiInLibrarySources(libRoots)
         val hasNeoForgeGameEvents: Boolean = hasNeoForgeNeoforgeEventApiInLibrarySources(libRoots)
         val hasVanilla: Boolean = libRoots.any { info: SourceRootInfo ->
-            collectSamplePaths(info.root, SOURCE_ROOT_DIAGNOSTIC_SAMPLE_CAP).any { p: String ->
-                p.startsWith("net/minecraft/")
-            }
+            libraryRootContainsAnySentinelJava(info.root, VANILLA_LIBRARY_SOURCE_SENTINELS)
         }
         val merged: List<String> = detectMergedJars(project)
         val hasForgeMerged: Boolean = hasLocalForgeLikeMergedArtifacts(project)
@@ -701,26 +738,30 @@ class MixinMcpToolset : McpToolset {
         }
         if (targetsForgeGameEvents && !hasForgeGameEvents) {
             hints.add(
-                "Forge game API (net.minecraftforge.event.*) is declared in forge-*-universal (often merged into the MDG binary). " +
-                    "That layer is usually not a Library SOURCES root even when Gradle has forge-*-universal-sources.jar in ~/.gradle/caches.",
+                "Forge game API (net.minecraftforge.event.*) should be in Library SOURCES after MixinMCP auto-attaches the MDG merged jar " +
+                    "(or a Gradle *-sources.jar fallback when the merged jar has no .java entries).",
             )
             hints.add(
-                "Try mixin_find_class(includeSource=true), mixin_search_symbols, drop pathPrefix to grep mod imports, or mixin_list_source_roots to confirm.",
+                "If search is still empty: run mixin_list_source_roots (MDG auto-attach section), then try mixin_find_class(includeSource=true), mixin_search_symbols, or drop pathPrefix.",
             )
             if (hasForgeMerged || merged.isNotEmpty()) {
-                hints.add("This project lists MDG merged artifacts under build/ — mixin_search_in_deps does not scan those binaries.")
+                hints.add(
+                    "This project uses MDG merged artifacts — if mixin_list_source_roots shows auto-attach warnings, attachment failed and universal API sources may be missing.",
+                )
             }
         }
         if (targetsNeoForgeGameEvents && !hasNeoForgeGameEvents) {
             hints.add(
-                "NeoForge game API (net.neoforged.neoforge.event.*) is declared in neoforge-*-universal (often merged into the MDG binary). " +
-                    "That layer is often not a Library SOURCES root even when Gradle has neoforge-*-universal-sources.jar in ~/.gradle/caches.",
+                "NeoForge game API (net.neoforged.neoforge.event.*) should be in Library SOURCES after MixinMCP auto-attaches the MDG merged jar " +
+                    "(or a Gradle *-sources.jar fallback when the merged jar has no .java entries).",
             )
             hints.add(
-                "Try mixin_find_class(includeSource=true), mixin_search_symbols, drop pathPrefix to grep mod imports, or mixin_list_source_roots to confirm.",
+                "If search is still empty: run mixin_list_source_roots (MDG auto-attach section), then try mixin_find_class(includeSource=true), mixin_search_symbols, or drop pathPrefix.",
             )
             if (hasNeoForgeMerged || merged.isNotEmpty()) {
-                hints.add("This project lists MDG merged artifacts under build/ — mixin_search_in_deps does not scan those binaries.")
+                hints.add(
+                    "This project uses MDG merged artifacts — if mixin_list_source_roots shows auto-attach warnings, attachment failed and universal API sources may be missing.",
+                )
             }
         }
         if (!targetsForgeGameEvents &&
@@ -729,8 +770,8 @@ class MixinMcpToolset : McpToolset {
             hasForgeMerged
         ) {
             hints.add(
-                "Under net/minecraftforge/, mixin_search_in_deps only sees packages present in attached -sources.jar roots " +
-                    "(e.g. fml, eventbus). Game API under net/minecraftforge/event/* may be missing — see mixin_list_source_roots.",
+                "Under net/minecraftforge/, mixin_search_in_deps only sees packages present in Library SOURCES. " +
+                    "Confirm mixin_list_source_roots reports a successful MDG auto-attach for the merged jar.",
             )
         }
         if (!targetsNeoForgeGameEvents &&
@@ -739,14 +780,14 @@ class MixinMcpToolset : McpToolset {
             hasNeoForgeMerged
         ) {
             hints.add(
-                "Under net/neoforged/, mixin_search_in_deps only sees packages present in attached -sources.jar roots. " +
-                    "NeoForge game API under net/neoforged/neoforge/* (e.g. event/) may be missing — see mixin_list_source_roots.",
+                "Under net/neoforged/, mixin_search_in_deps only sees packages present in Library SOURCES. " +
+                    "Confirm mixin_list_source_roots reports a successful MDG auto-attach for the merged jar.",
             )
         }
         if (targetsVanillaPrefix && merged.isNotEmpty() && !hasVanilla) {
             hints.add(
-                "Vanilla (net/minecraft/*) may exist only inside merged/binary artifacts — mixin_search_in_deps searches Library SOURCES. " +
-                    "Use mixin_find_class(includeSource=true) or see mixin_list_source_roots.",
+                "Vanilla (net/minecraft/*) should appear in Library SOURCES when the MDG merged jar is auto-attached. " +
+                    "Check mixin_list_source_roots (MDG auto-attach warnings), then try mixin_find_class(includeSource=true).",
             )
         }
         return hints
@@ -1919,8 +1960,8 @@ class MixinMcpToolset : McpToolset {
                 // Ignore — project may not be Gradle/Maven
                 }
             }
-            // Sync listener will fire AdditionalLibraryChanged when sync completes;
-            // cache is populated by the Gradle plugin, IDE is read-only.
+            // Gradle RESOLVE success runs MixinDecompileCacheSyncListener, which schedules
+            // SourceAutoAttacher (MDG merged jar → Library SOURCES) after the decompile-cache refresh.
         }
 
         return McpToolCallResult.text(

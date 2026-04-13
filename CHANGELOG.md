@@ -1,6 +1,13 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.8.2]
+### Added
+- Attempt to auto-attach MDG merged sources again post ide sync, just in-case MDG failed
+
+### Improved
+- Improved fallback/error messages for issues with MDG merged sources access
+
 ## [0.8.1]
 ### Added
 - Fallback hints and skill notes for agents attempting to access Forge/Neoforge merged sources
