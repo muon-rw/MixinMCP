@@ -18,6 +18,7 @@
         <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.mappings.MappingsToolset"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.intellij">

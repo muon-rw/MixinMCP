@@ -39,6 +39,9 @@ dependencies {
     // kotlinx.serialization for @Serializable MCP tool args
     implementation(libs.kotlinx.serialization.json)
 
+    // mapping-io: parses tiny v1/v2, tsrg/tsrg2, ProGuard; composes namespaces
+    implementation(libs.mapping.io)
+
     testImplementation(libs.junit)
     testImplementation(libs.opentest4j)
 

@@ -53,6 +53,7 @@ Tool descriptions document all parameters and defaults — read them before call
 | Synthetic/lambda method names | `mixin_class_bytecode` (filter="synthetic") |
 | Exact @At(target) for an INVOKE | `mixin_method_bytecode` — read the owner class from INVOKE* instructions |
 | Bytecode for a specific method | `mixin_method_bytecode` |
+| Convert a name between mapping namespaces | `mixin_mappings_lookup` — mojmap / yarn / intermediary / srg / obf, for class / method / field |
 | Diagnose missing source roots | `mixin_list_source_roots` |
 
 ## Examples
@@ -148,6 +149,17 @@ mixin_find_references(className="net.minecraft.world.entity.LivingEntity", membe
 
 ### mixin_find_targeting_mixins
 - Increase `maxResults` (default 50) for heavily-targeted classes like `LivingEntity` or `Player`.
+
+### mixin_mappings_lookup
+- **Input symbol must be in the `from` namespace** — if `from="srg"` the class must be the SRG name (e.g. `net/minecraft/src/C_12_`), not the mojmap/yarn name. Cross-namespace class renames mean you can't mix-and-match.
+- Method / field inputs include the **owner class**: `net/minecraft/src/C_12_.m_8793_`. Accepts `.` or `/` as package separator; last dot before `(` (method) or `:` (field) splits owner from member.
+- Method descriptor is optional (e.g. `m_8793_(Ljava/util/function/BooleanSupplier;)V`) — if omitted, all overloads on the class are returned. Same for field type descriptors (`entities:Lnet/...;` vs just `entities`).
+- MC version is auto-detected from `gradle.properties` (keys: `minecraft_version`, `mc_version`, `minecraftVersion`, `mcVersion`, `minecraft.version`, `mc.version`, checking root + each subproject). Pass `mcVersion` explicitly if auto-detect fails.
+- First call per MC version downloads mappings (Mojang launcher meta + Fabric Maven + Forge/NeoForge Maven) to `~/.cache/mixinmcp/mappings/`. Subsequent calls are cached in memory for the IDE session.
+- `obf` (the obfuscated production names) is available as a namespace even though mod authors rarely type it directly — useful for mixin debugging.
+- **SRG** is published by Forge's `mcp_config` and NeoForged's `neoform`. If neither has published for a very new MC version yet, the error names both URLs tried.
+- **Yarn** tiny files often carry only `intermediary → named` (no obf); the tool bridges through the separately-downloaded intermediary mappings automatically.
+- ProGuard (Mojang) mappings do NOT carry field descriptors — mojmap field lookups may show the name without a type.
 
 ## Mixin Workflow
 

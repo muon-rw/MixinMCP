@@ -3,7 +3,9 @@
 # MixinMCP Changelog
 ## [0.9.0]
 ### Added
-- New tool `mixin_mappings_lookup`, helper to quickly convert any class/method/field names between SRG/mojmap/yarn/intermediary
+- New tool `mixin_mappings_lookup` — converts class/method/field names between mojmap, yarn, intermediary, srg, and obf. 
+- - MC version is auto-detected from `gradle.properties` if a version is not passed explicitly in the tool call. 
+- - Mappings are downloaded on demand from canonical sources (Mojang launcher meta, Fabric Maven, Forge/NeoForge Maven) and cached under `~/.cache/mixinmcp/mappings/`, so conversions work across loaders without needing the project to have all mappings locally.
 
 ### Improved
 - Improved Plugin description and made Setup guide in README easier to follow

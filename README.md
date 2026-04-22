@@ -23,8 +23,9 @@ With this plugin, agents can easily scan your entire dependency network. This gr
 - Improves compatibility by favoring MixinExtras injectors LLMs often fail to understand
 - Favor precise modification without workarounds or slices via MixinExtras' robust `@Expression` annotation
 
-#### 5. (Planned, in-development) Automatic Mappings lookup:
-- Easily convert between any SRG, Intermediary, Yarn, or Mojmap mapped class, method, or field name
+#### 5. Automatic Mappings lookup:
+- Convert any class, method, or field name between SRG, Intermediary, Yarn, Mojmap, and obf
+- Mappings are downloaded on demand (Mojang launcher meta, Fabric Maven, Forge/NeoForge Maven) and cached under `~/.cache/mixinmcp/mappings/` — works across loaders without needing the project to have all mappings locally
 
 <!-- Plugin description end -->
 
@@ -118,7 +119,7 @@ For local development against an unpublished build, see [Decompilation cache det
 ## Tool reference
 
 <details>
-<summary>All 13 tools (click to expand)</summary>
+<summary>All 14 tools (click to expand)</summary>
 
 ### Source Navigation
 
@@ -147,6 +148,12 @@ For local development against an unpublished build, see [Decompilation cache det
 |------|-------------|
 | `mixin_class_bytecode` | Bytecode-level class overview including synthetic methods. Use `filter="synthetic"` for lambda/bridge mixin targets. |
 | `mixin_method_bytecode` | Full bytecode instructions for a specific method. INVOKE* instructions show the real owner class for `@At(target)`. |
+
+### Mappings
+
+| Tool | Description |
+|------|-------------|
+| `mixin_mappings_lookup` | Convert a class/method/field name between mojmap, yarn, intermediary, srg, and obf. MC version auto-detected from `gradle.properties`. Mapping files are downloaded on demand and cached. |
 
 ### Project Management
 
