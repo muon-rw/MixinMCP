@@ -2,7 +2,12 @@
 
 <!-- Plugin description -->
 Extends IntelliJ's built-in MCP Server with tools for
-Minecraft mod development.
+Minecraft mod development, with the goal of improving mixin writing and inter-mod compatibility. 
+
+GitHub:
+https://github.com/muon-rw/MixinMCP
+
+For all features, you will also need the Gradle plugin - see https://github.com/muon-rw/MixinMCP#Setup
 
 ### Key features:
 #### 1. Robust broad-scope search:
@@ -28,7 +33,7 @@ At best, these tools might additionally see your currently active open file.
 - Favor precise modification for the exact target for the task without workarounds, slices, or shift by's, thanks to MixinExtras' robust `@Expression` annotation
 
 #### 5. Automatic Mappings lookup:
-- Easily convert any class, method, or field name between SRG, Intermediary, Yarn, Mojmap, and obfuscated
+- Easily convert any class, method, or field name between SRG, Intermediary, Yarn, Mojmap, and obf
 - Mappings are downloaded on demand (Mojang launcher meta, Fabric Maven, Forge/NeoForge Maven) and cached under `~/.cache/mixinmcp/mappings/` — works across loaders without needing the project to have all mappings locally
 
 <!-- Plugin description end -->
