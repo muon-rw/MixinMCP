@@ -1,6 +1,16 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
 # MixinMCP Changelog
+## [0.9.0]
+### Added
+- New tool `mixin_mappings_lookup`, helper to quickly convert any class/method/field names between SRG/mojmap/yarn/intermediary
+
+### Improved
+- Improved Plugin description and made Setup guide in README easier to follow
+
+### Fixed
+- `mixin_find_targeting_mixins` missing injector types `@ModifyReceiver`, `@ModifyReturnValue` , `@WrapWithCondition`, `@WrapMethod`
+
 ## [0.8.2]
 ### Added
 - Attempt to auto-attach MDG merged sources again post ide sync, just in-case MDG failed

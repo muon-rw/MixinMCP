@@ -68,27 +68,29 @@ compiled `.class` files and are invisible in decompiled source.
 │  │  • get_file_problems │◄───│  com.intellij.mcpServer        │ │
 │  │  • search_in_files   │    │                                │ │
 │  │  • execute_terminal  │    │  ┌──────────────────────────┐  │ │
-│  │  • rename_refactoring│    │  │  MixinMcpToolset         │  │ │
-│  │  • ... (15+ tools)   │    │  │  (single class, 12 tools)│  │ │
+│  │  • rename_refactoring│    │  │  Four McpToolset classes │  │ │
+│  │  • ... (15+ tools)   │    │  │  (13 tools total)        │  │ │
 │  │                      │    │  │                          │  │ │
-│  │  SSE / Stdio         │    │  │  Source Navigation:      │  │ │
+│  │  SSE / Stdio         │    │  │  SourceNavigationToolset:│  │ │
 │  │  transport            │    │  │  • mixin_find_class      │  │ │
 │  └──────┬───────────────┘    │  │  • mixin_search_symbols  │  │ │
 │         │                    │  │  • mixin_search_in_deps  │  │ │
 │         │  Exposes all       │  │  • mixin_get_dep_source  │  │ │
-│         │  tools unified     │  │                          │  │ │
-│         │                    │  │  Semantic Navigation:    │  │ │
-│         ▼                    │  │  • mixin_type_hierarchy  │  │ │
-│  ┌──────────────┐            │  │  • mixin_find_impls      │  │ │
-│  │ MCP Protocol │            │  │  • mixin_find_references │  │ │
-│  │ (to Cursor)  │            │  │  • mixin_call_hierarchy  │  │ │
+│         │  tools unified     │  │  • mixin_list_source_... │  │ │
+│         │                    │  │                          │  │ │
+│         ▼                    │  │  SemanticNavigationTools.│  │ │
+│  ┌──────────────┐            │  │  • mixin_type_hierarchy  │  │ │
+│  │ MCP Protocol │            │  │  • mixin_find_impls      │  │ │
+│  │ (to Cursor)  │            │  │  • mixin_find_targeting..│  │ │
 │  └──────────────┘            │  │  • mixin_super_methods   │  │ │
+│                              │  │  • mixin_find_references │  │ │
+│                              │  │  • mixin_call_hierarchy  │  │ │
 │                              │  │                          │  │ │
-│                              │  │  Bytecode:               │  │ │
+│                              │  │  BytecodeInspectionTools.│  │ │
 │                              │  │  • mixin_class_bytecode  │  │ │
 │                              │  │  • mixin_method_bytecode │  │ │
 │                              │  │                          │  │ │
-│                              │  │  Project:                │  │ │
+│                              │  │  ProjectManagementTools.:│  │ │
 │                              │  │  • mixin_sync_project    │  │ │
 │                              │  └──────────────────────────┘  │ │
 │                              │                                │ │
@@ -111,8 +113,11 @@ connection.
 
 ## 3. The McpToolset Contract
 
-All 12 tools are defined as annotated suspend functions on a single `McpToolset`
-implementation. The MCP framework discovers tools via `@McpTool` annotations at runtime.
+Tools are defined as annotated suspend functions on `McpToolset` implementations,
+one class per category (`SourceNavigationToolset`, `SemanticNavigationToolset`,
+`BytecodeInspectionToolset`, `ProjectManagementToolset`). The MCP framework
+discovers tools via `@McpTool` annotations at runtime; the MCP client sees a
+flat tool list with no visible grouping.
 
 ### The Pattern
 
@@ -124,7 +129,7 @@ import com.intellij.mcpserver.annotations.McpTool
 import com.intellij.mcpserver.projectOrNull
 import kotlin.coroutines.coroutineContext
 
-class MixinMcpToolset : McpToolset {
+class SourceNavigationToolset : McpToolset {
 
     @McpTool
     @McpDescription("Description the LLM sees when choosing tools.")
@@ -159,12 +164,16 @@ class MixinMcpToolset : McpToolset {
 <depends>com.intellij.mcpServer</depends>
 
 <extensions defaultExtensionNs="com.intellij.mcpServer">
-    <mcpToolset implementation="dev.mixinmcp.tools.MixinMcpToolset"/>
+    <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
+    <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
+    <mcpToolset implementation="dev.mixinmcp.tools.bytecode.BytecodeInspectionToolset"/>
+    <mcpToolset implementation="dev.mixinmcp.tools.project.ProjectManagementToolset"/>
 </extensions>
 ```
 
-One `<mcpToolset>` entry registers the class; all `@McpTool`-annotated methods are
-discovered automatically.
+One `<mcpToolset>` entry per class; all `@McpTool`-annotated methods are discovered
+automatically. Adding a new category means adding a new class and a new registration;
+adding a tool to an existing category just means another method.
 
 **IMPORTANT:** The extension namespace is `com.intellij.mcpServer` (capital S). Lowercase
 silently fails to register tools.
@@ -185,7 +194,16 @@ MixinMCP/
 │   └── main/
 │       ├── kotlin/dev/mixinmcp/
 │       │   ├── tools/
-│       │   │   └── MixinMcpToolset.kt # All 12 tools in one class
+│       │   │   ├── source/
+│       │   │   │   ├── SourceNavigationToolset.kt   # 5 tools
+│       │   │   │   └── DepSearchHelpers.kt           # dep-search helpers
+│       │   │   ├── semantic/
+│       │   │   │   ├── SemanticNavigationToolset.kt  # 6 tools
+│       │   │   │   └── MixinAnnotationHelpers.kt     # mixin annotation helpers
+│       │   │   ├── bytecode/
+│       │   │   │   └── BytecodeInspectionToolset.kt  # 2 tools
+│       │   │   └── project/
+│       │   │       └── ProjectManagementToolset.kt   # mixin_sync_project
 │       │   ├── cache/
 │       │   │   ├── DecompilationCacheService.kt  # Read-only cache consumer
 │       │   │   ├── DecompilationManifest.kt      # Manifest format (kotlinx-serialization)
@@ -211,8 +229,11 @@ MixinMCP/
     └── ...
 ```
 
-All tools live in `MixinMcpToolset.kt` rather than separate files per tool. This avoids
-registration boilerplate and keeps the entire tool surface in one place.
+Tools are split by category across four `McpToolset` subclasses in
+`tools/{source,semantic,bytecode,project}/`. Each class registers independently in
+`plugin.xml`. Category-scoped helpers sit beside their toolset (e.g. `DepSearchHelpers.kt`
+next to `SourceNavigationToolset.kt`); the split-by-category layout keeps each file small
+enough to read end-to-end while letting the MCP client see a flat, uncategorised tool list.
 
 The `cache/` package in the IntelliJ plugin is a **read-only consumer** of the
 decompilation cache populated by the Gradle plugin. See Section 11 for details.
@@ -254,7 +275,10 @@ process execution.
     <depends>com.intellij.mcpServer</depends>
 
     <extensions defaultExtensionNs="com.intellij.mcpServer">
-        <mcpToolset implementation="dev.mixinmcp.tools.MixinMcpToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.bytecode.BytecodeInspectionToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.project.ProjectManagementToolset"/>
     </extensions>
 </idea-plugin>
 ```
@@ -718,7 +742,7 @@ dependency on editor state. It's also the same decompiler IntelliJ bundles (Fern
    file-locking is still recommended for robustness but not critical for correctness.
 
 6. ~~**Tool modification scope**~~ → **Resolved: Already implemented.**
-   `collectAllSourceRoots()` in `MixinMcpToolset` already queries
+   `collectAllSourceRoots()` in `tools/source/DepSearchHelpers.kt` already queries
    `AdditionalLibraryRootsProvider.EP_NAME.extensionList` to include synthetic
    library source roots. No tool changes needed — decompiled `.java` files in
    synthetic roots are searchable/readable via the same `VirtualFile` APIs.

@@ -1,56 +1,124 @@
 # MixinMCP
 
 <!-- Plugin description -->
-An IntelliJ Platform plugin that extends the built-in MCP Server with tools for
-Minecraft mod development — dependency navigation, semantic code analysis,
-bytecode inspection, and automatic decompilation of compiled-only dependencies.
+Extends IntelliJ's built-in MCP Server with tools for
+Minecraft mod development.
 
-IntelliJ's built-in MCP Server excludes libraries and dependencies from its tools. MixinMCP
-adds tools that search across your entire classpath, resolve type hierarchies,
-and inspect bytecode — notably useful for synthetic lambda methods that are invisible in
-decompiled source but essential for mixin targeting. A companion Gradle plugin
-decompiles dependencies without published sources via Vineflower so every library
-is searchable.
+### Key features:
+#### 1. Robust broad-scope search:
+- Find all overrides of a given method, across your entire classpath
+- Find all mixins targeting a given method or class, across your entire classpath
+- Search all uses of a field or method, across your entire classpath
+
+#### 2. Class/Method Bytecode lookup:
+- Find the *exact* target before writing a mixin, including synthetic lambdas
+
+#### 3. Searches across your *entire* classpath including dependencies:
+IntelliJ's existing MCP tools search only *your* project code — not remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
+Even other tools (e.g. Claude Code integration) can only additionally see your currently active open file.
+
+With this plugin, agents can easily scan your entire classpath. This greatly speeds up development and debugging, and circumvents the need to find jars in your gradle cache and unzip/analyze them manually
+
+#### 4. Built-in Skills for enhanced Mixin Writing:
+- Improves compatibility by favoring MixinExtras injectors LLMs often fail to understand
+- Favor precise modification without workarounds or slices via MixinExtras' robust `@Expression` annotation
+
+#### 5. (Planned, in-development) Automatic Mappings lookup:
+- Easily convert between any SRG, Intermediary, Yarn, or Mojmap mapped class, method, or field name
+
 <!-- Plugin description end -->
 
-## Why?
+## Setup
 
-Minecraft mod projects often have many dependencies (remapped Minecraft
-sources, mod APIs, libraries, other mods added for integration or compatibility). The built-in MCP Server's tools explicitly exclude
-all of them — your LLM can't look up a Minecraft class, search mod APIs, or trace
-inheritance chains across libraries.
+MixinMCP has two parts, and you need both for full-classpath search to work:
 
-Mixin development makes this worse. Targeting a lambda in a Minecraft method
-requires knowing the synthetic method name (e.g. `lambda$tick$0`), which only
-exists in compiled bytecode. No existing MCP plugin exposes this.
+- **IntelliJ plugin** — registers the `mixin_*` tools on IntelliJ's built-in MCP Server.
+- **Gradle plugin** — decompiles dependencies that don't publish sources so the search tools cover every JAR on your classpath.
 
-## Requirements
+**Prerequisites:** IntelliJ IDEA 2025.3+ (Community or Ultimate).
 
-- IntelliJ IDEA 2025.3+ (Community or Ultimate)
-- The built-in **MCP Server** plugin must be enabled
-  (Settings → Plugins → search "MCP Server")
-- An MCP client connected to IntelliJ's MCP Server
-  (Cursor, Claude Code, Claude Desktop, etc.)
+### 1. Install the IntelliJ plugin
 
-## Installation
-
-### From Disk (local development)
+**From Disk (local development):**
 
 1. Build the plugin:
    ```bash
    ./gradlew buildPlugin
    ```
 2. The plugin ZIP is at `build/distributions/mixin-mcp-<version>.zip`
-3. In IntelliJ: **Settings → Plugins → ⚙️ → Install Plugin from Disk...**
+3. In IntelliJ: **Settings → Plugins**, click the **⚙️** gear icon at the top, then choose **Install Plugin from Disk…**
 4. Select the ZIP, restart IntelliJ
-5. Verify: **Settings → Tools → MCP Server** should list the `mixin_*` tools
 
-### From JetBrains Marketplace (Once published)
+**From JetBrains Marketplace** *(not yet published)*: **Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
 
-*(This plugin is not yet published!)*
-**Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
+### 2. Enable IntelliJ's MCP Server
 
-## Tools
+- **Settings → Plugins** → search "MCP Server" — confirm it's enabled. *(Bundled by default on recent IntelliJ versions.)*
+- **Settings → Tools → MCP Server** → check **Enable MCP Server**.
+
+### 3. Connect your MCP client
+
+IntelliJ has an Auto-Configure option for most clients, which should work in most cases.
+
+Once connected, MixinMCP tools appear alongside the built-in MCP tools automatically. *Most clients require a restart* after you first enable/auto-configure the server to connect.
+
+**Verifying:** ask the model to list MCP tools from the JetBrains server. The `mixin_*` tools should appear. If they don't: (1) confirm MixinMCP is installed, (2) confirm the MCP Server plugin is enabled, (3) confirm your client is connected.
+
+**Cursor:** the server is named **`user-jetbrains`** (the `user-` prefix is added by Cursor to all user-configured servers).
+
+**Claude Code / Claude Desktop:** no extra config — skills auto-activate on Minecraft mod projects once the IntelliJ plugin detects the project layout (see auto-injection below).
+
+**Auto-injection for assistant files.** When MixinMCP detects a Minecraft mod project (Fabric, Forge, NeoForge, Quilt, Architectury), it copies bundled resources on project open: **Cursor** files under `.cursor/` (rules and skills), and **Claude Code** skills under `.claude/skills/`. These teach the LLM when and how to use each tool, common pitfalls, and a mixin workflow checklist. New paths are appended under a `# MixinMCP auto-injected rules` block in `.gitignore`. Configure in **Settings → Tools → MixinMCP**:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Automatically add Cursor and Claude project files | On | Master toggle — disables all injection (`.cursor/` and `.claude/`) |
+| Overwrite existing files on project open | On | When off, only writes files that don't already exist |
+| Warn when Gradle plugin is not detected | On | Shows a notification if `dev.mixinmcp.decompile` is missing |
+
+For manual setup (other clients, non-Minecraft projects), copy the trees from [`src/main/resources/inject/cursor/`](src/main/resources/inject/cursor/) and [`src/main/resources/inject/claude/`](src/main/resources/inject/claude/) into your project.
+
+### 4. Set up the Gradle plugin
+
+Without this step, `mixin_search_in_deps` and `mixin_get_dep_source` can only see dependencies that published a `-sources.jar`. This means local jar dependencies, Cursemaven dependencies, and many from Modrinth Maven dependencies are totally invisible. The Gradle plugin decompiles the rest via [Vineflower](https://github.com/Vineflower/vineflower) into a local cache that the IntelliJ plugin indexes automatically.
+
+**1. Add the MixinMCP maven repository to your mod project's `settings.gradle` or `settings.gradle.kts`:**
+
+```kotlin
+// .kts format
+pluginManagement {
+    repositories {
+        maven { url = uri("https://maven.muon.rip/releases") }
+        gradlePluginPortal()
+        // ... your existing repos (maven, fabricmc, neoforged, etc.)
+    }
+}
+```
+
+**2. Apply the plugin in your mod project's `build.gradle` or `build.gradle.kts`:**
+
+```kotlin
+plugins {
+    // ... your existing plugins ...
+    id("dev.mixinmcp.decompile") version "0.8.0"
+}
+```
+
+**3. Run decompilation:** 
+*(Unless disabled, this task already runs automatically after every gradle sync)*
+
+```bash
+./gradlew genDependencySources
+```
+
+The IntelliJ plugin reads the cache on project open and after every Gradle sync. Re-run `./gradlew genDependencySources` after changing dependencies. MixinMCP warns on project open if the Gradle plugin is missing.
+
+For local development against an unpublished build, see [Decompilation cache details](#decompilation-cache-details) below.
+
+## Tool reference
+
+<details>
+<summary>All 13 tools (click to expand)</summary>
 
 ### Source Navigation
 
@@ -60,6 +128,7 @@ exists in compiled bytecode. No existing MCP plugin exposes this.
 | `mixin_search_symbols` | Find classes, methods, or fields by name pattern across project and all dependencies. |
 | `mixin_search_in_deps` | Regex search across all dependency sources — published *and* auto-decompiled. Like grep for your entire classpath. |
 | `mixin_get_dep_source` | Read source from dependency jars or decompiled cache. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java). |
+| `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
 
 ### Semantic Navigation
 
@@ -84,52 +153,13 @@ exists in compiled bytecode. No existing MCP plugin exposes this.
 | Tool | Description |
 |------|-------------|
 | `mixin_sync_project` | Trigger Gradle sync. The decompilation cache is re-read automatically after sync. |
-| `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
 
-## Decompilation Cache
+</details>
 
-Many Minecraft mod dependencies ship without published sources (`-sources.jar`).
-MixinMCP includes a **Gradle plugin** that decompiles these compiled-only JARs
-using [Vineflower](https://github.com/Vineflower/vineflower) so that
-`mixin_search_in_deps` and `mixin_get_dep_source` cover your *entire* classpath
-— not just libraries that happened to publish source artifacts.
+## Decompilation cache details
 
-### Setup
-
-**1. Add the MixinMCP maven repository to your mod project's `settings.gradle.kts`:**
-
-```kotlin
-pluginManagement {
-    repositories {
-        maven { url = uri("https://maven.muon.rip/releases") }
-        gradlePluginPortal()
-        // ... your existing repos (maven, fabricmc, neoforged, etc.)
-    }
-}
-```
-
-**2. Apply the plugin in your mod project's `build.gradle.kts`:**
-
-```kotlin
-plugins {
-    // ... your existing plugins ...
-    id("dev.mixinmcp.decompile") version "0.7.0"
-}
-```
-
-**3. Run decompilation:**
-
-```bash
-./gradlew genDependencySources
-```
-
-**For local development** (before publishing), you can use `mavenLocal()` instead:
-
-```bash
-# In the MixinMCP project
-./gradlew :mixinmcp-gradle:publishToMavenLocal
-# Then add mavenLocal() to pluginManagement.repositories in your mod project
-```
+<details>
+<summary>How the cache works, memory tuning, local dev (click to expand)</summary>
 
 ### How it works
 
@@ -147,8 +177,7 @@ plugins {
 
 Decompilation is a **blocking Gradle task**, not a background IDE operation. This
 means tools never run against a half-populated cache — by the time you open the
-project, every dependency is searchable. Re-run `./gradlew genDependencySources` after
-changing dependencies.
+project, every dependency is searchable.
 
 ### Memory tuning
 
@@ -183,76 +212,52 @@ sources (Maven Central, JitPack, etc.), add the `-sources` classifier in your
 build script so IntelliJ attaches the real sources and MixinMCP skips
 decompilation for that JAR entirely.
 
-## Configuring Your MCP Client
+### Local development against an unpublished Gradle plugin build
 
-MixinMCP is an **IntelliJ plugin** — it must be installed in IntelliJ and the
-built-in **MCP Server** plugin must be enabled and connected. MixinMCP tools are
-registered dynamically at runtime; they appear alongside the built-in MCP tools
-with no extra configuration once both plugins are active.
+```bash
+# In the MixinMCP project
+./gradlew :mixinmcp-gradle:publishToMavenLocal
+```
 
-**Verifying the connection:** ask the model to list MCP tools from the JetBrains
-server. If the `mixin_*` tools don't appear, check that (1) MixinMCP is
-installed in IntelliJ, (2) the MCP Server plugin is enabled, and (3) your MCP
-client is connected.
+Then swap `maven { url = uri("https://maven.muon.rip/releases") }` for
+`mavenLocal()` in your mod project's `pluginManagement.repositories`.
 
-### Cursor
-
-In Cursor, IntelliJ's MCP server is named **`user-jetbrains`** (the `user-`
-prefix is added by Cursor to all user-configured servers). Tools are invoked via
-`CallMcpTool` with `server: "user-jetbrains"`.
-
-**Automatic assistant file injection:** When MixinMCP detects a Minecraft mod project
-(Fabric, Forge, NeoForge, Quilt, Architectury), it copies bundled resources into
-your project on open: **Cursor** files under `.cursor/` (rules and skills), and
-**Claude Code** skills under `.claude/skills/`. These teach the LLM when and how to
-use each tool, common pitfalls, and a mixin workflow checklist. Files are kept in
-sync with the plugin version by default — no manual setup needed. New paths are
-appended under a `# MixinMCP auto-injected rules` block in `.gitignore` when a
-`.gitignore` already exists.
-
-MixinMCP will also warn if the Gradle decompilation plugin is not detected in
-your project (see [Decompilation Cache](#decompilation-cache)).
-
-Configure in **Settings > Tools > MixinMCP**:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Automatically add Cursor and Claude project files | On | Master toggle — disables all injection (`.cursor/` and `.claude/`) |
-| Overwrite existing files on project open | On | When off, only writes files that don't already exist |
-| Warn when Gradle plugin is not detected | On | Shows a notification if `dev.mixinmcp.decompile` is missing |
-
-**Manual setup:** If you prefer to manage files yourself (or for non-Minecraft
-projects), copy the trees from the plugin sources at
-[`src/main/resources/inject/cursor/`](src/main/resources/inject/cursor/) and
-[`src/main/resources/inject/claude/`](src/main/resources/inject/claude/) into
-`.cursor/` and `.claude/` in your mod project, respectively.
-
-### Claude Code / Claude Desktop
-
-With injection enabled, Claude Code picks up the same bundled content from
-`.claude/skills/` in your project. For Claude Desktop or other clients without
-that layout, copy the skill markdown from
-[`src/main/resources/inject/claude/skills/`](src/main/resources/inject/claude/skills/)
-into your workflow or add summaries to `CLAUDE.md`. Adjust the MCP server name to
-match your client's configuration.
+</details>
 
 ## Building from Source
 
+<details>
+<summary>How to build and use locally (click to expand)</summary>
+
+### Building:
+First clone the project and build:
 ```bash
-git clone https://github.com/yourname/mixin-mcp.git
+git clone https://github.com/muon-rw/mixin-mcp.git
 cd mixin-mcp
-./gradlew buildPlugin
+./gradlew buildPlugin # IntelliJ plugin
+./gradlew build # Gradle Plugin
+```
+Recommended: Publish the Gradle Plugin locally
+```bash
+./gradlew publishToMavenLocal
 ```
 
-The plugin ZIP will be at `build/distributions/mixin-mcp-<version>.zip`.
-
-To launch a sandboxed IntelliJ instance with the plugin installed:
-
+### Using: 
+Option 1: Run a sandboxed instance with the plugin installed
 ```bash
 ./gradlew runIde
 ```
 
+Option 2:
+After `buildPlugin`, The plugin ZIP will be at `build/distributions/mixin-mcp-<version>.zip`.
+
+In IntelliJ: **Settings → Plugins** → ⚙ → **Install Plugin from Disk…**
+</details>
+
 ## Publishing
+
+<details>
+<summary>Local distribution and JetBrains Marketplace steps (click to expand)</summary>
 
 ### Local / Team Distribution
 
@@ -319,6 +324,8 @@ export PUBLISH_TOKEN="your-marketplace-token"
 
 Get your token from your JetBrains Marketplace profile → **My Tokens** →
 **Generate Token**.
+
+</details>
 
 ## License
 

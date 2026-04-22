@@ -1,6 +1,6 @@
 <idea-plugin>
     <id>dev.mixinmcp</id>
-    <name>MixinMCP - Mixin Development Tools for MCP Server</name>
+    <name>MixinMCP - Minecraft Extension for MCP Server</name>
     <vendor>mixinmcp</vendor>
 
     <description><![CDATA[
@@ -14,7 +14,10 @@
     <depends>com.intellij.mcpServer</depends>
 
     <extensions defaultExtensionNs="com.intellij.mcpServer">
-        <mcpToolset implementation="dev.mixinmcp.tools.MixinMcpToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.bytecode.BytecodeInspectionToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.project.ProjectManagementToolset"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.intellij">
