@@ -6,25 +6,29 @@ Minecraft mod development.
 
 ### Key features:
 #### 1. Robust broad-scope search:
-- Find all overrides of a given method, across your entire classpath
-- Find all mixins targeting a given method or class, across your entire classpath
-- Search all uses of a field or method, across your entire classpath
+- Full type hierarchy — supertypes, subtypes, and all implementations of an interface or abstract class
+- Find all overrides of a method, plus its original super-method declaration
+- Call hierarchy — callers and callees of any method
+- All references to a class, method, or field
+- All `@Mixin` classes targeting a given class or method — catches cross-mod conflicts
+- Symbol search by name pattern, plus regex grep across all dependency sources
 
 #### 2. Class/Method Bytecode lookup:
-- Find the *exact* target before writing a mixin, including synthetic lambdas
+- Look up the bytecode for a given class or method 
+- Useful to find a precise target when writing mixins, especially for ordinals or synthetic lambdas
 
 #### 3. Searches across your *entire* classpath including dependencies:
-Alternative tools search only *your* project code — not remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
-In the best case, they can only additionally see your currently active open file.
-
-With this plugin, agents can easily scan your entire dependency network. This greatly speeds up development and debugging, and circumvents the need to find jars in your gradle cache and unzip/analyze them manually
+- Alternative tools generally search only *your* project code — not remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
+At best, these tools might additionally see your currently active open file.
+- With this plugin, agents can easily scan your *entire* dependency network on their own, including projects without published sources. 
+- Circumvents the need to manually copy and paste snippets into context, or for agents to find jars in your gradle cache and unzip/analyze them manually
 
 #### 4. Built-in Skills for enhanced Mixin Writing:
-- Improves compatibility by favoring MixinExtras injectors LLMs often fail to understand
-- Favor precise modification without workarounds or slices via MixinExtras' robust `@Expression` annotation
+- Improve compatibility of written mixins by favoring MixinExtras injectors which LLMs often hallucinate or fail to use in the first place
+- Favor precise modification for the exact target for the task without workarounds, slices, or shift by's, thanks to MixinExtras' robust `@Expression` annotation
 
 #### 5. Automatic Mappings lookup:
-- Convert any class, method, or field name between SRG, Intermediary, Yarn, Mojmap, and obf
+- Easily convert any class, method, or field name between SRG, Intermediary, Yarn, Mojmap, and obfuscated
 - Mappings are downloaded on demand (Mojang launcher meta, Fabric Maven, Forge/NeoForge Maven) and cached under `~/.cache/mixinmcp/mappings/` — works across loaders without needing the project to have all mappings locally
 
 <!-- Plugin description end -->
