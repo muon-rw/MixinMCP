@@ -60,7 +60,12 @@ MixinMCP has two parts, and you need both for full-classpath search to work:
 
 ### 3. Connect your MCP client
 
-Use IntelliJ's **Auto-Configure** option for your client, then restart the client. In Cursor the server appears as **`user-jetbrains`**. For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-rules-and-skills).
+Use IntelliJ's **Auto-Configure** option for your client (or configure manually using the ip address), then restart the client. The auto-configured server name is usually **`user-jetbrains`**
+
+> [!WARNING]
+> MixinMCP exposes full project and dependency source, classpath metadata, and bytecode to whatever connects to the MCP server. These tools aren't hardened for remote access. IntelliJ binds the server to localhost by default — leave it that way unless you have a specific reason, and expose it more broadly at your own risk.
+
+For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-rules-and-skills).
 
 ### 4. Set up the Gradle plugin
 
