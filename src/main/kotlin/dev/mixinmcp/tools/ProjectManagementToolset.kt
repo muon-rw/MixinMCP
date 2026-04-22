@@ -1,4 +1,4 @@
-package dev.mixinmcp.tools.project
+package dev.mixinmcp.tools
 
 import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
@@ -27,9 +27,9 @@ class ProjectManagementToolset : McpToolset {
         projectPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+            ?: return McpToolCallResult.Companion.error("No project open")
 
-        val basePath: String = project.basePath ?: return McpToolCallResult.error(
+        val basePath: String = project.basePath ?: return McpToolCallResult.Companion.error(
             "Project has no base path",
         )
 
@@ -56,7 +56,7 @@ class ProjectManagementToolset : McpToolset {
             }
         }
 
-        return McpToolCallResult.text(
+        return McpToolCallResult.Companion.text(
             "Project sync triggered for $externalPath. Dependencies will refresh in the background.",
         )
     }

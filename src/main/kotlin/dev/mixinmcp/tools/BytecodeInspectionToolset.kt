@@ -1,17 +1,17 @@
-package dev.mixinmcp.tools.bytecode
+package dev.mixinmcp.tools
 
 import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
 import com.intellij.mcpserver.projectOrNull
-import dev.mixinmcp.util.BytecodeAnalyzer
-import dev.mixinmcp.util.ClassFileLocator
+import dev.mixinmcp.resolve.BytecodeAnalyzer
+import dev.mixinmcp.resolve.ClassFileLocator
 import kotlin.coroutines.coroutineContext
 
 /**
  * Bytecode-inspection tools: class-level and method-level javap-style output
- * for classes the IDE can resolve via [ClassFileLocator].
+ * for classes the IDE can resolve via [dev.mixinmcp.resolve.ClassFileLocator].
  */
 class BytecodeInspectionToolset : McpToolset {
 
@@ -24,11 +24,11 @@ class BytecodeInspectionToolset : McpToolset {
         includeInstructions: Boolean = false,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+            ?: return McpToolCallResult.Companion.error("No project open")
 
         val classBytes: ByteArray? = ClassFileLocator.locate(project, className)
         if (classBytes == null) {
-            return McpToolCallResult.error("Class not found or could not locate bytecode: $className")
+            return McpToolCallResult.Companion.error("Class not found or could not locate bytecode: $className")
         }
 
         val analysis: BytecodeAnalyzer.ClassAnalysis =
@@ -99,7 +99,7 @@ class BytecodeInspectionToolset : McpToolset {
             }
         }
 
-        return McpToolCallResult.text(result)
+        return McpToolCallResult.Companion.text(result)
     }
 
     @McpTool
@@ -111,11 +111,11 @@ class BytecodeInspectionToolset : McpToolset {
         methodDescriptor: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+            ?: return McpToolCallResult.Companion.error("No project open")
 
         val classBytes: ByteArray? = ClassFileLocator.locate(project, className)
         if (classBytes == null) {
-            return McpToolCallResult.error("Class not found or could not locate bytecode: $className")
+            return McpToolCallResult.Companion.error("Class not found or could not locate bytecode: $className")
         }
 
         val result: String? = BytecodeAnalyzer.analyzeMethod(
@@ -125,7 +125,7 @@ class BytecodeInspectionToolset : McpToolset {
         )
 
         if (result != null) {
-            return McpToolCallResult.text(buildString {
+            return McpToolCallResult.Companion.text(buildString {
                 appendLine("=== $className#$methodName (bytecode) ===")
                 appendLine()
                 append(result)
@@ -135,7 +135,7 @@ class BytecodeInspectionToolset : McpToolset {
         val analysis: BytecodeAnalyzer.ClassAnalysis = BytecodeAnalyzer.analyze(classBytes, false)
         val similar: List<BytecodeAnalyzer.MethodInfo> = analysis.methods
             .filter { it.name == methodName }
-        return McpToolCallResult.error(buildString {
+        return McpToolCallResult.Companion.error(buildString {
             if (similar.isEmpty()) {
                 appendLine("No method named '$methodName' in $className bytecode.")
                 val allNames: List<String> = analysis.methods.map { it.name }.distinct().sorted()

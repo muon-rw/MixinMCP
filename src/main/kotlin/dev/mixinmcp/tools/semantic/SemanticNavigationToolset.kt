@@ -18,10 +18,10 @@ import com.intellij.psi.search.searches.AnnotatedElementsSearch
 import com.intellij.psi.search.searches.ClassInheritorsSearch
 import com.intellij.psi.search.searches.MethodReferencesSearch
 import com.intellij.psi.search.searches.ReferencesSearch
-import dev.mixinmcp.util.BytecodeAnalyzer
-import dev.mixinmcp.util.ClassFileLocator
-import dev.mixinmcp.util.FqcnResolver
-import dev.mixinmcp.util.MethodResolver
+import dev.mixinmcp.resolve.BytecodeAnalyzer
+import dev.mixinmcp.resolve.ClassFileLocator
+import dev.mixinmcp.resolve.FqcnResolver
+import dev.mixinmcp.resolve.MethodResolver
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -530,12 +530,8 @@ class SemanticNavigationToolset : McpToolset {
                         val qualName = psiMethod.containingClass?.qualifiedName ?: className
                         val classBytes: ByteArray? = ClassFileLocator.locate(project, qualName)
                         if (classBytes != null) {
-                            val descriptor = methodDescriptor
-                                ?: psiMethod.parameterList.parameters.let { params ->
-                                    if (params.isEmpty()) null else null
-                                }
                             val bytecodeResult: String? = BytecodeAnalyzer.analyzeMethod(
-                                classBytes, psiMethod.name, descriptor,
+                                classBytes, psiMethod.name, methodDescriptor,
                             )
                             if (bytecodeResult != null) {
                                 appendLine("  (source body not available — extracting from bytecode)")

@@ -1,4 +1,4 @@
-package dev.mixinmcp.util
+package dev.mixinmcp.resolve
 
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project

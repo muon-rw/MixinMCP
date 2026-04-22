@@ -14,10 +14,10 @@ Minecraft mod development.
 - Find the *exact* target before writing a mixin, including synthetic lambdas
 
 #### 3. Searches across your *entire* classpath including dependencies:
-IntelliJ's existing MCP tools search only *your* project code — not remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
-Even other tools (e.g. Claude Code integration) can only additionally see your currently active open file.
+Alternative tools search only *your* project code — not remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
+In the best case, they can only additionally see your currently active open file.
 
-With this plugin, agents can easily scan your entire classpath. This greatly speeds up development and debugging, and circumvents the need to find jars in your gradle cache and unzip/analyze them manually
+With this plugin, agents can easily scan your entire dependency network. This greatly speeds up development and debugging, and circumvents the need to find jars in your gradle cache and unzip/analyze them manually
 
 #### 4. Built-in Skills for enhanced Mixin Writing:
 - Improves compatibility by favoring MixinExtras injectors LLMs often fail to understand

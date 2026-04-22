@@ -11,7 +11,7 @@ class MixinMcpSettingsConfigurable(private val project: Project) : BoundConfigur
     private val settings get() = MixinMcpSettings.getInstance(project)
 
     override fun createPanel() = panel {
-        group("Cursor & Claude project files") {
+        group("Cursor & Claude Project Files") {
             lateinit var masterCheckbox: com.intellij.ui.dsl.builder.Cell<javax.swing.JCheckBox>
             row {
                 masterCheckbox = checkBox(

@@ -15,7 +15,7 @@ import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.ProjectScope
 import com.intellij.psi.search.PsiShortNamesCache
 import dev.mixinmcp.cache.SourceAutoAttacher
-import dev.mixinmcp.util.FqcnResolver
+import dev.mixinmcp.resolve.FqcnResolver
 import kotlin.coroutines.coroutineContext
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern

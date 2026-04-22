@@ -1,4 +1,4 @@
-package dev.mixinmcp.util
+package dev.mixinmcp.resolve
 
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor

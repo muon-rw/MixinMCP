@@ -1,4 +1,4 @@
-package dev.mixinmcp.util
+package dev.mixinmcp.resolve
 
 /**
  * Parses JVM method descriptors for use with method resolution.

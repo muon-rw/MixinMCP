@@ -166,8 +166,8 @@ class SourceNavigationToolset : McpToolset {
 <extensions defaultExtensionNs="com.intellij.mcpServer">
     <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
     <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
-    <mcpToolset implementation="dev.mixinmcp.tools.bytecode.BytecodeInspectionToolset"/>
-    <mcpToolset implementation="dev.mixinmcp.tools.project.ProjectManagementToolset"/>
+    <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
+    <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
 </extensions>
 ```
 
@@ -277,8 +277,8 @@ process execution.
     <extensions defaultExtensionNs="com.intellij.mcpServer">
         <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.bytecode.BytecodeInspectionToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.project.ProjectManagementToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
     </extensions>
 </idea-plugin>
 ```
@@ -1078,7 +1078,7 @@ currently accept `parameterTypes`. If provided, it takes precedence over `parame
    provided, `methodDescriptor` takes precedence. Error messages should show both the
    descriptor and the `parameterTypes` equivalent so agents learn the mapping.
 
-4. **Descriptor parsing utility:** Add `DescriptorParser` to `dev.mixinmcp.util`:
+4. **Descriptor parsing utility:** Add `DescriptorParser` to `dev.mixinmcp.resolve`:
    ```
    object DescriptorParser {
        fun parseParameterTypes(descriptor: String): List<String>
