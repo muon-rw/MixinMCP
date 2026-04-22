@@ -11,11 +11,11 @@ For all features, you will also need the Gradle plugin - see https://github.com/
 
 ### Key features:
 #### 1. Robust broad-scope search:
-- Full type hierarchy — supertypes, subtypes, and all implementations of an interface or abstract class
+- Full type hierarchy: supertypes, subtypes, and all implementations of an interface or abstract class
 - Find all overrides of a method, plus its original super-method declaration
-- Call hierarchy — callers and callees of any method
+- Call hierarchy: callers and callees of any method
 - All references to a class, method, or field
-- All `@Mixin` classes targeting a given class or method — catches cross-mod conflicts
+- All `@Mixin` classes targeting a given class or method. Helps identify cross-mod conflicts
 - Symbol search by name pattern, plus regex grep across all dependency sources
 
 #### 2. Class/Method Bytecode lookup:
@@ -23,7 +23,7 @@ For all features, you will also need the Gradle plugin - see https://github.com/
 - Useful to find a precise target when writing mixins, especially for ordinals or synthetic lambdas
 
 #### 3. Searches across your *entire* classpath including dependencies:
-- Alternative tools generally search only *your* project code — not remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
+- Alternative tools generally search only *your* project code. They don't search remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
 At best, these tools might additionally see your currently active open file.
 - With this plugin, agents can easily scan your *entire* dependency network on their own, including projects without published sources. 
 - Circumvents the need to manually copy and paste snippets into context, or for agents to find jars in your gradle cache and unzip/analyze them manually
@@ -34,59 +34,33 @@ At best, these tools might additionally see your currently active open file.
 
 #### 5. Automatic Mappings lookup:
 - Easily convert any class, method, or field name between SRG, Intermediary, Yarn, Mojmap, and obf
-- Mappings are downloaded on demand (Mojang launcher meta, Fabric Maven, Forge/NeoForge Maven) and cached under `~/.cache/mixinmcp/mappings/` — works across loaders without needing the project to have all mappings locally
-
+- Mappings are downloaded on demand (Mojang launcher meta, Fabric Maven, Forge/NeoForge Maven) and cached under `~/.cache/mixinmcp/mappings/` 
+- This allows you to retrieve mapping data for (almost) any version or loader, even those not present in the current project
 <!-- Plugin description end -->
 
 ## Setup
 
 MixinMCP has two parts, and you need both for full-classpath search to work:
 
-- **IntelliJ plugin** — registers the `mixin_*` tools on IntelliJ's built-in MCP Server.
-- **Gradle plugin** — decompiles dependencies that don't publish sources so the search tools cover every JAR on your classpath.
+- **IntelliJ plugin**: registers the `mixin_*` tools on IntelliJ's built-in MCP Server.
+- **Gradle plugin**: decompiles dependencies that don't publish sources so the search tools cover every JAR on your classpath.
 
-**Prerequisites:** IntelliJ IDEA 2025.3+ (Community or Ultimate).
+**Prerequisites:** IntelliJ IDEA 2025.3+
 
 ### 1. Install the IntelliJ plugin
 
-**From Disk (local development):**
+**From JetBrains Marketplace** *(Pending Approval!)*: **Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
 
-1. Build the plugin:
-   ```bash
-   ./gradlew buildPlugin
-   ```
-2. The plugin ZIP is at `build/distributions/mixin-mcp-<version>.zip`
-3. In IntelliJ: **Settings → Plugins**, click the **⚙️** gear icon at the top, then choose **Install Plugin from Disk…**
-4. Select the ZIP, restart IntelliJ
-
-**From JetBrains Marketplace** *(not yet published)*: **Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
+**From Disk:** See [Building from Source](#building-from-source) below.
 
 ### 2. Enable IntelliJ's MCP Server
 
-- **Settings → Plugins** → search "MCP Server" — confirm it's enabled. *(Bundled by default on recent IntelliJ versions.)*
+- **Settings → Plugins** → search "MCP Server" and confirm it's enabled. *(Bundled by default on recent IntelliJ versions.)*
 - **Settings → Tools → MCP Server** → check **Enable MCP Server**.
 
 ### 3. Connect your MCP client
 
-IntelliJ has an Auto-Configure option for most clients, which should work in most cases.
-
-Once connected, MixinMCP tools appear alongside the built-in MCP tools automatically. *Most clients require a restart* after you first enable/auto-configure the server to connect.
-
-**Verifying:** ask the model to list MCP tools from the JetBrains server. The `mixin_*` tools should appear. If they don't: (1) confirm MixinMCP is installed, (2) confirm the MCP Server plugin is enabled, (3) confirm your client is connected.
-
-**Cursor:** the server is named **`user-jetbrains`** (the `user-` prefix is added by Cursor to all user-configured servers).
-
-**Claude Code / Claude Desktop:** no extra config — skills auto-activate on Minecraft mod projects once the IntelliJ plugin detects the project layout (see auto-injection below).
-
-**Auto-injection for assistant files.** When MixinMCP detects a Minecraft mod project (Fabric, Forge, NeoForge, Quilt, Architectury), it copies bundled resources on project open: **Cursor** files under `.cursor/` (rules and skills), and **Claude Code** skills under `.claude/skills/`. These teach the LLM when and how to use each tool, common pitfalls, and a mixin workflow checklist. New paths are appended under a `# MixinMCP auto-injected rules` block in `.gitignore`. Configure in **Settings → Tools → MixinMCP**:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Automatically add Cursor and Claude project files | On | Master toggle — disables all injection (`.cursor/` and `.claude/`) |
-| Overwrite existing files on project open | On | When off, only writes files that don't already exist |
-| Warn when Gradle plugin is not detected | On | Shows a notification if `dev.mixinmcp.decompile` is missing |
-
-For manual setup (other clients, non-Minecraft projects), copy the trees from [`src/main/resources/inject/cursor/`](src/main/resources/inject/cursor/) and [`src/main/resources/inject/claude/`](src/main/resources/inject/claude/) into your project.
+Use IntelliJ's **Auto-Configure** option for your client, then restart the client. In Cursor the server appears as **`user-jetbrains`**. For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-rules-and-skills).
 
 ### 4. Set up the Gradle plugin
 
@@ -110,20 +84,41 @@ pluginManagement {
 ```kotlin
 plugins {
     // ... your existing plugins ...
-    id("dev.mixinmcp.decompile") version "0.8.0"
+    id("dev.mixinmcp.decompile") version "0.9.0"
 }
 ```
 
 **3. Run decompilation:** 
-*(Unless disabled, this task already runs automatically after every gradle sync)*
+*(This task already runs automatically after every gradle sync, but it can be rerun manually)*
 
 ```bash
 ./gradlew genDependencySources
 ```
 
-The IntelliJ plugin reads the cache on project open and after every Gradle sync. Re-run `./gradlew genDependencySources` after changing dependencies. MixinMCP warns on project open if the Gradle plugin is missing.
+The IntelliJ plugin reads the cache on project open and after every Gradle sync. Re-run `./gradlew genDependencySources` after changing dependencies.
+
+MixinMCP warns on project open when the Gradle plugin is missing. If you don't need full-classpath decompilation and want to silence this, disable **Warn when Gradle plugin is not detected** in **Settings → Tools → MixinMCP**.
 
 For local development against an unpublished build, see [Decompilation cache details](#decompilation-cache-details) below.
+
+### 5. Verify
+
+Ask the model to list MCP tools from the JetBrains server.  The `mixin_*` tools should appear. If they don't: (1) confirm MixinMCP is installed, (2) confirm the MCP Server plugin is enabled, (3) confirm your client is connected.
+
+## Bundled Rules and Skills
+
+<details>
+<summary>Built-in adherence tools and context for agents (click to expand)</summary>
+
+On project open for Minecraft mod projects (Fabric, Forge, NeoForge, Quilt, Architectury), MixinMCP copies bundled assistant files: **Cursor** rules and skills under `.cursor/`, and **Claude Code** skills under `.claude/skills/`. 
+
+These provide better context for the LLM about why they should use these tools, and when and how to use each tool, common pitfalls, and a mixin workflow checklist. 
+
+Injected files are automatically added to `.gitignore` under a `# MixinMCP auto-injected rules` block. 
+
+You can edit these manually, but if you use the same name and do not change the configuration, they will be overwritten on project open. Configure in **Settings → Tools → MixinMCP**. Toggles are present for whether to inject and whether to overwrite existing files.
+
+</details>
 
 ## Tool reference
 
@@ -188,11 +183,11 @@ For local development against an unpublished build, see [Decompilation cache det
 - A manifest (`manifest.json`) tracks artifact identity so unchanged JARs are
   never re-decompiled (incremental).
 - The IntelliJ plugin reads this cache on project open and after every Gradle
-  sync, exposing the decompiled `.java` files as `SyntheticLibrary` roots — indexed
+  sync, exposing the decompiled `.java` files as `SyntheticLibrary` roots. These are indexed
   and searchable just like real sources.
 
 Decompilation is a **blocking Gradle task**, not a background IDE operation. This
-means tools never run against a half-populated cache — by the time you open the
+means tools never run against a half-populated cache. By the time you open the
 project, every dependency is searchable.
 
 ### Memory tuning
@@ -269,80 +264,3 @@ After `buildPlugin`, The plugin ZIP will be at `build/distributions/mixin-mcp-<v
 
 In IntelliJ: **Settings → Plugins** → ⚙ → **Install Plugin from Disk…**
 </details>
-
-## Publishing
-
-<details>
-<summary>Local distribution and JetBrains Marketplace steps (click to expand)</summary>
-
-### Local / Team Distribution
-
-Build and share the ZIP file directly. Recipients install via
-**Install Plugin from Disk** as described above.
-
-For team-wide distribution without the Marketplace, host the ZIP on an internal
-server and configure a
-[Custom Plugin Repository](https://plugins.jetbrains.com/docs/intellij/custom-plugin-repositories.html).
-
-### JetBrains Marketplace
-
-#### 1. Sign the plugin (recommended)
-
-Without signing, IntelliJ shows a warning dialog when users install the plugin.
-Generate a key pair:
-
-```bash
-# Generate RSA private key (you'll set a password)
-openssl genpkey -aes-256-cbc -algorithm RSA \
-  -out private_encrypted.pem -pkeyopt rsa_keygen_bits:4096
-
-# Convert to RSA form
-openssl rsa -in private_encrypted.pem -out private.pem
-
-# Generate self-signed certificate
-openssl req -key private.pem -new -x509 -days 365 -out chain.crt
-```
-
-Set environment variables (never commit these):
-
-```bash
-export CERTIFICATE_CHAIN="$(cat chain.crt)"
-export PRIVATE_KEY="$(cat private.pem)"
-export PRIVATE_KEY_PASSWORD="your-password"
-```
-
-The IntelliJ Platform Plugin Template already configures the `signPlugin` task
-to read these variables. Build the signed ZIP with:
-
-```bash
-./gradlew signPlugin
-```
-
-#### 2. First upload (manual)
-
-The first version of a plugin must be uploaded manually:
-
-1. Log in to [JetBrains Marketplace](https://plugins.jetbrains.com) with your
-   JetBrains account
-2. Go to your profile → **Add new plugin**
-3. Upload the ZIP from `build/distributions/`
-4. Fill in the plugin page: description, tags, screenshots, license
-5. Submit — JetBrains will manually review before it goes live
-
-#### 3. Subsequent versions (automated)
-
-After the first manual upload, use Gradle for future releases:
-
-```bash
-export PUBLISH_TOKEN="your-marketplace-token"
-./gradlew publishPlugin
-```
-
-Get your token from your JetBrains Marketplace profile → **My Tokens** →
-**Generate Token**.
-
-</details>
-
-## License
-
-Apache-2.0
