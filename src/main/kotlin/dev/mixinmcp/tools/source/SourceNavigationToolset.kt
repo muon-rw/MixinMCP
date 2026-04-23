@@ -37,9 +37,9 @@ class SourceNavigationToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val result: String? = ReadAction.compute<String?, Throwable> {
+        val result: String? = ReadAction.nonBlocking<String?> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@compute null
+                ?: return@nonBlocking null
 
             buildString {
                 appendLine("=== ${psiClass.qualifiedName} ===")
@@ -84,7 +84,7 @@ class SourceNavigationToolset : McpToolset {
                     psiClass.containingFile?.text?.let { appendLine(it) }
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return when {
             result != null -> McpToolCallResult.text(result)
@@ -113,7 +113,7 @@ class SourceNavigationToolset : McpToolset {
 
         val effectiveQuery: String = extractSimpleName(query)
 
-        val result: String = ReadAction.compute<String, Throwable> {
+        val result: String = ReadAction.nonBlocking<String> {
             val cache: PsiShortNamesCache = PsiShortNamesCache.getInstance(project)
             val q: String = if (caseSensitive) effectiveQuery else effectiveQuery.lowercase()
             fun matches(name: String): Boolean {
@@ -184,7 +184,7 @@ class SourceNavigationToolset : McpToolset {
                     if (count >= maxResults) appendLine("  ... (truncated)")
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return McpToolCallResult.text(result)
     }
@@ -198,7 +198,7 @@ class SourceNavigationToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val result: String = ReadAction.compute<String, Throwable> {
+        val result: String = ReadAction.nonBlocking<String> {
             val roots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
             buildString {
                 appendLine("=== Source roots (mixin_search_in_deps / mixin_get_dep_source scope) ===")
@@ -339,7 +339,7 @@ class SourceNavigationToolset : McpToolset {
                     appendLine("No source roots found. Add dependencies and run ./gradlew genDependencySources for compiled-only jars.")
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return McpToolCallResult.text(result)
     }
@@ -394,7 +394,7 @@ class SourceNavigationToolset : McpToolset {
         val matchesMask: (String) -> Boolean = buildFileMaskMatcher(fileMask)
 
         val startTime: Long = System.currentTimeMillis()
-        val scanResult: DepRegexScanResult = ReadAction.compute<DepRegexScanResult, Throwable> {
+        val scanResult: DepRegexScanResult = ReadAction.nonBlocking<DepRegexScanResult> {
             val hits: MutableList<DepSearchHit> = mutableListOf()
             var timedOut: Boolean = false
             val pathPrefixFilesSeen: BooleanArray? =
@@ -454,7 +454,7 @@ class SourceNavigationToolset : McpToolset {
                     emptyList()
                 }
             DepRegexScanResult(hits = hits.toList(), timedOut = timedOut, noMatchHints = noMatchHints)
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         val elapsed: Long = System.currentTimeMillis() - startTime
         val hits: List<DepSearchHit> = scanResult.hits
@@ -540,9 +540,9 @@ class SourceNavigationToolset : McpToolset {
             return McpToolCallResult.error("Failed to read file: ${e.message}")
         }
 
-        val sourceKind: String = ReadAction.compute<String, Throwable> {
+        val sourceKind: String = ReadAction.nonBlocking<String> {
             classifySourceFile(project, vf)
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         val lines: List<String> = content.lines()
         val start: Int = (lineNumber - linesBefore).coerceAtLeast(1)

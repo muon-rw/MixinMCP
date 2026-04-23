@@ -46,9 +46,9 @@ class SemanticNavigationToolset : McpToolset {
             return McpToolCallResult.error("maxDepth must be >= 1 (got $maxDepth)")
         }
 
-        val result: String? = ReadAction.compute<String?, Throwable> {
+        val result: String? = ReadAction.nonBlocking<String?> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@compute null
+                ?: return@nonBlocking null
 
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
 
@@ -92,7 +92,7 @@ class SemanticNavigationToolset : McpToolset {
                     appendLine()
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return when {
             result != null -> McpToolCallResult.text(result)
@@ -187,9 +187,9 @@ class SemanticNavigationToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val result: String? = ReadAction.compute<String?, Throwable> {
+        val result: String? = ReadAction.nonBlocking<String?> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@compute null
+                ?: return@nonBlocking null
 
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
             val query = ClassInheritorsSearch.search(psiClass, scope, true)
@@ -213,7 +213,7 @@ class SemanticNavigationToolset : McpToolset {
                     appendLine("  ... (truncated at $maxResults results)")
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return when {
             result != null -> McpToolCallResult.text(result)
@@ -232,7 +232,7 @@ class SemanticNavigationToolset : McpToolset {
         val project = coroutineContext.projectOrNull
             ?: return McpToolCallResult.error("No project open")
 
-        val result: String = ReadAction.compute<String, Throwable> {
+        val result: String = ReadAction.nonBlocking<String> {
             val normalizedTarget: String = className.replace('/', '.')
             val mixinAnnotationClass: PsiClass? =
                 FqcnResolver.resolveNested(project, "org.spongepowered.asm.mixin.Mixin")
@@ -299,7 +299,7 @@ class SemanticNavigationToolset : McpToolset {
                     }
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return McpToolCallResult.text(result)
     }
@@ -326,7 +326,7 @@ class SemanticNavigationToolset : McpToolset {
         }
         val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
-        val result: String = ReadAction.compute<String, Throwable> {
+        val result: String = ReadAction.nonBlocking<String> {
             val containingClass: PsiClass? = psiMethod.containingClass
 
             val chain: List<SuperChainEntry> = buildSuperChain(psiMethod)
@@ -365,7 +365,7 @@ class SemanticNavigationToolset : McpToolset {
                     }
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return McpToolCallResult.text(result)
     }
@@ -438,7 +438,7 @@ class SemanticNavigationToolset : McpToolset {
         }
         val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
-        val result: String = ReadAction.compute<String, Throwable> {
+        val result: String = ReadAction.nonBlocking<String> {
             val containingClass: PsiClass? = psiMethod.containingClass
             val declFqcn: String = containingClass?.qualifiedName ?: className
             val paramList: String = psiMethod.parameterList.parameters
@@ -505,7 +505,7 @@ class SemanticNavigationToolset : McpToolset {
                     appendLine("  ... (truncated at $maxResults results)")
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return McpToolCallResult.text(result)
     }
@@ -524,13 +524,13 @@ class SemanticNavigationToolset : McpToolset {
             ?: return McpToolCallResult.error("No project open")
 
         if (memberName != null) {
-            val fieldResult: PsiField? = ReadAction.compute<PsiField?, Throwable> {
+            val fieldResult: PsiField? = ReadAction.nonBlocking<PsiField?> {
                 val psiClass: PsiClass? = FqcnResolver.resolveNested(project, className)
                 psiClass?.findFieldByName(memberName, true)
-            }
+            }.inSmartMode(project).executeSynchronously()
 
             if (fieldResult != null && parameterTypes == null && methodDescriptor == null) {
-                val result: String = ReadAction.compute<String, Throwable> {
+                val result: String = ReadAction.nonBlocking<String> {
                     val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
                     val query = ReferencesSearch.search(fieldResult, scope, true)
                     val refs: MutableList<PsiReference> = mutableListOf()
@@ -561,7 +561,7 @@ class SemanticNavigationToolset : McpToolset {
                             appendLine("  ... (truncated at $maxResults results)")
                         }
                     }
-                }
+                }.inSmartMode(project).executeSynchronously()
                 return McpToolCallResult.text(result)
             }
 
@@ -572,7 +572,7 @@ class SemanticNavigationToolset : McpToolset {
             )
             if (resolution is MethodResolver.Resolution.Error) {
                 if (fieldResult != null) {
-                    val result: String = ReadAction.compute<String, Throwable> {
+                    val result: String = ReadAction.nonBlocking<String> {
                         val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
                         val query = ReferencesSearch.search(fieldResult, scope, true)
                         val refs: MutableList<PsiReference> = mutableListOf()
@@ -604,14 +604,14 @@ class SemanticNavigationToolset : McpToolset {
                                 appendLine("  ... (truncated at $maxResults results)")
                             }
                         }
-                    }
+                    }.inSmartMode(project).executeSynchronously()
                     return McpToolCallResult.text(result)
                 }
                 return McpToolCallResult.error(resolution.message)
             }
             val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
-            val result: String = ReadAction.compute<String, Throwable> {
+            val result: String = ReadAction.nonBlocking<String> {
                 val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
                 val query = ReferencesSearch.search(psiMethod, scope, true)
                 val refs: MutableList<PsiReference> = mutableListOf()
@@ -640,14 +640,14 @@ class SemanticNavigationToolset : McpToolset {
                         appendLine("  ... (truncated at $maxResults results)")
                     }
                 }
-            }
+            }.inSmartMode(project).executeSynchronously()
             return McpToolCallResult.text(result)
         }
 
         // Class-level reference search
-        val result: String? = ReadAction.compute<String?, Throwable> {
+        val result: String? = ReadAction.nonBlocking<String?> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@compute null
+                ?: return@nonBlocking null
 
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
             val query = ReferencesSearch.search(psiClass, scope, true)
@@ -677,7 +677,7 @@ class SemanticNavigationToolset : McpToolset {
                     appendLine("  ... (truncated at $maxResults results)")
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return when {
             result != null -> McpToolCallResult.text(result)
@@ -724,7 +724,7 @@ class SemanticNavigationToolset : McpToolset {
         }
         val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
-        val result: String = ReadAction.compute<String, Throwable> {
+        val result: String = ReadAction.nonBlocking<String> {
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
             val visited: MutableSet<String> = mutableSetOf(CallHierarchyExpander.cycleKeyOf(psiMethod))
             val budget = CallHierarchyExpander.Budget(maxResults)
@@ -755,7 +755,7 @@ class SemanticNavigationToolset : McpToolset {
                     )
                 }
             }
-        }
+        }.inSmartMode(project).executeSynchronously()
 
         return McpToolCallResult.text(result)
     }

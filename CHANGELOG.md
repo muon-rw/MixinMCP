@@ -2,7 +2,9 @@
 
 # MixinMCP Changelog
 
-## [Unreleased]
+## [1.0.1]
+### Improved
+- Overall IDE performance while the MCP server is performing broad-scoped reads
 
 ## [1.0.0]
 

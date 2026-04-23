@@ -112,8 +112,8 @@ object MethodResolver {
      * If both methodDescriptor and parameterTypes are provided, methodDescriptor
      * takes precedence. Error messages show both formats when applicable.
      *
-     * Must be called inside ReadAction when invoked from tool methods (the tools
-     * already wrap their logic in ReadAction.compute).
+     * Acquires a non-blocking read action so the call yields to pending writers
+     * (e.g. EDT) and retries, preventing UI freezes on large classpaths.
      */
     fun resolveDetailed(
         project: Project,
@@ -122,14 +122,14 @@ object MethodResolver {
         parameterTypes: List<String>? = null,
         methodDescriptor: String? = null,
     ): Resolution {
-        return ReadAction.compute<Resolution, Throwable> {
+        return ReadAction.nonBlocking<Resolution> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@compute Resolution.Error("Class not found: $className")
+                ?: return@nonBlocking Resolution.Error("Class not found: $className")
 
             val methods: List<PsiMethod> = findMethodsByName(psiClass, methodName)
 
             if (methods.isEmpty()) {
-                return@compute Resolution.Error(
+                return@nonBlocking Resolution.Error(
                     "No method named '$methodName' found in ${psiClass.qualifiedName ?: className}.",
                 )
             }
@@ -138,7 +138,7 @@ object MethodResolver {
                 !methodDescriptor.isNullOrBlank() -> {
                     val canonical: List<String>? = DescriptorParser.parseParameterTypes(methodDescriptor)
                     if (canonical == null) {
-                        return@compute Resolution.Error(
+                        return@nonBlocking Resolution.Error(
                             "Invalid method descriptor: '$methodDescriptor'. Expected format: (params)returnType, e.g. (Lnet/minecraft/world/entity/Entity;)V or ()V for no-arg methods",
                         )
                     }
@@ -160,17 +160,17 @@ object MethodResolver {
                 }
 
                 if (matched.isNotEmpty()) {
-                    return@compute Resolution.Found(matched.first())
+                    return@nonBlocking Resolution.Found(matched.first())
                 }
 
                 val byDescriptor: PsiMethod? = if (!methodDescriptor.isNullOrBlank()) {
                     resolveByDescriptor(project, className, methodName, methodDescriptor)
                 } else null
                 if (byDescriptor != null) {
-                    return@compute Resolution.Found(byDescriptor)
+                    return@nonBlocking Resolution.Found(byDescriptor)
                 }
 
-                return@compute Resolution.Error(buildString {
+                return@nonBlocking Resolution.Error(buildString {
                     append("No overload of ${psiClass.qualifiedName}#$methodName matches ")
                     if (!methodDescriptor.isNullOrBlank()) {
                         append("methodDescriptor '$methodDescriptor'")
@@ -186,7 +186,7 @@ object MethodResolver {
             }
 
             if (methods.size == 1) {
-                return@compute Resolution.Found(methods.first())
+                return@nonBlocking Resolution.Found(methods.first())
             }
 
             Resolution.Error(buildString {
@@ -196,7 +196,7 @@ object MethodResolver {
                     append("  $sig\n")
                 }
             })
-        }
+        }.inSmartMode(project).executeSynchronously()
     }
 
     private fun findMethodsByName(psiClass: PsiClass, methodName: String): List<PsiMethod> {
