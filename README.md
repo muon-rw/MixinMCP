@@ -9,8 +9,8 @@ https://github.com/muon-rw/MixinMCP
 
 For all features, you will also need the Gradle plugin - see https://github.com/muon-rw/MixinMCP#Setup
 
-### Key features:
-#### 1. Robust broad-scope search:
+## Key features:
+### 1. Broad-scoped search:
 - Full type hierarchy: supertypes, subtypes, and all implementations of an interface or abstract class
 - Find all overrides of a method, plus its original super-method declaration
 - Call hierarchy: callers and callees of any method
@@ -18,21 +18,22 @@ For all features, you will also need the Gradle plugin - see https://github.com/
 - All `@Mixin` classes targeting a given class or method. Helps identify cross-mod conflicts
 - Symbol search by name pattern, plus regex grep across all dependency sources
 
-#### 2. Class/Method Bytecode lookup:
-- Look up the bytecode for a given class or method 
-- Useful to find a precise target when writing mixins, especially for ordinals or synthetic lambdas
+**Searches across your *entire* classpath including dependencies:**
 
-#### 3. Searches across your *entire* classpath including dependencies:
 - Alternative tools generally search only *your* project code. They don't search remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
 At best, these tools might additionally see your currently active open file.
-- With this plugin, agents can easily scan your *entire* dependency network on their own, including projects without published sources. 
+- With this plugin, agents can easily scan the whole project dependency network on their own, including dependencies without published sources. 
 - Circumvents the need to manually copy and paste snippets into context, or for agents to find jars in your gradle cache and unzip/analyze them manually
 
-#### 4. Built-in Skills for enhanced Mixin Writing:
+### 2. Class/Method Bytecode lookup:
+- Get the actual compiled bytecode for a given class or method
+- Useful to find a precise target when writing mixins, especially for ordinals or synthetic lambdas
+
+### 3. Built-in Skills for enhanced Mixin Writing:
 - Improve compatibility of written mixins by favoring MixinExtras injectors which LLMs often hallucinate or fail to use in the first place
 - Favor precise modification for the exact target for the task without workarounds, slices, or shift by's, thanks to MixinExtras' robust `@Expression` annotation
 
-#### 5. Automatic Mappings lookup:
+### 4. Automatic Mappings lookup:
 - Easily convert any class, method, or field name between SRG, Intermediary, Yarn, Mojmap, and obf
 - Mappings are downloaded on demand (Mojang launcher meta, Fabric Maven, Forge/NeoForge Maven) and cached under `~/.cache/mixinmcp/mappings/` 
 - This allows you to retrieve mapping data for (almost) any version or loader, even those not present in the current project
