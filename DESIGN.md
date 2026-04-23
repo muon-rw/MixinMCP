@@ -33,7 +33,7 @@
 ## 1. What This Plugin Does
 
 MixinMCP is an IntelliJ Platform plugin that extends the **built-in MCP Server** (available
-since IntelliJ IDEA 2025.2) with 12 tools purpose-built for Minecraft mod development —
+since IntelliJ IDEA 2025.2) with 16 tools purpose-built for Minecraft mod development —
 particularly mixin authoring, dependency navigation, and bytecode inspection.
 
 It registers tools via the `com.intellij.mcpServer` extension point so they appear
@@ -69,7 +69,7 @@ compiled `.class` files and are invisible in decompiled source.
 │  │  • search_in_files   │    │                                │ │
 │  │  • execute_terminal  │    │  ┌──────────────────────────┐  │ │
 │  │  • rename_refactoring│    │  │  Four McpToolset classes │  │ │
-│  │  • ... (15+ tools)   │    │  │  (13 tools total)        │  │ │
+│  │  • ... (15+ tools)   │    │  │  (16 tools total)        │  │ │
 │  │                      │    │  │                          │  │ │
 │  │  SSE / Stdio         │    │  │  SourceNavigationToolset:│  │ │
 │  │  transport            │    │  │  • mixin_find_class      │  │ │
@@ -83,6 +83,7 @@ compiled `.class` files and are invisible in decompiled source.
 │  │ MCP Protocol │            │  │  • mixin_find_impls      │  │ │
 │  │ (to Cursor)  │            │  │  • mixin_find_targeting..│  │ │
 │  └──────────────┘            │  │  • mixin_super_methods   │  │ │
+│                              │  │  • mixin_find_overrides  │  │ │
 │                              │  │  • mixin_find_references │  │ │
 │                              │  │  • mixin_call_hierarchy  │  │ │
 │                              │  │                          │  │ │
@@ -198,7 +199,8 @@ MixinMCP/
 │       │   │   │   ├── SourceNavigationToolset.kt   # 5 tools
 │       │   │   │   └── DepSearchHelpers.kt           # dep-search helpers
 │       │   │   ├── semantic/
-│       │   │   │   ├── SemanticNavigationToolset.kt  # 6 tools
+│       │   │   │   ├── SemanticNavigationToolset.kt  # 7 tools
+│       │   │   │   ├── CallHierarchyExpander.kt      # recursive call hierarchy walk
 │       │   │   │   └── MixinAnnotationHelpers.kt     # mixin annotation helpers
 │       │   │   ├── bytecode/
 │       │   │   │   └── BytecodeInspectionToolset.kt  # 2 tools
@@ -316,7 +318,22 @@ Strategy:
 
 ASM-based analysis producing structured `ClassAnalysis` with method/field info, access
 flags, synthetic detection, and lambda source method parsing. Also provides single-method
-bytecode extraction via `analyzeMethod()` returning javap-style output.
+bytecode extraction via `analyzeMethod()` returning javap-style output, and structured
+callee extraction via `extractCallees()` — returning a list of `CalleeRef(owner, name,
+descriptor, kind)` for every outgoing call in a method body. `extractCallees` covers
+`INVOKEVIRTUAL/STATIC/SPECIAL/INTERFACE` and resolves `INVOKEDYNAMIC` whose bootstrap is
+`LambdaMetafactory.{metafactory,altMetafactory}` back to the impl method handle, so the
+real lambda / method-reference target surfaces as a structured callee. Non-lambda
+`INVOKEDYNAMIC` (string concat, switch bootstraps) is intentionally omitted — those
+don't represent user-meaningful call targets.
+
+### 7.5 PsiDescriptors
+
+Converts PSI types and methods back into JVM descriptors and internal names. Erases
+generics via `TypeConversionUtil.erasure` so PSI `List<String>` → `Ljava/util/List;`,
+matching what the compiler actually emits. Used in the call-hierarchy tool so the
+source-walker and bytecode-fallback paths emit identical owner/name/descriptor strings
+and dedupe uniformly, and so output is directly paste-ready into `@At(target="...")`.
 
 ---
 
@@ -341,17 +358,76 @@ content from compiled-only jars. For classes without sources, use `mixin_find_cl
 
 | Tool | Parameters |
 |------|-----------|
-| `mixin_type_hierarchy` | `className`, `direction=both`, `maxDepth=10`, `includeInterfaces=true` |
+| `mixin_type_hierarchy` | `className`, `direction=both`, `maxDepth=10`, `includeInterfaces=true`, `maxResults=50` |
 | `mixin_find_impls` | `className`, `maxResults=50` |
 | `mixin_find_references` | `className`, `memberName?`, `parameterTypes?`, `methodDescriptor?`, `maxResults=100` |
 | `mixin_call_hierarchy` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?`, `direction=callers`, `maxDepth=3`, `maxResults=50` |
 | `mixin_super_methods` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?` |
+| `mixin_find_overrides` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?`, `maxResults=50` |
 | `mixin_find_targeting_mixins` | `className`, `methodName?`, `maxResults=50` |
 
 Tools that take `parameterTypes` also accept `methodDescriptor` (JVM format, e.g.
 `(Lnet/minecraft/world/effect/MobEffectInstance;)Z`). For parameterless methods,
 pass `parameterTypes: []` (empty array). Error messages list available overloads with
 ready-to-copy `parameterTypes` values.
+
+**`mixin_type_hierarchy` — interface listing.** With `includeInterfaces=true` (default),
+the tool emits two interface sections under the supers direction: **Direct interfaces**
+(the class's own `implements`/`extends` clause) and **Inherited interfaces** (the
+transitive closure collected by walking the superclass chain within `maxDepth` and
+following the super-interface extension graph). Inherited entries are deduplicated by
+qualified name and tagged with origin: `from X` means introduced by superclass X;
+`via X` means reached by extending interface X. First-seen wins, so closer origins
+are preferred (direct first, then each superclass nearest-to-furthest, then super-
+interface chains in BFS order).
+
+**`mixin_call_hierarchy` — callee coverage.** In the callees direction, the source walker
+visits `PsiMethodCallExpression`, `PsiNewExpression`, and `PsiMethodReferenceExpression`
+so direct calls, constructor invocations (`new Foo(...)`), and method references
+(`Foo::bar`, `Foo::new`) all surface. The bytecode fallback uses
+`BytecodeAnalyzer.extractCallees` — it walks `INVOKEVIRTUAL/STATIC/SPECIAL/INTERFACE` and
+resolves `INVOKEDYNAMIC` via `LambdaMetafactory` bootstrap handles. Tagging is consistent
+across both paths: `[ctor]` for constructors (including `Foo::new` refs and bytecode
+`INVOKEDYNAMIC` impls named `<init>`); `[lambda]` only for real compiler-generated
+synthetics (impl name starts with `lambda$`); method references whose impl is a
+non-synthetic method (e.g. `this::setPosToBed`) surface untagged — identical to a direct
+call, since that's what a mixin would target. Output is `owner#name(descriptor)` in JVM
+format, deduplicated by the full triple so overloads aren't merged. Non-lambda
+`INVOKEDYNAMIC` (string concat, switch bootstraps) is skipped.
+
+**`mixin_call_hierarchy` — recursive expansion.** Both `callers` and `callees` recurse
+up to `maxDepth` levels (default 3, hard-capped at 10 to prevent runaway walks).
+`CallHierarchyExpander` owns the traversal:
+
+- **Callers** — BFS via `MethodReferencesSearch.search(method, scope, false)` per node.
+  Each caller's *enclosing* method becomes the next recursion root. Resolution tries
+  Java PSI first (`PsiTreeUtil.getParentOfType(PsiMethod)`), then UAST
+  (`element.getUastParentOfType<UMethod>().javaPsi`) so Kotlin / Groovy / Scala callers
+  resolve to their light `PsiMethod` bridge and participate in recursion. References
+  that still have no enclosing method (field / static initialisers) are emitted as
+  terminal `(non-method context)` leaves.
+- **Callees** — recurses into each discovered `CalleeRef` by re-resolving it to a
+  `PsiMethod` and walking its body. Body discovery is tried in this order: (1) Java
+  PSI body (`PsiMethod.body`), (2) UAST body (`UMethod.uastBody`, walked with an
+  `AbstractUastVisitor` that visits `UCallExpression` + `UCallableReferenceExpression`
+  — covers Kotlin and every other JVM language whose UAST plugin is loaded),
+  (3) bytecode (`BytecodeAnalyzer.extractCallees`). The bytecode path is still the
+  only one that surfaces the real synthetic `lambda$X$N` target behind
+  `INVOKEDYNAMIC`; the two source walkers visit the lambda body lexically. Abstract /
+  native leaves are labelled `(abstract — no body to walk)` so terminal branches read
+  distinctly from depth-cap truncation.
+
+`maxResults` is a **shared global budget** consumed across all depths and branches
+(single `Budget` instance threaded through recursion). This avoids per-level multiplication
+and matches the pre-existing flat-cap semantics — when the budget is exhausted the walk
+halts cleanly and a truncation notice is emitted.
+
+Cycle detection keys on the `owner#name(descriptor)` triple so a given method is
+expanded at most once per tool call. Re-encounters (recursion, diamonds across siblings)
+emit the method with a `[cycle]` marker and do not recurse. The target method's own key
+is pre-seeded into the visited set so direct self-recursion is caught on its first
+appearance. Output is indented two spaces per depth with a `[L1]`, `[L2]`, ... tag, so
+an agent reading the response can see nesting at a glance.
 
 ### Bytecode Inspection
 

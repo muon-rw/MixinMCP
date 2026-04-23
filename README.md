@@ -41,7 +41,7 @@ At best, these tools might additionally see your currently active open file.
 
 ## Setup
 
-MixinMCP has two parts, and you need both for full-classpath search to work:
+MixinMCP has two parts. You need **both** for full-classpath search to work:
 
 - **IntelliJ plugin**: registers the `mixin_*` tools on IntelliJ's built-in MCP Server.
 - **Gradle plugin**: decompiles dependencies that don't publish sources so the search tools cover every JAR on your classpath.
@@ -93,15 +93,24 @@ plugins {
     id("dev.mixinmcp.decompile") version "0.9.0"
 }
 ```
+**3. Increase Gradle process memory:** (**Strongly** Recommended)
 
-**3. Run decompilation:** 
-*(This task already runs automatically after every gradle sync, but it can be rerun manually)*
+ Add to your project level `gradle.properties`:
+```properties
+org.gradle.jvmargs=-Xmx4g
+# May need to set as high as 6g if you need to 
+# decompile an extremely large jar (e.g. Cataclysm)
+```
+For more info, see [Decompilation cache details](#decompilation-cache-details)
+
+**4. Run decompilation:** 
 
 ```bash
 ./gradlew genDependencySources
 ```
+*(This task already runs automatically after every gradle sync, but it can sometimes need to rerun manually)*
 
-The IntelliJ plugin reads the cache on project open and after every Gradle sync. Re-run `./gradlew genDependencySources` after changing dependencies.
+The IntelliJ plugin reads the dependency sources cache on project open and after every Gradle sync/task run. 
 
 MixinMCP warns on project open when the Gradle plugin is missing. If you don't need full-classpath decompilation and want to silence this, disable **Warn when Gradle plugin is not detected** in **Settings → Tools → MixinMCP**.
 
@@ -109,7 +118,7 @@ For local development against an unpublished build, see [Decompilation cache det
 
 ### 5. Verify
 
-Ask the model to list MCP tools from the JetBrains server.  The `mixin_*` tools should appear. If they don't: (1) confirm MixinMCP is installed, (2) confirm the MCP Server plugin is enabled, (3) confirm your client is connected.
+Ask the model to list MCP tools from the JetBrains server.  The `mixin_*` tools should appear. If they don't: (1) confirm MixinMCP is installed, (2) confirm the MCP Server plugin is enabled, (3) confirm your client is connected (most common failure)
 
 ## Bundled Rules and Skills
 
@@ -122,14 +131,14 @@ These provide better context for the LLM about why they should use these tools, 
 
 Injected files are automatically added to `.gitignore` under a `# MixinMCP auto-injected rules` block. 
 
-You can edit these manually, but if you use the same name and do not change the configuration, they will be overwritten on project open. Configure in **Settings → Tools → MixinMCP**. Toggles are present for whether to inject and whether to overwrite existing files.
+You can edit these manually, but if you use the same name and do not change the configuration, they will be overwritten on project open. You can disable this override (or choose not to inject anything at all) in **Settings → Tools → MixinMCP**. 
 
 </details>
 
 ## Tool reference
 
 <details>
-<summary>All 14 tools (click to expand)</summary>
+<summary>All 16 tools (click to expand)</summary>
 
 ### Source Navigation
 
@@ -148,8 +157,9 @@ You can edit these manually, but if you use the same name and do not change the 
 | `mixin_type_hierarchy` | Full inheritance chain (supertypes and subtypes). Essential before writing mixins. |
 | `mixin_find_impls` | Find all implementations of an interface or abstract class. |
 | `mixin_find_references` | Find all usages of a class, method, or field. |
-| `mixin_call_hierarchy` | Callers and callees of a method — trace execution flow. |
+| `mixin_call_hierarchy` | Callers and callees of a method, recursive to `maxDepth` (default 3, cap 10) — trace execution flow across levels with cycle detection. Callees cover direct calls, `new Foo(...)`, `Foo::bar`, and the real synthetic target behind each lambda. |
 | `mixin_super_methods` | Find where a method is originally declared in the hierarchy. |
+| `mixin_find_overrides` | Find all overrides of a method across the class hierarchy (project, mods, loader, libraries). |
 | `mixin_find_targeting_mixins` | Find all `@Mixin` classes that target a given class/method — cross-mod conflict analysis. |
 
 ### Bytecode Inspection
@@ -208,8 +218,8 @@ the task fails with recommendations instead of hanging. Use `--force` to skip th
 check and proceed regardless:
 
 ```bash
-# Reduce threads (less memory, slower)
-./gradlew genDependencySources --threads=1
+# Manually set thread count. Setting threads=1 may cause decompilation to freeze entirely.
+./gradlew genDependencySources --threads=3 # Default=2
 
 # Skip OOM pre-flight confirmation (e.g. when you know heap is sufficient)
 ./gradlew genDependencySources --force

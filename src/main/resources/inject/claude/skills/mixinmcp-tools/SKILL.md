@@ -50,6 +50,7 @@ Tool descriptions document all parameters and defaults — read them before call
 | Cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins` — finds all @Mixin classes + their injection points |
 | Call graph | `mixin_call_hierarchy` |
 | Method origin in hierarchy | `mixin_super_methods` |
+| All overrides of a method | `mixin_find_overrides` — walks down the class hierarchy; mirror of `mixin_super_methods` |
 | Synthetic/lambda method names | `mixin_class_bytecode` (filter="synthetic") |
 | Exact @At(target) for an INVOKE | `mixin_method_bytecode` — read the owner class from INVOKE* instructions |
 | Bytecode for a specific method | `mixin_method_bytecode` |
@@ -125,7 +126,7 @@ mixin_find_references(className="net.minecraft.world.entity.LivingEntity", membe
   - **Any loader:** `./gradlew genDependencySources --force` (needs `org.gradle.jvmargs=-Xmx4g`)
   - Then call `mixin_sync_project` to refresh IntelliJ's project model.
 
-### mixin_find_references / mixin_call_hierarchy / mixin_super_methods
+### mixin_find_references / mixin_call_hierarchy / mixin_super_methods / mixin_find_overrides
 - `memberName` supports **both methods and fields**. For fields, no disambiguation is needed. For methods, disambiguate overloads with:
   - `parameterTypes=["MobEffectInstance", "Entity"]` — simple type names
   - `methodDescriptor="(Lnet/...;)Z"` — JVM descriptor
@@ -133,7 +134,10 @@ mixin_find_references(className="net.minecraft.world.entity.LivingEntity", membe
 - If disambiguation fails, the error lists all overloads with ready-to-copy `parameterTypes` and declaring class.
 - `mixin_find_references` returns both runtime call sites AND string references in mixin annotations.
 - For dedicated mixin conflict analysis, prefer `mixin_find_targeting_mixins`.
-- `mixin_call_hierarchy` callees: if the method body is not available in source (binary class), the tool automatically falls back to bytecode analysis to extract INVOKE targets.
+- `mixin_call_hierarchy` callees cover direct method calls, constructor invocations (`new Foo(...)`), method references (`Foo::bar`, `Foo::new`), and the real synthetic target behind each lambda. The `lambda$X$N` synthetic is resolved through the `INVOKEDYNAMIC` bootstrap handle and tagged `[lambda]`; constructors are tagged `[ctor]`. Method references that resolve to an existing non-synthetic method (e.g. `this::setPosToBed`) surface as untagged callees — indistinguishable from a direct call, because that's the method you'd mixin into. Output is `owner#name(descriptor)` in JVM format, ready to paste into `@At(target = "...")`. Non-lambda `INVOKEDYNAMIC` (string concat, switch bootstraps) is intentionally omitted. If the method body is not available in source (binary class), the tool automatically falls back to structured bytecode analysis that covers the same cases.
+- `mixin_call_hierarchy` recurses up to `maxDepth` (default 3, capped at 10). Each depth is indented two spaces and tagged `[L1]`, `[L2]`, ... so nesting is visible at a glance; cycles and already-expanded nodes are marked `[cycle]` and not re-expanded; abstract / native leaves show `(abstract — no body to walk)` so terminal branches read distinctly from depth-cap truncation. `maxResults` is a **global budget across all depths and branches** — raise it for wide hierarchies, or narrow the query (start with `maxDepth=1` and grow) if output is too long. For callers, references from field/static initialisers appear as `(non-method context)` leaves and don't recurse. Both callers and callees work across JVM languages via UAST (Java, Kotlin, Groovy, Scala) — Kotlin callers resolve to their enclosing function and Kotlin method bodies are walked for callees, alongside the Java PSI and bytecode paths.
+- `mixin_find_overrides` is the downward counterpart to `mixin_super_methods` — use it when you need to know every concrete implementation of an abstract/interface method before injecting. `[abstract]` tags mark overrides that are themselves abstract (interface extensions, not implementations). For non-overridable methods (static/private/final/constructors/final classes) the tool returns an explanation and no list.
+- `mixin_super_methods` walks the **full** chain to every root declaration (both superclass and super-interface paths), not just the direct super. Output is indented by depth; entries tagged `[root declaration]` are the original declarations — usually the best mixin target when you want to affect all overriders. When a method overrides both a class method and an interface default, multiple roots are listed and summarized at the end.
 
 ### mixin_search_symbols
 - Searches **short names** only, not FQCNs. Pass `LivingEntity` not the full package path.
@@ -149,6 +153,11 @@ mixin_find_references(className="net.minecraft.world.entity.LivingEntity", membe
 
 ### mixin_find_targeting_mixins
 - Increase `maxResults` (default 50) for heavily-targeted classes like `LivingEntity` or `Player`.
+
+### mixin_type_hierarchy
+- Increase `maxResults` (default 50) for heavily-inherited classes like `LivingEntity` or `Block` when you need the full subtype list. Otherwise the output shows `... (truncated at N results)`.
+- Use `direction="supers"` to skip the potentially-large subtype listing when you only need the inheritance chain upward.
+- **Direct interfaces** are the class's own `implements`/`extends` clause. **Inherited interfaces** are the transitive closure — everything picked up from the superclass chain and from super-interface extension. Each inherited entry is tagged `(from X)` (introduced by superclass X) or `(via X)` (reached by extending interface X). Check both sections before assuming a class does not implement something: e.g. `LivingEntity` does not directly implement `CommandSource`, but inherits it from `Entity`.
 
 ### mixin_mappings_lookup
 - **Input symbol must be in the `from` namespace** — if `from="srg"` the class must be the SRG name (e.g. `net/minecraft/src/C_12_`), not the mojmap/yarn name. Cross-namespace class renames mean you can't mix-and-match.
