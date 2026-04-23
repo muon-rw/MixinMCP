@@ -15,7 +15,7 @@ For all features, you will also need the Gradle plugin - see https://github.com/
 - Find all overrides of a method, plus its original super-method declaration
 - Call hierarchy: callers and callees of any method
 - All references to a class, method, or field
-- All `@Mixin` classes targeting a given class or method. Helps identify cross-mod conflicts
+- All `@Mixin` classes targeting a given class method. Helps identify cross-mod conflicts
 - Symbol search by name pattern, plus regex grep across all dependency sources
 
 **Searches across your *entire* classpath including dependencies:**
@@ -29,7 +29,7 @@ At best, these tools might additionally see your currently active open file.
 - Get the actual compiled bytecode for a given class or method
 - Useful to find a precise target when writing mixins, especially for ordinals or synthetic lambdas
 
-### 3. Built-in Skills for enhanced Mixin Writing:
+### 3. Built-in Agent Skills for enhanced Mixin Writing:
 - Improve compatibility of written mixins by favoring MixinExtras injectors which LLMs often hallucinate or fail to use in the first place
 - Favor precise modification for the exact target for the task without workarounds, slices, or shift by's, thanks to MixinExtras' robust `@Expression` annotation
 
@@ -50,7 +50,7 @@ MixinMCP has two parts, and you need both for full-classpath search to work:
 
 ### 1. Install the IntelliJ plugin
 
-**From JetBrains Marketplace** *(Pending Approval!)*: **Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
+**From JetBrains Marketplace**: **Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
 
 **From Disk:** See [Building from Source](#building-from-source) below.
 
