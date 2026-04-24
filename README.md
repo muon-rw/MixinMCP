@@ -63,7 +63,7 @@ MixinMCP has two parts. You need **both** for full-classpath search to work:
 
 Use IntelliJ's **Auto-Configure** option for your client (or configure manually using the ip address), then restart the client. The auto-configured server name is usually **`user-jetbrains`**
 
-> [!WARNING]
+> [!CAUTION]
 > MixinMCP exposes full project and dependency source, classpath metadata, and bytecode to whatever connects to the MCP server. These tools aren't hardened for remote access. IntelliJ binds the server to localhost by default — leave it that way unless you have a specific reason, and expose it more broadly at your own risk.
 
 For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-rules-and-skills).
@@ -106,12 +106,8 @@ plugins {
  Add to your project level `gradle.properties`:
 ```properties
 org.gradle.jvmargs=-Xmx4g
-# Note 1: 
+# You may need to set this as high as 6g if you need to decompile an extremely large jar (e.g. Cataclysm)
 ```
-
-> [!TIP]
-> You may need to set this as high as 6g if you need to decompile an extremely large jar (e.g. Cataclysm)
-
 
 > [!WARNING]
 > Setting `org.gradle.parallel=true` (default for Neoforge template) can increase likelihood of OOMs during big decomps
