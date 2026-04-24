@@ -106,7 +106,8 @@ plugins {
  Add to your project level `gradle.properties`:
 ```properties
 org.gradle.jvmargs=-Xmx4g
-# You may need to set this as high as 6g if you need to decompile an extremely large jar (e.g. Cataclysm)
+# You may need to set this as high as 6g if you need 
+# to decompile an extremely large jar (e.g. Cataclysm)
 ```
 
 > [!WARNING]
