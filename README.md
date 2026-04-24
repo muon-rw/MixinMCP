@@ -70,7 +70,13 @@ For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-r
 
 ### 4. Set up the Gradle plugin
 
-Without this step, `mixin_search_in_deps` and `mixin_get_dep_source` can only see dependencies that published a `-sources.jar`. This means local jar dependencies, Cursemaven dependencies, and many from Modrinth Maven dependencies are totally invisible. The Gradle plugin decompiles the rest via [Vineflower](https://github.com/Vineflower/vineflower) into a local cache that the IntelliJ plugin indexes automatically.
+> [!NOTE]
+> Without this step, `mixin_search_in_deps` and `mixin_get_dep_source` can only see dependencies that published a `-sources.jar`. 
+> 
+> This means local jar dependencies, Cursemaven dependencies, and many from Modrinth Maven dependencies are totally invisible. 
+> 
+> The Gradle plugin decompiles these via [Vineflower](https://github.com/Vineflower/vineflower) into a local cache that the IntelliJ plugin indexes automatically.
+
 
 **1. Add the MixinMCP maven repository to your mod project's `settings.gradle` or `settings.gradle.kts`:**
 
@@ -98,9 +104,16 @@ plugins {
  Add to your project level `gradle.properties`:
 ```properties
 org.gradle.jvmargs=-Xmx4g
-# May need to set as high as 6g if you need to 
-# decompile an extremely large jar (e.g. Cataclysm)
+# Note 1: 
 ```
+
+> [!NOTE]
+> You may need to set this as high as 6g if you need to decompile an extremely large jar (e.g. Cataclysm)
+
+
+> [!WARNING]
+> Setting `org.gradle.parallel=true` (default for Neoforge template) can increase likelihood of OOMs during big decomps
+
 For more info, see [Decompilation cache details](#decompilation-cache-details)
 
 **4. Run decompilation:** 
