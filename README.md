@@ -70,11 +70,9 @@ For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-r
 
 ### 4. Set up the Gradle plugin
 
-> [!NOTE]
-> Without this step, `mixin_search_in_deps` and `mixin_get_dep_source` can only see dependencies that published a `-sources.jar`. 
-> 
-> This means local jar dependencies, Cursemaven dependencies, and many from Modrinth Maven dependencies are totally invisible. 
-> 
+> [!IMPORTANT]
+> Without this step, `mixin_search_in_deps` and `mixin_get_dep_source` can only see dependencies that published a `-sources.jar`.
+> This means local jar dependencies, Cursemaven dependencies, and many from Modrinth Maven dependencies are totally invisible.
 > The Gradle plugin decompiles these via [Vineflower](https://github.com/Vineflower/vineflower) into a local cache that the IntelliJ plugin indexes automatically.
 
 
@@ -101,13 +99,17 @@ plugins {
 ```
 **3. Increase Gradle process memory:** (**Strongly** Recommended)
 
+> [!CAUTION]
+> If you skip this step, you might experience OOM errors during gradle sync
+
+
  Add to your project level `gradle.properties`:
 ```properties
 org.gradle.jvmargs=-Xmx4g
 # Note 1: 
 ```
 
-> [!NOTE]
+> [!TIP]
 > You may need to set this as high as 6g if you need to decompile an extremely large jar (e.g. Cataclysm)
 
 
