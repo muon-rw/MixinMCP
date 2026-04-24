@@ -236,15 +236,23 @@ check and proceed regardless:
 
 # Skip OOM pre-flight confirmation (e.g. when you know heap is sufficient)
 ./gradlew genDependencySources --force
-
-# Increase heap (more memory available)
-# Add to your mod project's gradle.properties:
-org.gradle.jvmargs=-Xmx4g
 ```
 
-On large modded projects (50+ dependencies, some JARs over 100MB), `--threads=2`
-with `-Xmx4g` is a good starting point. The task saves progress after each JAR,
-so if it does crash you can re-run and it picks up where it left off.
+
+*Add to your mod project's gradle.properties:*
+```properties
+# Increase memory available to Gradle
+org.gradle.jvmargs=-Xmx4g
+
+# Disable parallelization (which may increase risk of OOM)
+org.gradle.parallel=false
+```
+
+On large modded projects (50+ dependencies, some JARs over 100MB), you might need to set gradle process memory as high as `-Xmx6g`. 
+
+> [!TIP]
+> The task saves progress after each JAR,
+so if things do crash, just resync Gradle or run the task manually and Decompile will pick up where it left off.
 
 **Prefer native sources when available.** Decompiled output lacks comments,
 meaningful parameter names, and local variable names. If a library publishes
