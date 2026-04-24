@@ -251,8 +251,7 @@ org.gradle.parallel=false
 On large modded projects (50+ dependencies, some JARs over 100MB), you might need to set gradle process memory as high as `-Xmx6g`. 
 
 > [!TIP]
-> The task saves progress after each JAR,
-so if things do crash, just resync Gradle or run the task manually and Decompile will pick up where it left off.
+> The task saves progress after each JAR, so if things do crash, just resync Gradle or run the task manually and Decompile will pick up where it left off.
 
 **Prefer native sources when available.** Decompiled output lacks comments,
 meaningful parameter names, and local variable names. If a library publishes
