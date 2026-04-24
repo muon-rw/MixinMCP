@@ -72,7 +72,7 @@ For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-r
 
 > [!IMPORTANT]
 > Without this step, `mixin_search_in_deps` and `mixin_get_dep_source` can only see dependencies that published a `-sources.jar`.
-> This means local jar dependencies, Cursemaven dependencies, and many from Modrinth Maven dependencies are totally invisible.
+> This means that local jar dependencies, Cursemaven dependencies, and many from Modrinth Maven dependencies are totally invisible.
 > The Gradle plugin decompiles these via [Vineflower](https://github.com/Vineflower/vineflower) into a local cache that the IntelliJ plugin indexes automatically.
 
 
