@@ -444,10 +444,31 @@ target discovery.
 | Tool | Parameters |
 |------|-----------|
 | `mixin_sync_project` | `projectPath?` |
+| `mixin_refresh_vfs` | `path?` |
 
-Triggers Gradle sync via `ExternalSystemUtil.refreshProject()` with
+`mixin_sync_project` triggers Gradle sync via `ExternalSystemUtil.refreshProject()` with
 `ProgressExecutionMode.START_IN_FOREGROUND_ASYNC`. Falls back to Maven if Gradle fails.
 Runs on EDT via `invokeLater`.
+
+`mixin_refresh_vfs` selects a refresh target and scope, resolves it via
+`LocalFileSystem.refreshAndFindFileByIoFile()`, then calls
+`VfsUtil.markDirtyAndRefresh(async=false, recursive, reloadChildren=true, vf)`. The target
+selection handles three shapes of caller input:
+
+- **Existing directory** (including project root when `path` is omitted): refreshed
+  recursively.
+- **Existing file**: parent directory refreshed non-recursively. `reloadChildren=true` on
+  the parent picks up the file's content change, any newly created siblings, and any
+  deleted siblings in one call, and does not depend on VFS already knowing about a
+  just-created child.
+- **Path that no longer exists**: walks up to the nearest existing ancestor and refreshes
+  it non-recursively, so VFS notices the deletion without fanning out over unrelated
+  siblings.
+
+Explicit dirty-marking forces VFS to re-read even when it believes the entry is fresh.
+Synchronous so the tool returns only after IntelliJ has re-scanned the path; use this
+after external tools (shell scripts, code generators) mutate files that subsequent MCP
+calls will query.
 
 ---
 

@@ -135,6 +135,16 @@ You can edit these manually, but if you use the same name and do not change the 
 
 </details>
 
+### Claude Code tip: stay connected to IntelliJ
+
+Claude Code's `Write`, `Edit`, and `MultiEdit` tools do not fsync when writing directly to disk, so IntelliJ's file-change notifier can take minutes to notice an edit; during that window your editor tabs still show the pre-edit contents even though the file on disk is already updated. This is mainly a UX issue (the `mixin_*` tools query classpath and dependency state, so their results are generally unaffected), but it's disorienting to watch. The cleanest fix is to keep the Claude Code session connected to IntelliJ via the [Claude Code IntelliJ plugin](https://plugins.jetbrains.com/plugin/28813-claude-code): when connected, edits route through the IDE and the editor updates immediately.
+
+Recommendations:
+
+- Launch Claude Code from IntelliJ's integrated terminal so the plugin auto-connects.
+- Run `/ide` at the start of a session (and after long idles) to confirm the connection is live; reconnect if not.
+- If you cannot reconnect, `mixin_refresh_vfs` with the edited path is a manual fallback that forces IntelliJ to pick up the change without waiting on fsnotifier.
+
 ## Tool reference
 
 <details>
@@ -180,6 +190,7 @@ You can edit these manually, but if you use the same name and do not change the 
 | Tool | Description |
 |------|-------------|
 | `mixin_sync_project` | Trigger Gradle sync. The decompilation cache is re-read automatically after sync. |
+| `mixin_refresh_vfs` | Force-refresh IntelliJ's VFS so on-disk changes from external tools become visible. Optional `path` scopes the refresh; file paths refresh the parent directory (catching edits, creates, and deletes), deleted paths walk up to the nearest existing ancestor, and directory paths refresh recursively. Defaults to the project root. |
 
 </details>
 

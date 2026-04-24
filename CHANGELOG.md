@@ -2,8 +2,19 @@
 
 # MixinMCP Changelog
 
+## [Unreleased]
+
+## [1.0.2]
+
+### Added
+
+- New tool `mixin_refresh_vfs`: Force-refresh IntelliJ's VFS so on-disk changes from external tools become visible. Useful for Claude Code
+- Recommend setting the above in CLAUDE.md when using Claude Code if not using the Claude Code IntelliJ plugin
+
 ## [1.0.1]
+
 ### Improved
+
 - Overall IDE performance while the MCP server is performing broad-scoped reads
 
 ## [1.0.0]
@@ -183,7 +194,9 @@
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.0...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.2...HEAD
+[1.0.2]: https://github.com/muon-rw/MixinMCP/compare/1.0.1...1.0.2
+[1.0.1]: https://github.com/muon-rw/MixinMCP/compare/1.0.0...1.0.1
 [1.0.0]: https://github.com/muon-rw/MixinMCP/compare/0.9.0...1.0.0
 [0.9.0]: https://github.com/muon-rw/MixinMCP/compare/0.8.2...0.9.0
 [0.8.2]: https://github.com/muon-rw/MixinMCP/compare/0.8.1...0.8.2
