@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- New tool `mixin_safe_delete`: Delete a class, method, or field after a project-wide usage check. Optional flags: `force=true` (deletes anyway) `dryRun=true` (only reports)
+- New tool `mixin_move_file`: Move a class to a new package, updating the package declaration and all references across the project
+
+(These two tools will probably be deleted in a future update, assuming IntelliJ adds them to its own built-in MCP server)
 ## [1.0.4]
 
 ### Improved

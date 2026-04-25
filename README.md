@@ -18,12 +18,13 @@ For all features, you will also need the Gradle plugin - see https://github.com/
 - All `@Mixin` classes targeting a given class method. Helps identify cross-mod conflicts
 - Symbol search by name pattern, plus regex grep across all dependency sources
 
-**Searches across your *entire* classpath including dependencies:**
+**Regex search across your *entire* classpath including dependencies:**
 
-- Alternative tools generally search only *your* project code. They don't search remapped Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility.
-At best, these tools might additionally see your currently active open file.
+- Alternative tools have a central problem: You can not perform broad, text-based search like regex on files that aren't in your project's own source. 
+This is exactly the use case that Minecraft development (and mixin writing) needs so desparately - 100 other projects might be interacting with what you are, and you need to know what and how.
+While other tools might be able to read individual files in Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility, they don't have a good way to *search through them*.
 - With this plugin, agents can easily scan the whole project dependency network on their own, including dependencies without published sources. 
-- Circumvents the need to manually copy and paste snippets into context, or for agents to find jars in your gradle cache and unzip/analyze them manually
+- Circumvents the need to manually copy and paste snippets into context, or for agents to find jars in your gradle cache and unzip/analyze them manually one by one. 
 
 ### 2. Class/Method Bytecode lookup:
 - Get the actual compiled bytecode for a given class or method
@@ -148,7 +149,7 @@ You can edit these manually, but if you use the same name and do not change the 
 ## Tool reference
 
 <details>
-<summary>All 16 tools (click to expand)</summary>
+<summary>All 18 tools (click to expand)</summary>
 
 ### Source Navigation
 
@@ -191,6 +192,8 @@ You can edit these manually, but if you use the same name and do not change the 
 |------|-------------|
 | `mixin_sync_project` | Trigger Gradle sync. The decompilation cache is re-read automatically after sync. |
 | `mixin_refresh_vfs` | Force-refresh IntelliJ's VFS so on-disk changes from external tools become visible. Optional `path` scopes the refresh; file paths refresh the parent directory (catching edits, creates, and deletes), deleted paths walk up to the nearest existing ancestor, and directory paths refresh recursively. Defaults to the project root. |
+| `mixin_safe_delete` | Delete a class, method, or field after checking for usages across project and dependencies. Resolves by FQCN; pass `methodName` (with `parameterTypes`/`methodDescriptor` for overloads) or `fieldName` to narrow to a member. Method overrides count as blocking usages and are tagged `[override]`. References inside mixin configs, `mods.toml`, ServiceLoader files etc. are picked up automatically when the relevant language plugins contribute PSI references. `force=true` deletes despite usages; `dryRun=true` only reports. |
+| `mixin_move_file` | Move a class to a new package, updating its package declaration and every import/reference across the project. Resolves the source by FQCN; Kotlin files with multiple top-level declarations move together. Non-Java string references are also rewritten, so mixin configs and ServiceLoader entries follow along. Errors if a file with the same name already exists in the target package. |
 
 </details>
 
