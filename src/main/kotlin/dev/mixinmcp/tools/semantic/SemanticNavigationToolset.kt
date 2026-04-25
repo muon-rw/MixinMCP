@@ -4,7 +4,6 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
-import com.intellij.mcpserver.projectOrNull
 import com.intellij.openapi.application.ReadAction
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiDocumentManager
@@ -19,6 +18,7 @@ import com.intellij.psi.search.searches.OverridingMethodsSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.MethodResolver
+import dev.mixinmcp.tools.requireProject
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -37,8 +37,7 @@ class SemanticNavigationToolset : McpToolset {
         includeInterfaces: Boolean = true,
         maxResults: Int = 50,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
         if (maxResults < 1) {
             return McpToolCallResult.error("maxResults must be >= 1 (got $maxResults)")
         }
@@ -184,8 +183,7 @@ class SemanticNavigationToolset : McpToolset {
         className: String,
         maxResults: Int = 50,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val result: String? = ReadAction.nonBlocking<String?> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
@@ -229,8 +227,7 @@ class SemanticNavigationToolset : McpToolset {
         methodName: String? = null,
         maxResults: Int = 50,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val result: String = ReadAction.nonBlocking<String> {
             val normalizedTarget: String = className.replace('/', '.')
@@ -313,8 +310,7 @@ class SemanticNavigationToolset : McpToolset {
         parameterTypes: List<String>? = null,
         methodDescriptor: String? = null,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val resolution = MethodResolver.resolveDetailed(
             project, className, methodName,
@@ -422,8 +418,7 @@ class SemanticNavigationToolset : McpToolset {
         methodDescriptor: String? = null,
         maxResults: Int = 50,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
         if (maxResults < 1) {
             return McpToolCallResult.error("maxResults must be >= 1 (got $maxResults)")
         }
@@ -520,8 +515,7 @@ class SemanticNavigationToolset : McpToolset {
         methodDescriptor: String? = null,
         maxResults: Int = 100,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         if (memberName != null) {
             val fieldResult: PsiField? = ReadAction.nonBlocking<PsiField?> {
@@ -697,8 +691,7 @@ class SemanticNavigationToolset : McpToolset {
         maxDepth: Int = 3,
         maxResults: Int = 50,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         if (direction != "callers" && direction != "callees") {
             return McpToolCallResult.error(

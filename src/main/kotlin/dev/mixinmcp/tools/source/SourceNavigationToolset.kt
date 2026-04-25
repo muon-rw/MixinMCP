@@ -4,7 +4,6 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
-import com.intellij.mcpserver.projectOrNull
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
@@ -16,6 +15,7 @@ import com.intellij.psi.search.ProjectScope
 import com.intellij.psi.search.PsiShortNamesCache
 import dev.mixinmcp.cache.SourceAutoAttacher
 import dev.mixinmcp.resolve.FqcnResolver
+import dev.mixinmcp.tools.requireProject
 import kotlin.coroutines.coroutineContext
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
@@ -34,8 +34,7 @@ class SourceNavigationToolset : McpToolset {
         includeMembers: Boolean = true,
         includeSource: Boolean = false,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val result: String? = ReadAction.nonBlocking<String?> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
@@ -102,8 +101,7 @@ class SourceNavigationToolset : McpToolset {
         caseSensitive: Boolean = false,
         maxResults: Int = 50,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val searchScope: GlobalSearchScope = when (scope) {
             "project" -> ProjectScope.getContentScope(project)
@@ -195,8 +193,7 @@ class SourceNavigationToolset : McpToolset {
     suspend fun mixin_list_source_roots(
         maxSamplesPerRoot: Int = 5,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val result: String = ReadAction.nonBlocking<String> {
             val roots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
@@ -356,8 +353,7 @@ class SourceNavigationToolset : McpToolset {
         pathPrefix: String? = null,
         roots: String = "all",
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val pattern: Pattern = try {
             Pattern.compile(
@@ -500,8 +496,7 @@ class SourceNavigationToolset : McpToolset {
         linesBefore: Int = 30,
         linesAfter: Int = 70,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         if (url.isNullOrBlank() && path.isNullOrBlank()) {
             return McpToolCallResult.error(

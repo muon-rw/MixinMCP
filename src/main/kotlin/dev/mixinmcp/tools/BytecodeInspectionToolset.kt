@@ -4,7 +4,6 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
-import com.intellij.mcpserver.projectOrNull
 import dev.mixinmcp.resolve.BytecodeAnalyzer
 import dev.mixinmcp.resolve.ClassFileLocator
 import kotlin.coroutines.coroutineContext
@@ -23,8 +22,7 @@ class BytecodeInspectionToolset : McpToolset {
         filter: String = "all",
         includeInstructions: Boolean = false,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.Companion.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val classBytes: ByteArray? = ClassFileLocator.locate(project, className)
         if (classBytes == null) {
@@ -110,8 +108,7 @@ class BytecodeInspectionToolset : McpToolset {
         methodName: String,
         methodDescriptor: String? = null,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.Companion.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val classBytes: ByteArray? = ClassFileLocator.locate(project, className)
         if (classBytes == null) {

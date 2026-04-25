@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Improved
+
+- Multi-project IDE setups now return an actionable error listing the open project paths and reminding the agent to retry with the framework's auto-injected `projectPath` argument; previously the IntelliJ MCP framework's opaque "No exact project is specified while multiple projects are opened." propagated unchanged
 ## [1.0.2]
 
 ### Added

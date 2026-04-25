@@ -4,7 +4,6 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
-import com.intellij.mcpserver.projectOrNull
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.externalSystem.importing.ImportSpecBuilder
 import com.intellij.openapi.externalSystem.model.ProjectSystemId
@@ -29,8 +28,7 @@ class ProjectManagementToolset : McpToolset {
     suspend fun mixin_sync_project(
         projectPath: String? = null,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.Companion.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val basePath: String = project.basePath ?: return McpToolCallResult.Companion.error(
             "Project has no base path",
@@ -78,8 +76,7 @@ class ProjectManagementToolset : McpToolset {
     suspend fun mixin_refresh_vfs(
         path: String? = null,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.Companion.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
         val requestedPath: String = path ?: project.basePath ?: return McpToolCallResult.Companion.error(
             "Project has no base path",

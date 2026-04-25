@@ -4,13 +4,13 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
-import com.intellij.mcpserver.projectOrNull
 import dev.mixinmcp.mappings.MappingNamespace
 import dev.mixinmcp.mappings.MappingsResolver
 import dev.mixinmcp.mappings.MappingsService
 import dev.mixinmcp.mappings.McVersionDetector
 import dev.mixinmcp.mappings.SymbolKind
 import dev.mixinmcp.mappings.SymbolParser
+import dev.mixinmcp.tools.softProject
 import kotlin.coroutines.coroutineContext
 
 class MappingsToolset : McpToolset {
@@ -50,7 +50,7 @@ class MappingsToolset : McpToolset {
             )
 
         val resolvedMcVersion = mcVersion?.takeIf { it.isNotBlank() }
-            ?: coroutineContext.projectOrNull?.let(McVersionDetector::detect)
+            ?: coroutineContext.softProject()?.let(McVersionDetector::detect)
             ?: return McpToolCallResult.error(
                 "Could not auto-detect Minecraft version from gradle.properties. " +
                     "Pass mcVersion explicitly (e.g., \"1.20.1\").",
