@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [1.0.4]
+
+### Improved
+
+- Adjusted UX for `mixin_super_methods`, output should now be more clear about which classes own which methods
+
 ## [1.0.3]
 
 ### Added
@@ -206,7 +212,8 @@
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.3...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.4...HEAD
+[1.0.4]: https://github.com/muon-rw/MixinMCP/compare/1.0.3...1.0.4
 [1.0.3]: https://github.com/muon-rw/MixinMCP/compare/1.0.2...1.0.3
 [1.0.2]: https://github.com/muon-rw/MixinMCP/compare/1.0.1...1.0.2
 [1.0.1]: https://github.com/muon-rw/MixinMCP/compare/1.0.0...1.0.1

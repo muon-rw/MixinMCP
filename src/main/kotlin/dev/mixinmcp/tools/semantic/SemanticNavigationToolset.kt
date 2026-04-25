@@ -5,6 +5,7 @@ import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiField
@@ -302,7 +303,7 @@ class SemanticNavigationToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Walks the full super-method chain for a method through all superclasses and super-interfaces to the original declaration(s). Use this to confirm where a method is originally declared before targeting it in a mixin — root declarations (those with no further super) are usually the best mixin targets for base behavior. Output indents by depth (2 spaces per level) and tags each entry as [root declaration] and/or [interface] where applicable. When multiple roots exist (e.g. a class root and an interface default), they are summarized at the end. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z) — same as in @Inject(method = \"...\"). For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\".")
+    @McpDescription("Walks the full super-method chain for a method through all superclasses and super-interfaces to the original declaration(s). Use this to confirm where a method is originally declared before targeting it in a mixin — root declarations (those with no further super) are usually the best mixin targets for base behavior. Output indents by depth (2 spaces per level), tags each entry as [root declaration] and/or [interface] where applicable, and emits a Source: path:line line for each method when source is available. If the queried class inherits the method from an ancestor (rather than declaring it itself), the response calls this out explicitly so you can mixin into the actual declaring class — when this happens with no further supers, the chain is empty because the resolved declaration is already the root. When multiple roots exist (e.g. a class root and an interface default), they are summarized at the end. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z) — same as in @Inject(method = \"...\"). For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\".")
     @Suppress("unused")
     suspend fun mixin_super_methods(
         className: String,
@@ -324,6 +325,10 @@ class SemanticNavigationToolset : McpToolset {
 
         val result: String = ReadAction.nonBlocking<String> {
             val containingClass: PsiClass? = psiMethod.containingClass
+            val containingFqn: String = containingClass?.qualifiedName ?: "?"
+            val queriedFqn: String? = FqcnResolver.resolveNested(project, className)?.qualifiedName
+            val inheritedFromAncestor: Boolean =
+                queriedFqn != null && containingClass?.qualifiedName != null && queriedFqn != containingClass.qualifiedName
 
             val chain: List<SuperChainEntry> = buildSuperChain(psiMethod)
             val rootEntries: List<SuperChainEntry> = chain.filter { it.isRoot }
@@ -331,11 +336,17 @@ class SemanticNavigationToolset : McpToolset {
             buildString {
                 appendLine("=== Super methods for ${psiMethod.name} ===")
                 appendLine()
-                appendLine("Declared in: ${containingClass?.qualifiedName ?: "?"}")
+                appendLine("Declared in: $containingFqn")
                 appendLine("Signature: ${psiMethod.name}(${psiMethod.parameterList.parameters.joinToString { "${it.type.presentableText} ${it.name}" }})")
+                sourceLocation(project, psiMethod)?.let { appendLine("Source: $it") }
+                if (inheritedFromAncestor) {
+                    appendLine()
+                    appendLine("Note: $queriedFqn does not declare this method directly — it is inherited from $containingFqn. Mixin into $containingFqn (or a subclass that overrides it) to affect this behavior.")
+                }
                 appendLine()
                 if (chain.isEmpty()) {
-                    appendLine("No super methods (method is declared here, not inherited).")
+                    val interfaceNote: String = if (containingClass?.isInterface == true) " (interface)" else ""
+                    appendLine("$containingFqn$interfaceNote is the root declaration — no super methods to walk.")
                 } else {
                     appendLine("--- Super method chain (most specific → most general) ---")
                     for (entry: SuperChainEntry in chain) {
@@ -348,6 +359,7 @@ class SemanticNavigationToolset : McpToolset {
                         }
                         val tagSuffix: String = if (tags.isEmpty()) "" else "  [${tags.joinToString(", ")}]"
                         appendLine("$indent$fqn#${entry.method.name}(...)$tagSuffix")
+                        sourceLocation(project, entry.method)?.let { appendLine("$indent  Source: $it") }
                     }
                     if (rootEntries.size > 1) {
                         appendLine()
@@ -377,6 +389,19 @@ class SemanticNavigationToolset : McpToolset {
         val depth: Int,
         val isRoot: Boolean,
     )
+
+    /**
+     * Returns "path:line" for [method] when a containing file with line info
+     * is available, or null otherwise. Must be called inside a ReadAction.
+     */
+    private fun sourceLocation(project: Project, method: PsiMethod): String? {
+        val file = method.containingFile ?: return null
+        val path: String = file.virtualFile?.path ?: return null
+        val doc = PsiDocumentManager.getInstance(project).getDocument(file) ?: return path
+        val offset: Int = method.textOffset
+        if (offset < 0 || offset >= doc.textLength) return path
+        return "$path:${doc.getLineNumber(offset) + 1}"
+    }
 
     /**
      * Recursively walks super methods of [start] via DFS. De-duplicates by
