@@ -50,9 +50,7 @@ MixinMCP has two parts. You need **both** for full-classpath search to work:
 
 ### 1. Install the IntelliJ plugin
 
-**From JetBrains Marketplace**: **Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
-
-**From Disk:** See [Building from Source](#building-from-source) below.
+**From IntelliJ**: **Settings → Plugins → Marketplace** → search "MixinMCP" → **Install**
 
 ### 2. Enable IntelliJ's MCP Server
 
