@@ -189,6 +189,21 @@ object MethodResolver {
                 return@nonBlocking Resolution.Found(methods.first())
             }
 
+            // methods.size > 1 isn't always an ambiguity: when a class overrides an
+            // inherited method, findMethodsByName(name, true) returns both the override
+            // and the inherited declaration as distinct PsiMethods sharing one canonical
+            // parameter signature. Collapse by canonical types; if only one signature
+            // remains, the agent's request is unambiguous and we pick the method declared
+            // closest to the queried class (most-derived) so super-method walks and
+            // call-hierarchy traversal start from the right anchor.
+            val byCanonicalSig: Map<String, List<PsiMethod>> = methods.groupBy(::canonicalParamKey)
+            if (byCanonicalSig.size == 1) {
+                val mostDerived: PsiMethod = methods.firstOrNull {
+                    it.containingClass?.qualifiedName == psiClass.qualifiedName
+                } ?: methods.first()
+                return@nonBlocking Resolution.Found(mostDerived)
+            }
+
             Resolution.Error(buildString {
                 append("Multiple overloads of ${psiClass.qualifiedName}#$methodName.")
                 append(" Pass parameterTypes or methodDescriptor to disambiguate:\n")
@@ -198,6 +213,9 @@ object MethodResolver {
             })
         }.inSmartMode(project).executeSynchronously()
     }
+
+    private fun canonicalParamKey(method: PsiMethod): String =
+        method.parameterList.parameters.joinToString(",") { it.type.canonicalText }
 
     private fun findMethodsByName(psiClass: PsiClass, methodName: String): List<PsiMethod> {
         val methods: List<PsiMethod> = psiClass.findMethodsByName(methodName, true).toList()

@@ -343,9 +343,9 @@ and dedupe uniformly, and so output is directly paste-ready into `@At(target="..
 
 | Tool | Parameters | Scope |
 |------|-----------|-------|
-| `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false` | All classes (project + deps + JDK) |
+| `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false`, `methodName?`, `fieldName?` | All classes (project + deps + JDK). `methodName` / `fieldName` focus the result to a single member's source plus the class header. |
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` | All indexed symbols |
-| `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000` | Sources jars + decompiled cache |
+| `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000`, `pathPrefix?`, `roots=all`, `contextLines=0` | Sources jars + decompiled cache. `contextLines` (0–200) renders match windows inline with merged overlaps. |
 | `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` | Sources jars + decompiled cache |
 | `mixin_list_source_roots` | `maxSamplesPerRoot=5` | Diagnostic: lists all source roots with types and sample paths |
 

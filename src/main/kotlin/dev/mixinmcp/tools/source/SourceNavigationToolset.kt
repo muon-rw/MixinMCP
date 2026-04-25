@@ -5,9 +5,12 @@ import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiField
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.search.GlobalSearchScope
@@ -27,14 +30,18 @@ import java.util.regex.Pattern
 class SourceNavigationToolset : McpToolset {
 
     @McpTool
-    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code — can be very large, prefer includeMembers for API overview.")
+    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
         includeMembers: Boolean = true,
         includeSource: Boolean = false,
+        methodName: String? = null,
+        fieldName: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
+
+        val focused: Boolean = !methodName.isNullOrBlank() || !fieldName.isNullOrBlank()
 
         val result: String? = ReadAction.nonBlocking<String?> {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
@@ -59,6 +66,16 @@ class SourceNavigationToolset : McpToolset {
                     appendLine("SourceKind: $sourceKind")
                 }
                 appendLine()
+
+                if (focused) {
+                    if (!methodName.isNullOrBlank()) {
+                        appendMethodSource(project, psiClass, methodName)
+                    }
+                    if (!fieldName.isNullOrBlank()) {
+                        appendFieldSource(project, psiClass, fieldName)
+                    }
+                    return@buildString
+                }
 
                 if (includeMembers) {
                     appendLine("--- Methods ---")
@@ -89,6 +106,137 @@ class SourceNavigationToolset : McpToolset {
             result != null -> McpToolCallResult.text(result)
             else -> McpToolCallResult.error("Class not found: $className")
         }
+    }
+
+    /**
+     * Appends source for every method on [psiClass] with the given [name].
+     * If the class declares overrides for the method, those win; otherwise
+     * the first inherited declaration is shown with an "(inherited from X)"
+     * tag so the agent can decide whether to follow up with mixin_super_methods.
+     */
+    private fun StringBuilder.appendMethodSource(
+        project: Project,
+        psiClass: PsiClass,
+        name: String,
+    ) {
+        val classQn: String? = psiClass.qualifiedName
+        val declared: List<PsiMethod> = psiClass.methods.filter { it.name == name }
+        val candidates: List<Pair<PsiMethod, Boolean>> = if (declared.isNotEmpty()) {
+            declared.map { it to false }
+        } else {
+            psiClass.findMethodsByName(name, true).map { it to true }
+        }
+
+        if (candidates.isEmpty()) {
+            appendLine("--- Method: $name ---")
+            val all: List<String> = psiClass.allMethods.map { it.name }.distinct().sorted()
+            val close: List<String> = all.filter {
+                it.contains(name, ignoreCase = true) || name.contains(it, ignoreCase = true)
+            }
+            appendLine("  No method named '$name' on ${classQn ?: psiClass.name} (declared or inherited).")
+            if (close.isNotEmpty()) {
+                appendLine("  Similar names: ${close.joinToString(", ")}")
+            }
+            return
+        }
+
+        for ((idx, pair: Pair<PsiMethod, Boolean>) in candidates.withIndex()) {
+            val (method, inherited) = pair
+            val params: String = method.parameterList.parameters
+                .joinToString(", ") { "${it.type.presentableText} ${it.name}" }
+            val ret: String = method.returnType?.presentableText ?: "void"
+            val sigSuffix: String = if (candidates.size > 1) " (overload ${idx + 1}/${candidates.size})" else ""
+            val inheritedFrom: String? =
+                if (inherited) method.containingClass?.qualifiedName ?: method.containingClass?.name else null
+
+            val text: String? = method.text
+            val lineRange: Pair<Int, Int>? = lineRangeOf(project, method)
+            val rangeSuffix: String = lineRange?.let { (s, e) -> ", lines $s-$e" } ?: ""
+
+            appendLine("--- Method: $ret $name($params)$sigSuffix$rangeSuffix ---")
+            if (inheritedFrom != null) {
+                appendLine("  (inherited from $inheritedFrom; not declared on ${classQn ?: psiClass.name})")
+            }
+            if (text == null) {
+                appendLine("  (no source available; class is binary, use mixin_method_bytecode)")
+                appendLine()
+                continue
+            }
+            val startLine: Int = lineRange?.first ?: 1
+            for ((i, line: String) in text.lines().withIndex()) {
+                appendLine("  ${startLine + i}| $line")
+            }
+            appendLine()
+        }
+    }
+
+    /**
+     * Appends the source declaration for a field. Mirrors [appendMethodSource]
+     * but for a single field (no overload concept).
+     */
+    private fun StringBuilder.appendFieldSource(
+        project: Project,
+        psiClass: PsiClass,
+        name: String,
+    ) {
+        val declared: PsiField? = psiClass.fields.firstOrNull { it.name == name }
+        val field: PsiField? = declared ?: psiClass.findFieldByName(name, true)
+        val classQn: String? = psiClass.qualifiedName
+
+        if (field == null) {
+            appendLine("--- Field: $name ---")
+            val all: List<String> = psiClass.allFields.map { it.name }.distinct().sorted()
+            val close: List<String> = all.filter {
+                it.contains(name, ignoreCase = true) || name.contains(it, ignoreCase = true)
+            }
+            appendLine("  No field named '$name' on ${classQn ?: psiClass.name} (declared or inherited).")
+            if (close.isNotEmpty()) {
+                appendLine("  Similar names: ${close.joinToString(", ")}")
+            }
+            return
+        }
+
+        val inherited: Boolean = declared == null
+        val inheritedFrom: String? =
+            if (inherited) field.containingClass?.qualifiedName ?: field.containingClass?.name else null
+        val lineRange: Pair<Int, Int>? = lineRangeOf(project, field)
+        val rangeSuffix: String = lineRange?.let { (s, e) -> ", lines $s-$e" } ?: ""
+
+        appendLine("--- Field: ${field.type.presentableText} ${field.name}$rangeSuffix ---")
+        if (inheritedFrom != null) {
+            appendLine("  (inherited from $inheritedFrom; not declared on ${classQn ?: psiClass.name})")
+        }
+        val text: String? = field.text
+        if (text == null) {
+            appendLine("  (no source available; class is binary, use mixin_class_bytecode)")
+            appendLine()
+            return
+        }
+        val startLine: Int = lineRange?.first ?: 1
+        for ((i, line: String) in text.lines().withIndex()) {
+            appendLine("  ${startLine + i}| $line")
+        }
+        appendLine()
+    }
+
+    /**
+     * Resolves the 1-based start/end line range of [element] in its containing
+     * file. Returns null when the file has no document (binary class) or the
+     * offsets fall outside the document length.
+     */
+    private fun lineRangeOf(
+        project: Project,
+        element: PsiElement,
+    ): Pair<Int, Int>? {
+        val file = element.containingFile ?: return null
+        val doc = PsiDocumentManager.getInstance(project).getDocument(file) ?: return null
+        val range = element.textRange ?: return null
+        val start: Int = range.startOffset
+        val end: Int = range.endOffset
+        if (start < 0 || end > doc.textLength) return null
+        val startLine: Int = doc.getLineNumber(start) + 1
+        val endLine: Int = doc.getLineNumber((end - 1).coerceAtLeast(start)) + 1
+        return startLine to endLine
     }
 
     @McpTool
@@ -342,7 +490,7 @@ class SourceNavigationToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync — try this tool first for vanilla/Forge/NeoForge; empty results append hints (check mixin_list_source_roots auto-attach section). roots: all (default) — search Gradle library -sources.jar then MixinMCP cache; when all, cache files are skipped if the same path already matched in library sources (no duplicate FML/vanilla hits). library — only published -sources.jar roots. decompiled — only MixinMCP decompiled cache. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default.")
+    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync — try this tool first for vanilla/Forge/NeoForge; empty results append hints (check mixin_list_source_roots auto-attach section). roots: all (default) — search Gradle library -sources.jar then MixinMCP cache; when all, cache files are skipped if the same path already matched in library sources (no duplicate FML/vanilla hits). library — only published -sources.jar roots. decompiled — only MixinMCP decompiled cache. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default. contextLines: include N lines of context around each match (default 0). Use small values (3–10) to capture short method bodies inline so you don't need a follow-up mixin_get_dep_source call; max 200. Match lines are prefixed with `>`, context lines with two spaces; overlapping windows are merged per file.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
@@ -352,7 +500,11 @@ class SourceNavigationToolset : McpToolset {
         timeout: Long = 15000,
         pathPrefix: String? = null,
         roots: String = "all",
+        contextLines: Int = 0,
     ): McpToolCallResult {
+        if (contextLines < 0 || contextLines > 200) {
+            return McpToolCallResult.error("contextLines must be between 0 and 200 (got $contextLines)")
+        }
         val project = coroutineContext.requireProject { return it }
 
         val pattern: Pattern = try {
@@ -473,7 +625,7 @@ class SourceNavigationToolset : McpToolset {
                     appendLine("(search timed out after ${elapsed}ms — try a more specific pattern, add fileMask, pathPrefix, or increase timeout)")
                 }
             } else {
-                formatGroupedHits(this, hits)
+                formatGroupedHitsWithContext(this, hits, contextLines)
                 if (hits.size >= maxResults) {
                     appendLine("  ... (truncated at $maxResults matches)")
                 }

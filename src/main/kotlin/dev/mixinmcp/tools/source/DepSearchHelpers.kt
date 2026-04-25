@@ -8,6 +8,7 @@ import com.intellij.openapi.roots.LibraryOrderEntry
 import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileManager
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
 
@@ -490,4 +491,92 @@ internal fun formatGroupedHits(sb: StringBuilder, hits: List<DepSearchHit>) {
         }
         sb.appendLine()
     }
+}
+
+/**
+ * Formats hits with [contextLines] of surrounding lines per match, merging
+ * overlapping windows per file so a short method body shows only once even
+ * when the regex matches multiple lines inside it. Match lines keep the
+ * `||markers||` highlighting from [collectRegexHits] and are prefixed with
+ * `>`; context lines are prefixed with two spaces. Windows separated by gaps
+ * are split with a `--` divider.
+ *
+ * Falls back to [formatGroupedHits] when [contextLines] is 0 or the file
+ * content can't be read (binary entry, JAR closed, etc.).
+ */
+internal fun formatGroupedHitsWithContext(
+    sb: StringBuilder,
+    hits: List<DepSearchHit>,
+    contextLines: Int,
+) {
+    if (contextLines <= 0) {
+        formatGroupedHits(sb, hits)
+        return
+    }
+    val grouped: Map<String, List<DepSearchHit>> = hits.groupBy { it.url }
+    for ((url, fileHits) in grouped) {
+        val first = fileHits.first()
+        sb.appendLine("--- ${first.filePath} [${first.rootLabel}] ---")
+        sb.appendLine("url: $url")
+        val vf: VirtualFile? = VirtualFileManager.getInstance().findFileByUrl(url)
+        val lines: List<String>? = vf?.let {
+            try {
+                String(it.contentsToByteArray(), StandardCharsets.UTF_8).lines()
+            } catch (_: Exception) {
+                null
+            }
+        }
+        if (lines == null) {
+            for (hit in fileHits) {
+                sb.appendLine("  ${hit.lineNum}: ${hit.highlighted}")
+            }
+            sb.appendLine()
+            continue
+        }
+
+        val hitsByLine: Map<Int, DepSearchHit> = fileHits.associateBy { it.lineNum }
+        val windows: List<IntRange> = mergeWindows(
+            fileHits.map { it.lineNum }.sorted().distinct(),
+            contextLines,
+            lines.size,
+        )
+        for ((idx, window: IntRange) in windows.withIndex()) {
+            if (idx > 0) sb.appendLine("--")
+            for (lineNum in window) {
+                val match: DepSearchHit? = hitsByLine[lineNum]
+                if (match != null) {
+                    sb.appendLine("> $lineNum: ${match.highlighted}")
+                } else {
+                    val raw: String = lines.getOrNull(lineNum - 1) ?: ""
+                    sb.appendLine("  $lineNum: $raw")
+                }
+            }
+        }
+        sb.appendLine()
+    }
+}
+
+/**
+ * Builds a list of disjoint, sorted line ranges by expanding each match line
+ * by [context] in both directions and merging adjacent/overlapping ranges.
+ * Clamps to `1..lineCount`.
+ */
+private fun mergeWindows(matchLines: List<Int>, context: Int, lineCount: Int): List<IntRange> {
+    if (matchLines.isEmpty() || lineCount <= 0) return emptyList()
+    val result: MutableList<IntRange> = mutableListOf()
+    var curStart: Int = (matchLines.first() - context).coerceAtLeast(1)
+    var curEnd: Int = (matchLines.first() + context).coerceAtMost(lineCount)
+    for (line: Int in matchLines.drop(1)) {
+        val windowStart: Int = (line - context).coerceAtLeast(1)
+        val windowEnd: Int = (line + context).coerceAtMost(lineCount)
+        if (windowStart <= curEnd + 1) {
+            curEnd = maxOf(curEnd, windowEnd)
+        } else {
+            result.add(curStart..curEnd)
+            curStart = windowStart
+            curEnd = windowEnd
+        }
+    }
+    result.add(curStart..curEnd)
+    return result
 }

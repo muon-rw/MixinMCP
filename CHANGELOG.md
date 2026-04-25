@@ -4,9 +4,18 @@
 
 ## [Unreleased]
 
+## [1.0.3]
+
+### Added
+
+- `mixin_find_class` now accepts `methodName` and `fieldName`. When set, the tool returns only that method's (or field's) source plus the class header instead of dumping the whole file. Overloads are listed in order; if the name is only inherited, the inherited declaration is shown with an `(inherited from X)` tag.
+- `mixin_search_in_deps` now accepts `contextLines` (default 0, max 200). When set, each match is rendered with N surrounding lines, overlapping windows merged per file. Match lines stay highlighted with `||markers||` and are prefixed with `>`; this captures short method bodies inline without a follow-up `mixin_get_dep_source` call.
+
 ### Improved
 
-- Multi-project IDE setups now return an actionable error listing the open project paths and reminding the agent to retry with the framework's auto-injected `projectPath` argument; previously the IntelliJ MCP framework's opaque "No exact project is specified while multiple projects are opened." propagated unchanged
+- Multi-project IDE setups now return a more actionable error listing the open project paths and reminding the agent to retry with the IntelliJ's auto-injected `projectPath` argument if they miss it
+- Moved Fabric/Forge/Neo vanilla source attachment debugging out of the main mixinmcp-tools skill into its own reference
+
 ## [1.0.2]
 
 ### Added
@@ -197,7 +206,8 @@
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.2...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.3...HEAD
+[1.0.3]: https://github.com/muon-rw/MixinMCP/compare/1.0.2...1.0.3
 [1.0.2]: https://github.com/muon-rw/MixinMCP/compare/1.0.1...1.0.2
 [1.0.1]: https://github.com/muon-rw/MixinMCP/compare/1.0.0...1.0.1
 [1.0.0]: https://github.com/muon-rw/MixinMCP/compare/0.9.0...1.0.0

@@ -154,9 +154,9 @@ You can edit these manually, but if you use the same name and do not change the 
 
 | Tool | Description |
 |------|-------------|
-| `mixin_find_class` | Look up any class by FQCN — project, library, or JDK. Optionally include members or decompiled source. |
+| `mixin_find_class` | Look up any class by FQCN across project, libraries, and JDK. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. |
 | `mixin_search_symbols` | Find classes, methods, or fields by name pattern across project and all dependencies. |
-| `mixin_search_in_deps` | Regex search across all dependency sources — published *and* auto-decompiled. Like grep for your entire classpath. |
+| `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath. Pass `contextLines` to capture short method bodies inline. |
 | `mixin_get_dep_source` | Read source from dependency jars or decompiled cache. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java). |
 | `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
 
