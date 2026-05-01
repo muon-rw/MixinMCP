@@ -4,12 +4,17 @@
 
 ## [Unreleased]
 
+## [1.0.5]
+
 ### Added
 
 - New tool `mixin_safe_delete`: Delete a class, method, or field after a project-wide usage check. Optional flags: `force=true` (deletes anyway) `dryRun=true` (only reports)
 - New tool `mixin_move_file`: Move a class to a new package, updating the package declaration and all references across the project
 
-(These two tools will probably be deleted in a future update, assuming IntelliJ adds them to its own built-in MCP server)
+### Fixed
+
+- `mixin_method_bytecode` and `mixin_class_bytecode` now read Java 25 class files (used by Minecraft 26.1+); ASM bumped 9.7.1 → 9.9.1
+
 ## [1.0.4]
 
 ### Improved
@@ -218,7 +223,8 @@
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.4...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.5...HEAD
+[1.0.5]: https://github.com/muon-rw/MixinMCP/compare/1.0.4...1.0.5
 [1.0.4]: https://github.com/muon-rw/MixinMCP/compare/1.0.3...1.0.4
 [1.0.3]: https://github.com/muon-rw/MixinMCP/compare/1.0.2...1.0.3
 [1.0.2]: https://github.com/muon-rw/MixinMCP/compare/1.0.1...1.0.2
