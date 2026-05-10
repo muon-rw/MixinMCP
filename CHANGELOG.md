@@ -2,7 +2,9 @@
 
 # MixinMCP Changelog
 
-## [Unreleased]
+## [1.0.6]
+### Fixed
+- `mixin_find_class` now properly lists nested/inner classes (classes, interfaces, enums, records, annotation types), in a new `--- Nested classes ---` section
 
 ## [1.0.5]
 

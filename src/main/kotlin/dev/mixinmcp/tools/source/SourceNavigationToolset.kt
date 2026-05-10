@@ -30,7 +30,7 @@ import java.util.regex.Pattern
 class SourceNavigationToolset : McpToolset {
 
     @McpTool
-    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures and all fields with types. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration.")
+    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures, all fields with types, and any nested classes/interfaces/enums/records (with FQCN follow-up calls suggested). For utility classes that organise constants in nested classes (e.g. net.minecraftforge.common.Tags) the Methods/Fields sections may look empty even though the API lives in nested classes — always check the Nested classes section before concluding a class is empty. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
@@ -93,6 +93,30 @@ class SourceNavigationToolset : McpToolset {
                         appendLine("  $mods ${field.type.presentableText} ${field.name}")
                     }
                     appendLine()
+                    val nested: Array<PsiClass> = psiClass.innerClasses
+                    if (nested.isNotEmpty()) {
+                        appendLine("--- Nested classes ---")
+                        for (inner: PsiClass in nested) {
+                            val mods: String = inner.modifierList?.text?.trim() ?: ""
+                            val kind: String = when {
+                                inner.isInterface -> "interface"
+                                inner.isEnum -> "enum"
+                                inner.isRecord -> "record"
+                                inner.isAnnotationType -> "@interface"
+                                else -> "class"
+                            }
+                            val name: String = inner.name ?: "?"
+                            val methodCount: Int = inner.methods.size
+                            val fieldCount: Int = inner.fields.size
+                            val nestedCount: Int = inner.innerClasses.size
+                            val nestedSummary: String = if (nestedCount > 0) ", $nestedCount nested" else ""
+                            appendLine("  $mods $kind $name ($fieldCount fields, $methodCount methods$nestedSummary)")
+                            inner.qualifiedName?.let { fqcn ->
+                                appendLine("    → mixin_find_class(className=\"$fqcn\")")
+                            }
+                        }
+                        appendLine()
+                    }
                 }
 
                 if (includeSource) {

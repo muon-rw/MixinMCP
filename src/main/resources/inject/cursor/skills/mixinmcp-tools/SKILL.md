@@ -129,6 +129,11 @@ CallMcpTool(
 - When a name is only inherited, the tool shows the inherited declaration with an `(inherited from X)` tag. Follow up with `mixin_super_methods` to walk the chain or call `mixin_find_class` on `X` directly for canonical declarations.
 - Overloads are listed in order, each with its own line range header. Disambiguate by reading the parameter list, not the index.
 
+### mixin_find_class
+- The Methods/Fields sections list only members declared **directly** on the class — not inherited ones, and not members of nested classes.
+- Utility classes commonly group their public surface into **nested classes** (e.g. `net.minecraftforge.common.Tags` exposes `Tags.Blocks`, `Tags.Items`, etc., each holding the actual constants). The outer class will look empty in Methods/Fields even though the API lives one level down. **Always check the Nested classes section before concluding a class has no members.**
+- For each nested class, the result includes the FQCN and a ready-to-paste follow-up call. Use that to drill in.
+
 ### mixin_search_in_deps
 - `regexPattern` is **Java regex**. Escape metacharacters: `addEffect\\(` not `addEffect(`.
   If you pass unescaped metacharacters, the tool will return a hint suggesting the fix.
