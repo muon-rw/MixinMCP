@@ -8,6 +8,8 @@
 
 **Update the Gradle Plugin for this release**!
 
+Minimum IntelliJ version is now 2026.1
+
 ### Improved
 
 - Source auto-attach now covers MDG vanilla-mode merged jars (typically multiloader common modules using MDG)

@@ -47,7 +47,7 @@ MixinMCP has two parts. You need **both** for full-classpath search to work:
 - **IntelliJ plugin**: registers the `mixin_*` tools on IntelliJ's built-in MCP Server.
 - **Gradle plugin**: decompiles dependencies that don't publish sources so the search tools cover every JAR on your classpath.
 
-**Prerequisites:** IntelliJ IDEA 2025.3+
+**Prerequisites:** IntelliJ IDEA 2026.1+
 
 ### 1. Install the IntelliJ plugin
 
