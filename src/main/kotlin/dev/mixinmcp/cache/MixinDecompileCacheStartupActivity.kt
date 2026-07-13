@@ -35,9 +35,7 @@ class MixinDecompileCacheStartupActivity : ProjectActivity {
             LOG.info("MixinMCP: no cached roots found — run ./gradlew genDependencySources in the project")
         }
 
-        ApplicationManager.getApplication().invokeLater {
-            SourceAutoAttacher.schedule(project, "startup")
-        }
+        SourceAutoAttacher.getInstance(project).schedule("startup")
     }
 
     companion object {

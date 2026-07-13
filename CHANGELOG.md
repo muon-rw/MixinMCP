@@ -2,8 +2,33 @@
 
 # MixinMCP Changelog
 
-## [1.0.6]
+## [Unreleased]
+
+## [1.1.0]
+
+**Update the Gradle Plugin for this release**!
+
+### Improved
+
+- Source auto-attach now covers MDG vanilla-mode merged jars (typically multiloader common modules using MDG)
+- Source auto-attach now covers IntelliJ Platform plugin sources: the DevKit-downloaded platform sources jar is re-attached to the dist and bundled-plugin libraries after sync. Mostly a workaround for some current IntelliJ shortcomings, for MixinMCP's own development
+- Decompiled cache roots that duplicate already-attached library sources are no longer indexed; fixes the same vanilla file appearing repeatedly in Show Usages and Search Everywhere
+- Gradle plugin: Minecraft jars are no longer source-mirrored into the cache; each toolchain's own sources jar is used when present, keeping decompilation as the fallback *only* when it isn't.
+- Gradle plugin: the unresolved-artifact warning now lists the actual failure causes (e.g. corrupt cached jars) instead of guessing at missing mapping data
+- Gradle plugin: Added QoL feature to detect and purge automatically corrupt or truncated cached downloads. Thank you Cursemaven, very cool.
+- Plugin SDK compliance: source auto-attach is now a project service on a coroutine scope, removing EDT file IO, an internal Alarm constructor, and a Project-parented disposable. 
+- Plugin SDK compliance: No longer bundle kotlin-stdlib or org.jetbrains annotations
+
 ### Fixed
+
+- `mixin_class_bytecode` and `mixin_method_bytecode` now work on your own project's classes. Requires a build first 
+- `mixin_find_class` still sometimes surfacing a decompiled mirror when a sources jar is attached
+- `mixin_class_bytecode` with filter="synthetic" now lists synthetic fields (such as this$0, $VALUES, switch-map fields); the fields section was previously omitted entirely for that filter
+
+## [1.0.6]
+
+### Fixed
+
 - `mixin_find_class` now properly lists nested/inner classes (classes, interfaces, enums, records, annotation types), in a new `--- Nested classes ---` section
 
 ## [1.0.5]
@@ -225,7 +250,9 @@
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.0.5...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.1.0...HEAD
+[1.1.0]: https://github.com/muon-rw/MixinMCP/compare/1.0.6...1.1.0
+[1.0.6]: https://github.com/muon-rw/MixinMCP/compare/1.0.5...1.0.6
 [1.0.5]: https://github.com/muon-rw/MixinMCP/compare/1.0.4...1.0.5
 [1.0.4]: https://github.com/muon-rw/MixinMCP/compare/1.0.3...1.0.4
 [1.0.3]: https://github.com/muon-rw/MixinMCP/compare/1.0.2...1.0.3

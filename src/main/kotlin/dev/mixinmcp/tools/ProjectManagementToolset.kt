@@ -14,6 +14,7 @@ import com.intellij.openapi.externalSystem.util.ExternalSystemUtil
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectRootManager
+import com.intellij.openapi.util.io.FileUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
@@ -57,7 +58,7 @@ class ProjectManagementToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val basePath: String = project.basePath ?: return McpToolCallResult.Companion.error(
+        val basePath: String = project.basePath ?: return McpToolCallResult.error(
             "Project has no base path",
         )
 
@@ -84,7 +85,7 @@ class ProjectManagementToolset : McpToolset {
             }
         }
 
-        return McpToolCallResult.Companion.text(
+        return McpToolCallResult.text(
             "Project sync triggered for $externalPath. Dependencies will refresh in the background.",
         )
     }
@@ -105,7 +106,7 @@ class ProjectManagementToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val requestedPath: String = path ?: project.basePath ?: return McpToolCallResult.Companion.error(
+        val requestedPath: String = path ?: project.basePath ?: return McpToolCallResult.error(
             "Project has no base path",
         )
         val requested = File(requestedPath)
@@ -116,7 +117,7 @@ class ProjectManagementToolset : McpToolset {
         while (existing != null && !existing.exists()) {
             existing = existing.parentFile
         }
-        val resolvedExisting = existing ?: return McpToolCallResult.Companion.error(
+        val resolvedExisting = existing ?: return McpToolCallResult.error(
             "Neither $requestedPath nor any ancestor exists on disk.",
         )
 
@@ -129,11 +130,11 @@ class ProjectManagementToolset : McpToolset {
         val refreshTarget: File
         val recursive: Boolean
         when {
-            resolvedExisting == requested && resolvedExisting.isDirectory -> {
+            FileUtil.filesEqual(resolvedExisting, requested) && resolvedExisting.isDirectory -> {
                 refreshTarget = resolvedExisting
                 recursive = true
             }
-            resolvedExisting == requested && resolvedExisting.isFile -> {
+            FileUtil.filesEqual(resolvedExisting, requested) && resolvedExisting.isFile -> {
                 refreshTarget = resolvedExisting.parentFile ?: resolvedExisting
                 recursive = false
             }
@@ -144,7 +145,7 @@ class ProjectManagementToolset : McpToolset {
         }
 
         val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(refreshTarget)
-            ?: return McpToolCallResult.Companion.error(
+            ?: return McpToolCallResult.error(
                 "VFS could not locate ${refreshTarget.absolutePath}.",
             )
 
@@ -152,11 +153,11 @@ class ProjectManagementToolset : McpToolset {
 
         val scope = when {
             recursive -> "directory, recursive"
-            refreshTarget == requested -> "file"
-            resolvedExisting == requested -> "parent of file: ${refreshTarget.absolutePath}"
+            FileUtil.filesEqual(refreshTarget, requested) -> "file"
+            FileUtil.filesEqual(resolvedExisting, requested) -> "parent of file: ${refreshTarget.absolutePath}"
             else -> "nearest existing ancestor: ${refreshTarget.absolutePath}"
         }
-        return McpToolCallResult.Companion.text(
+        return McpToolCallResult.text(
             "VFS refresh completed for $requestedPath [$scope].",
         )
     }
@@ -186,12 +187,12 @@ class ProjectManagementToolset : McpToolset {
         val project = coroutineContext.requireProject { return it }
 
         if (methodName != null && fieldName != null) {
-            return McpToolCallResult.Companion.error(
+            return McpToolCallResult.error(
                 "Pass either methodName or fieldName, not both.",
             )
         }
         if (fieldName != null && (parameterTypes != null || methodDescriptor != null)) {
-            return McpToolCallResult.Companion.error(
+            return McpToolCallResult.error(
                 "parameterTypes/methodDescriptor only apply to methodName, not fieldName.",
             )
         }
@@ -199,12 +200,12 @@ class ProjectManagementToolset : McpToolset {
         val prep: SafeDeletePreparation = when (val r = prepareSafeDelete(
             project, className, methodName, fieldName, parameterTypes, methodDescriptor,
         )) {
-            is PreparationResult.Failure -> return McpToolCallResult.Companion.error(r.message)
+            is PreparationResult.Failure -> return McpToolCallResult.error(r.message)
             is PreparationResult.Ok -> r.preparation
         }
 
         if (dryRun || (prep.usages.isNotEmpty() && !force)) {
-            return McpToolCallResult.Companion.text(formatBlocked(prep, dryRun, force))
+            return McpToolCallResult.text(formatBlocked(prep, dryRun, force))
         }
 
         return performDelete(project, prep, force)
@@ -230,14 +231,14 @@ class ProjectManagementToolset : McpToolset {
 
         val sanitizedTarget: String = targetPackage.trim().trim('.')
         if (sanitizedTarget.isEmpty()) {
-            return McpToolCallResult.Companion.error("targetPackage must be a non-empty package name (e.g. com.example.bar).")
+            return McpToolCallResult.error("targetPackage must be a non-empty package name (e.g. com.example.bar).")
         }
         if (!sanitizedTarget.split('.').all { it.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")) }) {
-            return McpToolCallResult.Companion.error("targetPackage '$targetPackage' is not a valid Java/Kotlin package name.")
+            return McpToolCallResult.error("targetPackage '$targetPackage' is not a valid Java/Kotlin package name.")
         }
 
         val prep: MovePreparation = when (val r = prepareMove(project, className, sanitizedTarget)) {
-            is PreparationResult.Failure -> return McpToolCallResult.Companion.error(r.message)
+            is PreparationResult.Failure -> return McpToolCallResult.error(r.message)
             is PreparationResult.Ok -> r.preparation
         }
 
@@ -473,10 +474,10 @@ class ProjectManagementToolset : McpToolset {
         }
 
         if (error != null) {
-            return McpToolCallResult.Companion.error("Delete failed: $error")
+            return McpToolCallResult.error("Delete failed: $error")
         }
 
-        return McpToolCallResult.Companion.text(buildString {
+        return McpToolCallResult.text(buildString {
             appendLine("Deleted ${prep.elementKind} ${prep.displayName}")
             appendLine("  from: ${prep.targetFilePath}")
             if (prep.deletesWholeFile) appendLine("  (file removed)")
@@ -651,10 +652,10 @@ class ProjectManagementToolset : McpToolset {
         }
 
         if (error != null) {
-            return McpToolCallResult.Companion.error("Move failed: $error")
+            return McpToolCallResult.error("Move failed: $error")
         }
 
-        return McpToolCallResult.Companion.text(buildString {
+        return McpToolCallResult.text(buildString {
             appendLine("Moved ${prep.sourceFqn}")
             appendLine("  from: ${prep.sourceRelative}")
             appendLine("  to:   ${prep.targetRelative}")

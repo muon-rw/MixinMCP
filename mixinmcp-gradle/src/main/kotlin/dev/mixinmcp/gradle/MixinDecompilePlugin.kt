@@ -29,6 +29,7 @@ class MixinDecompilePlugin : Plugin<Project> {
             it.group = "mixinmcp"
             it.description = "Decompile jars without sources and mirror published -sources.jar into ~/.cache/mixinmcp/decompiled/"
             it.projectDir = project.projectDir
+            it.gradleUserHome = project.gradle.gradleUserHomeDir
 
             val configs = findClasspathConfigurations(project)
             if (configs.isNotEmpty()) {

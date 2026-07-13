@@ -12,6 +12,7 @@ import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiField
+import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.ProjectScope
@@ -60,7 +61,9 @@ class SourceNavigationToolset : McpToolset {
                 if (interfaces.isNotEmpty()) {
                     appendLine("Interfaces: ${interfaces.joinToString { it.qualifiedName ?: it.name ?: "?" }}")
                 }
-                psiClass.containingFile?.virtualFile?.let { vf ->
+                // navigationElement maps compiled classes to their attached -sources.jar file
+                val navigationFile: PsiFile? = psiClass.navigationElement.containingFile ?: psiClass.containingFile
+                navigationFile?.virtualFile?.let { vf ->
                     val sourceKind = classifySourceFile(project, vf)
                     appendLine("Source: ${vf.path}")
                     appendLine("SourceKind: $sourceKind")
@@ -121,7 +124,7 @@ class SourceNavigationToolset : McpToolset {
 
                 if (includeSource) {
                     appendLine("--- Source ---")
-                    psiClass.containingFile?.text?.let { appendLine(it) }
+                    navigationFile?.text?.let { appendLine(it) }
                 }
             }
         }.inSmartMode(project).executeSynchronously()
@@ -173,8 +176,9 @@ class SourceNavigationToolset : McpToolset {
             val inheritedFrom: String? =
                 if (inherited) method.containingClass?.qualifiedName ?: method.containingClass?.name else null
 
-            val text: String? = method.text
-            val lineRange: Pair<Int, Int>? = lineRangeOf(project, method)
+            val sourceElement: PsiElement = method.navigationElement
+            val text: String? = sourceElement.text
+            val lineRange: Pair<Int, Int>? = lineRangeOf(project, sourceElement)
             val rangeSuffix: String = lineRange?.let { (s, e) -> ", lines $s-$e" } ?: ""
 
             appendLine("--- Method: $ret $name($params)$sigSuffix$rangeSuffix ---")
@@ -223,14 +227,15 @@ class SourceNavigationToolset : McpToolset {
         val inherited: Boolean = declared == null
         val inheritedFrom: String? =
             if (inherited) field.containingClass?.qualifiedName ?: field.containingClass?.name else null
-        val lineRange: Pair<Int, Int>? = lineRangeOf(project, field)
+        val sourceElement: PsiElement = field.navigationElement
+        val lineRange: Pair<Int, Int>? = lineRangeOf(project, sourceElement)
         val rangeSuffix: String = lineRange?.let { (s, e) -> ", lines $s-$e" } ?: ""
 
         appendLine("--- Field: ${field.type.presentableText} ${field.name}$rangeSuffix ---")
         if (inheritedFrom != null) {
             appendLine("  (inherited from $inheritedFrom; not declared on ${classQn ?: psiClass.name})")
         }
-        val text: String? = field.text
+        val text: String? = sourceElement.text
         if (text == null) {
             appendLine("  (no source available; class is binary, use mixin_class_bytecode)")
             appendLine()
@@ -397,7 +402,7 @@ class SourceNavigationToolset : McpToolset {
                 val hasForgeGameEventsInLibSources = hasForgeGameEventApiInLibrarySources(libRoots)
                 val hasNeoForgeGameEventsInLibSources = hasNeoForgeNeoforgeEventApiInLibrarySources(libRoots)
                 if (mergedJars.isNotEmpty()) {
-                    appendLine("=== Minecraft / MDG merged artifacts (Forge or NeoForge) ===")
+                    appendLine("=== Minecraft / MDG merged artifacts ===")
                     for (path in mergedJars) {
                         appendLine("  $path")
                     }

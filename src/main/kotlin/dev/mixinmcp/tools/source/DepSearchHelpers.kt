@@ -9,6 +9,8 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
+import dev.mixinmcp.cache.DecompilationCacheService
+import dev.mixinmcp.cache.MixinDecompiledRootsProvider
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
 
@@ -73,7 +75,14 @@ internal fun collectSourceRootsWithMetadata(project: Project): List<SourceRootIn
                 val libName: String = lib.name ?: "(unnamed)"
                 lib.getFiles(OrderRootType.SOURCES)?.forEach { root ->
                     if (seen.add(root)) {
-                        result.add(SourceRootInfo(root, "Library SOURCES: $libName"))
+                        // Cache dirs attached by SourceAutoAttacher keep their decompiled label so the
+                        // library/decompiled roots contract of mixin_search_in_deps holds.
+                        val label: String = if (DecompilationCacheService.isDecompiledCachePath(root.path)) {
+                            "Decompiled cache (MixinMCP)"
+                        } else {
+                            "Library SOURCES: $libName"
+                        }
+                        result.add(SourceRootInfo(root, label))
                     }
                 }
             }
@@ -81,6 +90,7 @@ internal fun collectSourceRootsWithMetadata(project: Project): List<SourceRootIn
     }
 
     for (provider in AdditionalLibraryRootsProvider.EP_NAME.extensionList) {
+        if (provider !is MixinDecompiledRootsProvider) continue
         for (synthLib in provider.getAdditionalProjectLibraries(project)) {
             for (root in synthLib.sourceRoots) {
                 if (seen.add(root)) {
@@ -109,7 +119,7 @@ internal fun classifySourceFile(project: Project, vf: VirtualFile): String {
     val projectPath = project.basePath?.replace('\\', '/')
     if (projectPath != null && normPath.startsWith(projectPath)) {
         if (isGradleToolchainMergedOrBinaryInBuild(normPath, projectPath)) {
-            return "MDG merged artifact (Forge/NeoForge binary .class under build/)"
+            return "MDG merged artifact (binary .class under build/)"
         }
         return "Project source"
     }
@@ -134,7 +144,7 @@ internal fun isGradleToolchainMergedOrBinaryInBuild(filePath: String, projectPat
 }
 
 /**
- * Detects MDG merged JARs (Forge or NeoForge) and similar Minecraft artifacts in the project build directory.
+ * Detects MDG merged JARs (vanilla, Forge, or NeoForge) and similar Minecraft artifacts in the project build directory.
  * They contain vanilla + loader game classes; MixinMCP also registers them as Library SOURCES when possible
  * so dependency grep can see `.java` entries (or Gradle universal *-sources.jar fallback).
  */

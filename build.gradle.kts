@@ -5,7 +5,7 @@ import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 plugins {
     id("java") // Java support
     alias(libs.plugins.kotlin) // Kotlin support
-    id("org.jetbrains.kotlin.plugin.serialization") version "2.3.0" // @Serializable for MCP tool args
+    alias(libs.plugins.kotlinSerialization) // @Serializable for MCP tool args
     alias(libs.plugins.intelliJPlatform) // IntelliJ Platform Gradle Plugin
     alias(libs.plugins.changelog) // Gradle Changelog Plugin
     alias(libs.plugins.qodana) // Gradle Qodana Plugin
@@ -28,6 +28,14 @@ repositories {
     intellijPlatform {
         defaultRepositories()
     }
+}
+
+// The IDE provides the Kotlin stdlib and org.jetbrains annotations at runtime; never ship our own
+// copies even when transitive deps (mapping-io, kotlinx-serialization) pull them in.
+// See https://plugins.jetbrains.com/docs/intellij/using-kotlin.html
+configurations.runtimeClasspath {
+    exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib")
+    exclude(group = "org.jetbrains", module = "annotations")
 }
 
 // Dependencies are managed with Gradle version catalog - read more: https://docs.gradle.org/current/userguide/version_catalogs.html

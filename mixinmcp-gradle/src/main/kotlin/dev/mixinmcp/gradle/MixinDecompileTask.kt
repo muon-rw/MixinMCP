@@ -73,6 +73,10 @@ abstract class MixinDecompileTask : DefaultTask() {
     @get:Internal
     var publishedSourcesJarsProvider: Provider<Map<String, File>>? = null
 
+    /** Set by MixinDecompilePlugin at configuration time; used to purge corrupt cached downloads. */
+    @get:Internal
+    var gradleUserHome: File? = null
+
     private val globalCacheRoot: Path
         get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
 
@@ -112,13 +116,18 @@ abstract class MixinDecompileTask : DefaultTask() {
             .filter { !isJdkJar(it.file) }
             .sortedBy { it.file.length() }
 
+        // Toolchain Minecraft jars (group net.minecraft, e.g. Loom's minecraft-merged) are never
+        // mirrored: once genSources output exists the IDE attaches it directly, and the manifest
+        // prune below drops any earlier decompiled entry. Without it they stay in withoutSources
+        // and are decompiled as the genSources-free fallback.
         val withPublishedSources = resolvedArtifacts
             .filter { it.variant.owner is ModuleComponentIdentifier }
             .filter { it.file.extension.equals("jar", ignoreCase = true) }
             .filter { !isJdkJar(it.file) }
             .filter { artifact ->
                 val owner = artifact.variant.owner as ModuleComponentIdentifier
-                "${owner.group}:${owner.module}:${owner.version}" in publishedSourcesJars
+                owner.group != "net.minecraft" &&
+                    "${owner.group}:${owner.module}:${owner.version}" in publishedSourcesJars
             }
             .sortedBy { it.file.length() }
 
@@ -128,6 +137,7 @@ abstract class MixinDecompileTask : DefaultTask() {
         var cached = 0
         var skipped = 0
         var failed = 0
+        var corruptPurged = 0
         var publishedMirrored = 0
         var publishedCached = 0
         var publishedFailed = 0
@@ -141,17 +151,28 @@ abstract class MixinDecompileTask : DefaultTask() {
         for ((index, artifact) in withoutSources.withIndex()) {
             val jarFile = artifact.file
             val jarPath = jarFile.absolutePath
+            val owner = artifact.variant.owner as ModuleComponentIdentifier
+            val libraryName = "${owner.group}:${owner.module}:${owner.version}"
+            val progress = "[${index + 1}/$total]"
+
+            // Raw cached jars are validated even when artifact.file is a healthy transform output:
+            // streaming remap transforms can "succeed" on a cleanly-truncated download and emit a
+            // valid but classless jar, which caches as a successful transform.
+            val rawPurged: Boolean = purgeCachedVersionDirIfCorrupt(owner)
+            if (rawPurged || !isValidZip(jarFile)) {
+                logCorruptDownload(progress, libraryName, rawPurged)
+                corruptPurged++
+                continue
+            }
+
             val jarSize = jarFile.length()
             val jarModified = jarFile.lastModified()
             val hash = DecompilationManifest.computeArtifactHashMemoized(jarFile, hashMemo)
             currentJarHashes.add(hash)
 
-            val owner = artifact.variant.owner as ModuleComponentIdentifier
-            val libraryName = "${owner.group}:${owner.module}:${owner.version}"
             val sizeMb = jarSize / 1024 / 1024
             val sizeKb = jarSize / 1024
             val sizeStr = if (sizeMb > 0) "${sizeMb}MB" else "${sizeKb}KB"
-            val progress = "[${index + 1}/$total]"
 
             val cacheDir = globalCacheRoot.resolve(hash).toFile()
 
@@ -231,15 +252,22 @@ abstract class MixinDecompileTask : DefaultTask() {
         for ((index, artifact) in withPublishedSources.withIndex()) {
             val jarFile = artifact.file
             val jarPath = jarFile.absolutePath
-            val jarSize = jarFile.length()
-            val jarModified = jarFile.lastModified()
-            val hash = DecompilationManifest.computeArtifactHashMemoized(jarFile, hashMemo)
-            currentJarHashes.add(hash)
-
             val owner = artifact.variant.owner as ModuleComponentIdentifier
             val libraryName = "${owner.group}:${owner.module}:${owner.version}"
             val sourcesJar = publishedSourcesJars[libraryName]!!
             val progress = "[published ${index + 1}/$publishedTotal]"
+
+            val rawPurged: Boolean = purgeCachedVersionDirIfCorrupt(owner)
+            if (rawPurged || !isValidZip(jarFile) || !isValidZip(sourcesJar)) {
+                logCorruptDownload(progress, libraryName, rawPurged)
+                corruptPurged++
+                continue
+            }
+
+            val jarSize = jarFile.length()
+            val jarModified = jarFile.lastModified()
+            val hash = DecompilationManifest.computeArtifactHashMemoized(jarFile, hashMemo)
+            currentJarHashes.add(hash)
 
             val cacheDir = globalCacheRoot.resolve(hash).toFile()
 
@@ -296,7 +324,8 @@ abstract class MixinDecompileTask : DefaultTask() {
 
         logger.lifecycle(
             "MixinMCP complete: decompile — $decompiled new, $cached cached, $skipped skipped (heap), $failed failed (of $total); " +
-                "published sources — $publishedMirrored mirrored, $publishedCached cached, $publishedFailed failed (of $publishedTotal)",
+                "published sources — $publishedMirrored mirrored, $publishedCached cached, $publishedFailed failed (of $publishedTotal)" +
+                if (corruptPurged > 0) "; $corruptPurged corrupt download(s) purged, re-sync to re-download" else "",
         )
 
         if (skipped > 0) {
@@ -310,8 +339,23 @@ abstract class MixinDecompileTask : DefaultTask() {
         val unresolvedMarker = projectManifestRoot.resolve(UNRESOLVED_MARKER_FILE)
         if (resolutionFailures.isNotEmpty()) {
             logger.warn("")
-            logger.warn("MixinMCP: ${resolutionFailures.size} artifact(s) could not be resolved " +
-                "(likely due to missing mapping data during first sync).")
+            logger.warn("MixinMCP: ${resolutionFailures.size} artifact(s) could not be resolved:")
+            for (failure in resolutionFailures.take(5)) {
+                logger.warn("MixinMCP:   ${describeFailure(failure)}")
+            }
+            if (resolutionFailures.size > 5) {
+                logger.warn("MixinMCP:   ... and ${resolutionFailures.size - 5} more")
+            }
+            val purged: List<String> = purgeCorruptCachedArtifacts(resolutionFailures)
+            if (purged.isNotEmpty()) {
+                logger.warn(
+                    "MixinMCP: ${purged.size} of these were corrupt or truncated downloads; purged from the " +
+                        "Gradle cache, re-sync to re-download: ${purged.joinToString(limit = 6)}",
+                )
+            }
+            if (purged.size < resolutionFailures.size) {
+                logger.warn("MixinMCP: Other failures are often mapping data missing during a first sync.")
+            }
             logger.warn("MixinMCP: Run './gradlew genDependencySources' manually after a successful Gradle sync to decompile them.")
             logger.warn("")
             Files.createDirectories(projectManifestRoot)
@@ -352,6 +396,72 @@ abstract class MixinDecompileTask : DefaultTask() {
         try {
             Files.setLastModifiedTime(dir, FileTime.fromMillis(System.currentTimeMillis()))
         } catch (_: Exception) {}
+    }
+
+    private fun isValidZip(file: File): Boolean =
+        try {
+            ZipFile(file).use { true }
+        } catch (_: Exception) {
+            false
+        }
+
+    private fun logCorruptDownload(progress: String, libraryName: String, purged: Boolean) {
+        if (purged) {
+            logger.warn("$progress Corrupt or truncated download purged from the Gradle cache: $libraryName. Re-sync to re-download.")
+        } else {
+            logger.warn("$progress Corrupt jar skipped (not found in the Gradle artifact cache): $libraryName")
+        }
+    }
+
+    private fun purgeCachedVersionDirIfCorrupt(owner: ModuleComponentIdentifier): Boolean =
+        purgeCachedVersionDirIfCorrupt(owner.group, owner.module, owner.version)
+
+    /**
+     * Some repositories (cursemaven) serve chunked responses without checksums, so Gradle caches
+     * truncated downloads as if complete and never retries them. Deleting the version dir makes
+     * the next resolution re-fetch.
+     */
+    private fun purgeCachedVersionDirIfCorrupt(group: String, module: String, version: String): Boolean {
+        val home: File = gradleUserHome ?: return false
+        val versionDir: File = home.resolve("caches/modules-2/files-2.1/$group/$module/$version")
+        if (!versionDir.isDirectory) return false
+        val jars: List<File> = versionDir.walkTopDown().filter { it.extension.equals("jar", ignoreCase = true) }.toList()
+        if (jars.isEmpty() || jars.all { isValidZip(it) }) return false
+        deleteRecursively(versionDir)
+        return true
+    }
+
+    private val failureGavPattern = Regex("""\(([\w.-]+):([\w.-]+):([^):\s]+)\)""")
+
+    private fun purgeCorruptCachedArtifacts(failures: List<Throwable>): List<String> {
+        val purged = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        for (failure in failures) {
+            var t: Throwable? = failure
+            var match: MatchResult? = null
+            while (t != null && match == null) {
+                match = t.message?.let { failureGavPattern.find(it) }
+                val next: Throwable? = t.cause
+                t = if (next === t) null else next
+            }
+            val (group, module, version) = match?.destructured ?: continue
+            val gav = "$group:$module:$version"
+            if (!seen.add(gav)) continue
+            if (purgeCachedVersionDirIfCorrupt(group, module, version)) {
+                purged.add(gav)
+            }
+        }
+        return purged
+    }
+
+    private fun describeFailure(t: Throwable): String {
+        var root: Throwable = t
+        while (root.cause != null && root.cause !== root) {
+            root = root.cause!!
+        }
+        val top: String = (t.message ?: t.toString()).lineSequence().first()
+        if (root === t) return top
+        return "$top <- ${root.javaClass.simpleName}: ${root.message ?: ""}".trim()
     }
 
     private fun isJdkJar(jarFile: File): Boolean {

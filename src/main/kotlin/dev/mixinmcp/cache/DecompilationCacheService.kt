@@ -27,9 +27,6 @@ import java.nio.file.Paths
 @Service(Service.Level.PROJECT)
 class DecompilationCacheService(private val project: Project) {
 
-    private val globalCacheRoot: Path
-        get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
-
     /**
      * Ensure the VFS knows about the entire cache directory tree. Must be
      * called outside of read lock (e.g. from startup activity) before
@@ -61,7 +58,7 @@ class DecompilationCacheService(private val project: Project) {
 
             val virtualFile = LocalFileSystem.getInstance().findFileByIoFile(cachePath.toFile())
             if (virtualFile != null) {
-                result.add(CachedLibraryInfo(entry.libraryName, hash, virtualFile))
+                result.add(CachedLibraryInfo(entry.libraryName, hash, entry.classesJarPath, virtualFile))
             } else {
                 noVirtualFile++
             }
@@ -116,11 +113,28 @@ class DecompilationCacheService(private val project: Project) {
     data class CachedLibraryInfo(
         val libraryName: String,
         val artifactHash: String,
-        val root: com.intellij.openapi.vfs.VirtualFile,
+        val classesJarPath: String,
+        val root: VirtualFile,
     )
 
     companion object {
         private val LOG = Logger.getInstance(DecompilationCacheService::class.java)
+
+        val globalCacheRoot: Path
+            get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
+
+        fun isDecompiledCachePath(path: String): Boolean {
+            val norm: String = path.replace('\\', '/').trimEnd('/')
+            val root: String = globalCacheRoot.toString().replace('\\', '/').trimEnd('/')
+            return norm == root || norm.startsWith("$root/")
+        }
+
+        fun normalizeJarDiskPath(path: String): String {
+            var p: String = path.replace('\\', '/')
+            val bang: Int = p.indexOf('!')
+            if (bang >= 0) p = p.substring(0, bang)
+            return p.trimEnd('/').lowercase()
+        }
 
         fun getInstance(project: Project): DecompilationCacheService =
             project.service()

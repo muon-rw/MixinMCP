@@ -234,7 +234,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
     /**
      * Lists classpath entry names under [bundlePrefix]/.
      *
-     * Uses a stable anchor resource URL — not [Class.protectionDomain.codeSource], which often
+     * Uses a stable anchor resource URL — not `Class.protectionDomain.codeSource`, which often
      * points at `classes/kotlin/main` while `src/main/resources` lands in `classes/java/main`,
      * so `inject/` would be missing from that path.
      */
@@ -331,62 +331,62 @@ class RuleInjectionStartupActivity : ProjectActivity {
 
         private const val BUNDLE_CURSOR = "inject/cursor"
         private const val BUNDLE_CLAUDE = "inject/claude"
+    }
+}
 
-        private val LEGACY_CURSOR_RULE_FILES = listOf("mixinmcp.mdc", "mixin-reference.mdc")
+private val LEGACY_CURSOR_RULE_FILES = listOf("mixinmcp.mdc", "mixin-reference.mdc")
 
-        private val MC_BUILD_PLUGIN_PATTERNS = listOf(
-            "fabric-loom",
-            "net.fabricmc.loom",
-            "net.neoforged.gradle",
-            "net.neoforged.moddev",
-            "net.minecraftforge.gradle",
-            "dev.architectury",
-            "org.quiltmc.loom",
-        )
+private val MC_BUILD_PLUGIN_PATTERNS = listOf(
+    "fabric-loom",
+    "net.fabricmc.loom",
+    "net.neoforged.gradle",
+    "net.neoforged.moddev",
+    "net.minecraftforge.gradle",
+    "dev.architectury",
+    "org.quiltmc.loom",
+)
 
-        fun hasGradlePlugin(root: Path): Boolean {
-            if (Files.exists(root.resolve(".gradle/mixinmcp/manifest.json"))) return true
+internal fun hasGradlePlugin(root: Path): Boolean {
+    if (Files.exists(root.resolve(".gradle/mixinmcp/manifest.json"))) return true
 
-            fun buildFileContainsPlugin(file: Path): Boolean {
-                if (!Files.exists(file)) return false
-                return try {
-                    "dev.mixinmcp.decompile" in Files.readString(file)
-                } catch (_: IOException) {
-                    false
-                }
-            }
-
-            return buildFileContainsPlugin(root.resolve("build.gradle")) ||
-                buildFileContainsPlugin(root.resolve("build.gradle.kts"))
+    fun buildFileContainsPlugin(file: Path): Boolean {
+        if (!Files.exists(file)) return false
+        return try {
+            "dev.mixinmcp.decompile" in Files.readString(file)
+        } catch (_: IOException) {
+            false
         }
+    }
 
-        fun isMinecraftProject(root: Path): Boolean {
-            // Fabric
-            if (Files.exists(root.resolve("fabric.mod.json")) ||
-                Files.exists(root.resolve("src/main/resources/fabric.mod.json"))
-            ) return true
+    return buildFileContainsPlugin(root.resolve("build.gradle")) ||
+        buildFileContainsPlugin(root.resolve("build.gradle.kts"))
+}
 
-            // Forge / NeoForge
-            if (Files.exists(root.resolve("src/main/resources/META-INF/mods.toml")) ||
-                Files.exists(root.resolve("src/main/resources/META-INF/neoforge.mods.toml"))
-            ) return true
+internal fun isMinecraftProject(root: Path): Boolean {
+    // Fabric
+    if (Files.exists(root.resolve("fabric.mod.json")) ||
+        Files.exists(root.resolve("src/main/resources/fabric.mod.json"))
+    ) return true
 
-            // MixinMCP Gradle plugin already configured
-            if (Files.exists(root.resolve(".gradle/mixinmcp/manifest.json"))) return true
+    // Forge / NeoForge
+    if (Files.exists(root.resolve("src/main/resources/META-INF/mods.toml")) ||
+        Files.exists(root.resolve("src/main/resources/META-INF/neoforge.mods.toml"))
+    ) return true
 
-            // Scan build files for Minecraft-related plugin IDs
-            return hasMcPluginInBuildFile(root.resolve("build.gradle")) ||
-                hasMcPluginInBuildFile(root.resolve("build.gradle.kts"))
-        }
+    // MixinMCP Gradle plugin already configured
+    if (Files.exists(root.resolve(".gradle/mixinmcp/manifest.json"))) return true
 
-        private fun hasMcPluginInBuildFile(buildFile: Path): Boolean {
-            if (!Files.exists(buildFile)) return false
-            return try {
-                val content = Files.readString(buildFile)
-                MC_BUILD_PLUGIN_PATTERNS.any { it in content }
-            } catch (_: IOException) {
-                false
-            }
-        }
+    // Scan build files for Minecraft-related plugin IDs
+    return hasMcPluginInBuildFile(root.resolve("build.gradle")) ||
+        hasMcPluginInBuildFile(root.resolve("build.gradle.kts"))
+}
+
+private fun hasMcPluginInBuildFile(buildFile: Path): Boolean {
+    if (!Files.exists(buildFile)) return false
+    return try {
+        val content = Files.readString(buildFile)
+        MC_BUILD_PLUGIN_PATTERNS.any { it in content }
+    } catch (_: IOException) {
+        false
     }
 }

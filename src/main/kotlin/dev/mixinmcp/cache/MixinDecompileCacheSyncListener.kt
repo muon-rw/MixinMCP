@@ -33,7 +33,7 @@ class MixinDecompileCacheSyncListener : ExternalSystemTaskNotificationListener {
                     project, null, emptyList(), newRoots, "mixinmcp-decompiled",
                 )
             }
-            SourceAutoAttacher.schedule(project, "gradle-sync")
+            SourceAutoAttacher.getInstance(project).schedule("gradle-sync")
         }
 
         checkForUnresolvedArtifacts(project, projectPath)
