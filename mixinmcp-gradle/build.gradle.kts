@@ -18,7 +18,7 @@ java {
 }
 
 dependencies {
-    implementation("org.vineflower:vineflower:1.11.2")
+    implementation("org.vineflower:vineflower:1.12.0")
     implementation(gradleApi())
     implementation("com.google.code.gson:gson:2.11.0")
 }
