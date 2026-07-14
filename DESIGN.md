@@ -2,9 +2,6 @@
 
 ## Design & Implementation Reference
 
-> **Status:** Core tools complete and tested end-to-end on Fabric 1.21 and Forge 1.20.1.
-> Decompilation cache implemented (Section 11): Gradle plugin decompiles, IDE reads.
-
 ---
 
 ## Table of Contents
@@ -15,121 +12,85 @@
 4. [Project Structure](#4-project-structure)
 5. [Build Configuration](#5-build-configuration)
 6. [Plugin Registration (plugin.xml)](#6-plugin-registration-pluginxml)
-7. [Shared Utilities](#7-shared-utilities)
+7. [Shared Utilities](#7-shared-utilities-devmixinmcpresolve)
 8. [Tool Definitions](#8-tool-definitions)
-9. [Acceptance Test](#9-acceptance-test)
-10. [Known Pitfalls & Edge Cases](#10-known-pitfalls--edge-cases)
-11. [Decompilation Cache](#11-decompilation-cache)
-    - [11.10 Timing — Tools vs. Background Decompilation](#1110-resolved-timing--tools-vs-background-decompilation)
-    - [11.11 Gradle Plugin for Decompilation](#1111-gradle-plugin-for-decompilation)
-12. [Enhancements](#13-enhancements-implemented)
-    - [13.1 JVM Method Descriptor Support](#131-jvm-method-descriptor-support-methoddescriptor-parameter--done)
-    - [13.2 Vanilla Minecraft Source Root Coverage](#132-vanilla-minecraft-source-root-coverage--partial-diagnostic-tool-done)
-    - [13.3 Mixin Conflict Detection Tool](#133-mixin-conflict-detection-tool-mixin_find_targeting_mixins--done)
-13. [License](#14-license)
+9. [Mappings Subsystem](#9-mappings-subsystem-devmixinmcpmappings)
+10. [Decompilation Cache](#10-decompilation-cache)
+11. [Source Auto-Attach](#11-source-auto-attach)
+12. [Rules & Skills Injection](#12-rules--skills-injection)
+13. [Settings](#13-settings)
+14. [Testing](#14-testing)
+15. [Known Pitfalls & Edge Cases](#15-known-pitfalls--edge-cases)
+16. [License](#16-license)
 
 ---
 
 ## 1. What This Plugin Does
 
-MixinMCP is an IntelliJ Platform plugin that extends the **built-in MCP Server** (available
-since IntelliJ IDEA 2025.2) with 16 tools purpose-built for Minecraft mod development —
-particularly mixin authoring, dependency navigation, and bytecode inspection.
+MixinMCP is an IntelliJ Platform plugin that extends the IDE's built-in MCP Server with
+19 tools for Minecraft mod development: mixin authoring, dependency navigation, bytecode
+inspection, mappings lookup, and reference-aware refactoring. A companion Gradle plugin
+(`dev.mixinmcp.decompile`) decompiles dependencies without published sources into a cache
+the IntelliJ plugin indexes, so the tools see the full compiled classpath.
 
-It registers tools via the `com.intellij.mcpServer` extension point so they appear
-alongside the built-in tools with **zero additional configuration** for the MCP client
-(Cursor, Claude Code, Claude Desktop, etc.). Users install the plugin, restart IntelliJ,
-and the tools are immediately available.
+Tools register via the `com.intellij.mcpServer` extension point and appear in the same
+MCP server the client (Cursor, Claude Code, Claude Desktop, etc.) already has configured:
+no second port, no extra client configuration.
 
 ### Why build this?
 
-The built-in MCP Server has ~15 tools but they operate almost entirely on **project files**.
-File search, symbol info, and inspections explicitly exclude libraries and external
-dependencies. For Minecraft mod development with 50–100 dependencies (remapped Minecraft
-sources, mod APIs, libraries), the LLM is blind to the vast majority of the codebase it
-needs to understand.
+The built-in MCP Server's tools operate almost entirely on project files. File search,
+symbol info, and inspections exclude libraries and external dependencies. A Minecraft mod
+project has 50 to 100 dependencies (remapped Minecraft sources, mod APIs, libraries) that
+are invisible to the LLM through those tools.
 
-Additionally, **no existing MCP tool** exposes bytecode-level information. Mixin development
-frequently requires targeting synthetic methods (lambdas, bridge methods) that exist only in
-compiled `.class` files and are invisible in decompiled source.
+No built-in tool exposes bytecode. Mixin development frequently targets synthetic methods
+(lambdas, bridge methods) that exist only in compiled `.class` files and are invisible in
+decompiled source.
 
 ---
 
 ## 2. Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     IntelliJ IDEA 2025.2+                       │
-│                                                                 │
-│  ┌──────────────────────┐    ┌────────────────────────────────┐ │
-│  │  Built-in MCP Server │    │  MixinMCP Plugin               │ │
-│  │                      │    │                                │ │
-│  │  • get_symbol_info   │    │  Registers via EP:             │ │
-│  │  • get_file_problems │◄───│  com.intellij.mcpServer        │ │
-│  │  • search_in_files   │    │                                │ │
-│  │  • execute_terminal  │    │  ┌──────────────────────────┐  │ │
-│  │  • rename_refactoring│    │  │  Four McpToolset classes │  │ │
-│  │  • ... (15+ tools)   │    │  │  (16 tools total)        │  │ │
-│  │                      │    │  │                          │  │ │
-│  │  SSE / Stdio         │    │  │  SourceNavigationToolset:│  │ │
-│  │  transport            │    │  │  • mixin_find_class      │  │ │
-│  └──────┬───────────────┘    │  │  • mixin_search_symbols  │  │ │
-│         │                    │  │  • mixin_search_in_deps  │  │ │
-│         │  Exposes all       │  │  • mixin_get_dep_source  │  │ │
-│         │  tools unified     │  │  • mixin_list_source_... │  │ │
-│         │                    │  │                          │  │ │
-│         ▼                    │  │  SemanticNavigationTools.│  │ │
-│  ┌──────────────┐            │  │  • mixin_type_hierarchy  │  │ │
-│  │ MCP Protocol │            │  │  • mixin_find_impls      │  │ │
-│  │ (to Cursor)  │            │  │  • mixin_find_targeting..│  │ │
-│  └──────────────┘            │  │  • mixin_super_methods   │  │ │
-│                              │  │  • mixin_find_overrides  │  │ │
-│                              │  │  • mixin_find_references │  │ │
-│                              │  │  • mixin_call_hierarchy  │  │ │
-│                              │  │                          │  │ │
-│                              │  │  BytecodeInspectionTools.│  │ │
-│                              │  │  • mixin_class_bytecode  │  │ │
-│                              │  │  • mixin_method_bytecode │  │ │
-│                              │  │                          │  │ │
-│                              │  │  ProjectManagementTools.:│  │ │
-│                              │  │  • mixin_sync_project    │  │ │
-│                              │  └──────────────────────────┘  │ │
-│                              │                                │ │
-│                              │  ┌──────────────────────────┐  │ │
-│                              │  │  Shared Utilities        │  │ │
-│                              │  │  • FqcnResolver          │  │ │
-│                              │  │  • ClassFileLocator      │  │ │
-│                              │  │  • MethodResolver        │  │ │
-│                              │  │  • BytecodeAnalyzer      │  │ │
-│                              │  └──────────────────────────┘  │ │
-│                              └────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  IntelliJ IDEA (built-in MCP Server, SSE/stdio to the client)    │
+│                                                                  │
+│  MixinMCP plugin, registered via com.intellij.mcpServer EP:      │
+│  ├── SourceNavigationToolset    (5 tools)                        │
+│  ├── SemanticNavigationToolset  (7 tools)                        │
+│  ├── BytecodeInspectionToolset  (2 tools)                        │
+│  ├── ProjectManagementToolset   (4 tools)                        │
+│  ├── MappingsToolset            (1 tool)                         │
+│  │                                                               │
+│  ├── resolve/   shared PSI/bytecode resolution (Section 7)       │
+│  ├── mappings/  mappings download + query      (Section 9)       │
+│  ├── cache/     decompilation cache reader,                      │
+│  │              source auto-attach             (Sections 10, 11) │
+│  ├── rules/     agent skill/rule injection     (Section 12)      │
+│  └── settings/  Settings > Tools > MixinMCP    (Section 13)      │
+└──────────────────────────────────────────────────────────────────┘
+                    ▲  reads manifests + decompiled sources
+┌──────────────────────────────────────────────────────────────────┐
+│  mixinmcp-gradle (dev.mixinmcp.decompile)                        │
+│  genDependencySources: decompiles or mirrors dependency sources  │
+│  into ~/.cache/mixinmcp/decompiled; runs on every IDE sync       │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-Because we register via the `com.intellij.mcpServer` extension point, our tools appear in
-the **same** MCP server the user already has configured. No second port, no second
-connection.
+The MCP client sees a flat tool list; the toolset split exists to keep each file small
+enough to read end-to-end.
 
 ---
 
 ## 3. The McpToolset Contract
 
-Tools are defined as annotated suspend functions on `McpToolset` implementations,
-one class per category (`SourceNavigationToolset`, `SemanticNavigationToolset`,
-`BytecodeInspectionToolset`, `ProjectManagementToolset`). The MCP framework
-discovers tools via `@McpTool` annotations at runtime; the MCP client sees a
-flat tool list with no visible grouping.
+Tools are annotated suspend functions on `McpToolset` implementations, one class per
+category. The MCP framework discovers `@McpTool` methods at runtime.
 
 ### The Pattern
 
 ```kotlin
-import com.intellij.mcpserver.McpToolCallResult
-import com.intellij.mcpserver.McpToolset
-import com.intellij.mcpserver.annotations.McpDescription
-import com.intellij.mcpserver.annotations.McpTool
-import com.intellij.mcpserver.projectOrNull
-import kotlin.coroutines.coroutineContext
-
 class SourceNavigationToolset : McpToolset {
 
     @McpTool
@@ -137,44 +98,46 @@ class SourceNavigationToolset : McpToolset {
     suspend fun mixin_tool_name(
         requiredParam: String,
         optionalParam: Int = 42,
-        projectPath: String? = null,
     ): McpToolCallResult {
-        val project = coroutineContext.projectOrNull
-            ?: return McpToolCallResult.error("No project open")
+        val project = coroutineContext.requireProject { return it }
 
-        // PSI access MUST be wrapped in ReadAction.compute { }
-        return McpToolCallResult.text("result")
+        val text = ReadAction.nonBlocking<String> {
+            // PSI access
+        }.inSmartMode(project).executeSynchronously()
+
+        return McpToolCallResult.text(text)
     }
 }
 ```
 
 ### Critical Details
 
-- **Function name** becomes the MCP tool name (e.g. `mixin_find_class`).
-- **Parameters** become JSON parameters; default values make them optional.
-- **Project resolution** via `coroutineContext.projectOrNull` (not a function parameter).
-- **Return type** is always `McpToolCallResult` — use `.text()` for success, `.error()` for errors.
-- **Threading:** Tool functions are suspend. PSI access requires `ReadAction.compute<T, Throwable> { }`.
-  Write operations (e.g. sync) require EDT dispatch via `ApplicationManager.getApplication().invokeLater { }`.
-- **`@McpDescription`:** The string in this annotation is what the LLM sees. Dollar signs must
-  be escaped (`\$`) or Kotlin treats them as string templates.
+- **Function name** becomes the MCP tool name (e.g. `mixin_find_class`). Parameters
+  become JSON parameters; default values make them optional.
+- **Project resolution.** The framework injects an optional top-level `projectPath`
+  argument into every tool schema; tools do not declare it themselves
+  (`mixin_sync_project` is the one exception, using it as the external-system path).
+  When several IDE windows are open and `projectPath` is omitted,
+  `coroutineContext.projectOrNull` throws `McpExpectedError` instead of returning null.
+  `requireProject` (`tools/ProjectResolution.kt`) converts that into an error listing
+  every open project path and instructing a retry with `projectPath`; `softProject()`
+  returns null instead, for tools where the project is optional
+  (`mixin_mappings_lookup`).
+- **Return type** is always `McpToolCallResult`: `.text()` for success, `.error()` for
+  errors.
+- **Threading.** Tool functions run on background threads without a read lock. PSI reads
+  go through `ReadAction.nonBlocking { }.inSmartMode(project).executeSynchronously()`,
+  which yields to pending writers and waits out indexing instead of failing in dumb mode.
+  Write operations dispatch to the EDT: `WriteCommandAction` for PSI mutation
+  (safe-delete, move), `invokeLater` for sync.
+- **`@McpDescription`** is what the LLM sees. Dollar signs must be escaped (`\$`) or
+  Kotlin treats them as string templates.
 
 ### Registration in plugin.xml
 
-```xml
-<depends>com.intellij.mcpServer</depends>
-
-<extensions defaultExtensionNs="com.intellij.mcpServer">
-    <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
-    <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
-    <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
-    <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
-</extensions>
-```
-
-One `<mcpToolset>` entry per class; all `@McpTool`-annotated methods are discovered
-automatically. Adding a new category means adding a new class and a new registration;
-adding a tool to an existing category just means another method.
+One `<mcpToolset>` entry per class (see Section 6); all `@McpTool` methods are discovered
+automatically. A new category means a new class and registration; a new tool in an
+existing category is just another method.
 
 **IMPORTANT:** The extension namespace is `com.intellij.mcpServer` (capital S). Lowercase
 silently fails to register tools.
@@ -186,75 +149,83 @@ silently fails to register tools.
 ```
 MixinMCP/
 ├── build.gradle.kts                   # IntelliJ plugin build
-├── settings.gradle.kts                # Includes mixinmcp-gradle module
-├── gradle.properties
-├── gradle/libs.versions.toml          # Version catalog
-├── DESIGN.md                          ← This file
-├── README.md                          # User-facing docs + cursor rule
-├── src/                               # IntelliJ plugin (IDE-side)
-│   └── main/
-│       ├── kotlin/dev/mixinmcp/
-│       │   ├── tools/
-│       │   │   ├── source/
-│       │   │   │   ├── SourceNavigationToolset.kt   # 5 tools
-│       │   │   │   └── DepSearchHelpers.kt           # dep-search helpers
-│       │   │   ├── semantic/
-│       │   │   │   ├── SemanticNavigationToolset.kt  # 7 tools
-│       │   │   │   ├── CallHierarchyExpander.kt      # recursive call hierarchy walk
-│       │   │   │   └── MixinAnnotationHelpers.kt     # mixin annotation helpers
-│       │   │   ├── bytecode/
-│       │   │   │   └── BytecodeInspectionToolset.kt  # 2 tools
-│       │   │   └── project/
-│       │   │       └── ProjectManagementToolset.kt   # mixin_sync_project
-│       │   ├── cache/
-│       │   │   ├── DecompilationCacheService.kt  # Read-only cache consumer
-│       │   │   ├── DecompilationManifest.kt      # Manifest format (kotlinx-serialization)
-│       │   │   ├── MixinDecompiledRootsProvider.kt # SyntheticLibrary roots
-│       │   │   ├── MixinDecompileCacheSyncListener.kt  # Re-index after sync
-│       │   │   └── MixinDecompileCacheStartupActivity.kt # Attach roots on open
-│       │   └── util/
-│       │       ├── FqcnResolver.kt    # FQCN → PsiClass (allScope)
-│       │       ├── MethodResolver.kt  # Class + name → PsiMethod
-│       │       ├── ClassFileLocator.kt# FQCN → raw .class bytes
-│       │       └── BytecodeAnalyzer.kt# ASM-based bytecode parsing
-│       └── resources/
-│           └── META-INF/
-│               └── plugin.xml
-├── mixinmcp-gradle/                   # Gradle plugin (decompilation)
-│   ├── build.gradle.kts
-│   └── src/main/kotlin/dev/mixinmcp/gradle/
-│       ├── MixinDecompilePlugin.kt    # Plugin entry point
-│       ├── MixinDecompileTask.kt      # ./gradlew genDependencySources
-│       ├── DecompilationManifest.kt   # Manifest format (Gson)
-│       └── CacheEntry.kt             # Cache entry data class
-└── src/test/kotlin/dev/mixinmcp/
-    └── ...
+├── settings.gradle.kts                # includes mixinmcp-gradle
+├── gradle/libs.versions.toml          # version catalog
+├── DESIGN.md                          # this file
+├── README.md                          # user-facing docs
+├── src/main/kotlin/dev/mixinmcp/
+│   ├── tools/
+│   │   ├── ProjectResolution.kt       # requireProject / softProject
+│   │   ├── BytecodeInspectionToolset.kt
+│   │   ├── ProjectManagementToolset.kt
+│   │   ├── source/
+│   │   │   ├── SourceNavigationToolset.kt
+│   │   │   └── DepSearchHelpers.kt    # root collection, regex scan, hints
+│   │   ├── semantic/
+│   │   │   ├── SemanticNavigationToolset.kt
+│   │   │   ├── CallHierarchyExpander.kt
+│   │   │   └── MixinAnnotationHelpers.kt
+│   │   └── mappings/
+│   │       └── MappingsToolset.kt
+│   ├── resolve/                       # shared utilities (Section 7)
+│   │   ├── FqcnResolver.kt
+│   │   ├── MethodResolver.kt
+│   │   ├── ClassFileLocator.kt
+│   │   ├── BytecodeAnalyzer.kt
+│   │   ├── DescriptorParser.kt
+│   │   └── PsiDescriptors.kt
+│   ├── mappings/                      # mappings subsystem (Section 9)
+│   ├── cache/                         # cache reader + auto-attach (10, 11)
+│   │   ├── DecompilationCacheService.kt
+│   │   ├── DecompilationManifest.kt
+│   │   ├── MixinDecompiledRootsProvider.kt
+│   │   ├── MixinDecompileCacheSyncListener.kt
+│   │   ├── MixinDecompileCacheStartupActivity.kt
+│   │   └── SourceAutoAttacher.kt
+│   ├── rules/
+│   │   └── RuleInjectionStartupActivity.kt
+│   └── settings/
+│       ├── MixinMcpSettings.kt
+│       └── MixinMcpSettingsConfigurable.kt
+├── src/main/resources/
+│   ├── META-INF/plugin.xml
+│   └── inject/                        # bundled skills/rules (Section 12)
+│       ├── claude/skills/{mixinmcp-tools, mixin-writing}/
+│       └── cursor/{skills/..., rules/minecraft-mod-project.mdc}
+├── src/test/kotlin/dev/mixinmcp/      # unit tests (Section 14)
+└── mixinmcp-gradle/                   # Gradle plugin (Section 10)
+    └── src/main/kotlin/dev/mixinmcp/gradle/
+        ├── MixinDecompilePlugin.kt
+        ├── MixinDecompileTask.kt      # genDependencySources
+        ├── CleanCacheTask.kt          # cleanSourcesCache
+        ├── DecompilationManifest.kt   # Gson twin of the IDE manifest
+        └── CacheEntry.kt
 ```
 
-Tools are split by category across four `McpToolset` subclasses in
-`tools/{source,semantic,bytecode,project}/`. Each class registers independently in
-`plugin.xml`. Category-scoped helpers sit beside their toolset (e.g. `DepSearchHelpers.kt`
-next to `SourceNavigationToolset.kt`); the split-by-category layout keeps each file small
-enough to read end-to-end while letting the MCP client see a flat, uncategorised tool list.
-
-The `cache/` package in the IntelliJ plugin is a **read-only consumer** of the
-decompilation cache populated by the Gradle plugin. See Section 11 for details.
+Category-scoped helpers sit beside their toolset. The `cache/` package is a read-only
+consumer of the cache the Gradle plugin populates.
 
 ---
 
 ## 5. Build Configuration
 
-Key aspects of the build:
-
-- **Platform:** IntelliJ IDEA Community 2025.2+ (`pluginSinceBuild = 252`)
-- **Bundled plugins:** `com.intellij.java` (Java PSI), `com.intellij.mcpServer` (MCP API)
-- **Dependencies:** ASM 9.7.1 (`asm`, `asm-util`) for bytecode analysis,
-  `kotlinx-serialization-json` for MCP framework compatibility
-- **Java:** 21, **Kotlin:** 2.1.0+
-
-ASM note: IntelliJ bundles its own ASM. The plugin classloader handles this correctly in
-practice. If runtime errors occur with ASM classes, the fallback is to use `javap` via
-process execution.
+- **Platform:** IntelliJ IDEA 2026.1+ (`pluginSinceBuild = 261`; `McpToolset.isEnabled()`
+  is 2026.1+ API). `untilBuild` is unset for forward compatibility.
+- **Bundled plugins:** `com.intellij.java` (Java PSI), `com.intellij.mcpServer` (MCP API).
+- **Libraries** (versions pinned in `gradle/libs.versions.toml`):
+  - ASM `asm` + `asm-util`: IntelliJ bundles ASM, but `asm-util`'s `Textifier` is not
+    accessible to plugins.
+  - `kotlinx-serialization-json`: MCP framework compatibility and manifest parsing.
+  - `net.fabricmc:mapping-io`: parses tiny v1/v2, tsrg/tsrg2, and ProGuard mapping files.
+- **Java toolchain:** 17. Kotlin version comes from the catalog.
+- `runtimeClasspath` excludes `kotlin-stdlib` and `org.jetbrains:annotations`: the IDE
+  provides both, and transitive dependencies must not ship their own copies.
+- The Marketplace description is extracted from README.md between the plugin-description
+  markers; change notes render from CHANGELOG.md via the changelog plugin. Signing and
+  publishing credentials come from environment variables.
+- `mixinmcp-gradle` builds in the same Gradle project, shares the root `pluginVersion`,
+  and publishes plugin id `dev.mixinmcp.decompile` to `https://maven.muon.rip/releases`
+  via `maven-publish`. Its dependencies are Vineflower and Gson.
 
 ---
 
@@ -263,14 +234,8 @@ process execution.
 ```xml
 <idea-plugin>
     <id>dev.mixinmcp</id>
-    <name>MixinMCP - Mixin Development Tools for MCP Server</name>
+    <name>MixinMCP</name>
     <vendor>mixinmcp</vendor>
-
-    <description><![CDATA[
-    Extends the built-in MCP Server with tools for Minecraft mod development:
-    class/symbol lookup in dependencies, type hierarchy traversal,
-    call graph navigation, and bytecode inspection for mixin target resolution.
-    ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
@@ -281,59 +246,99 @@ process execution.
         <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.mappings.MappingsToolset"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <additionalLibraryRootsProvider
+            implementation="dev.mixinmcp.cache.MixinDecompiledRootsProvider"/>
+        <externalSystemTaskNotificationListener
+            implementation="dev.mixinmcp.cache.MixinDecompileCacheSyncListener"/>
+        <postStartupActivity
+            implementation="dev.mixinmcp.cache.MixinDecompileCacheStartupActivity"/>
+        <postStartupActivity
+            implementation="dev.mixinmcp.rules.RuleInjectionStartupActivity"/>
+        <projectConfigurable parentId="tools" id="dev.mixinmcp.settings"
+            displayName="MixinMCP"
+            instance="dev.mixinmcp.settings.MixinMcpSettingsConfigurable"/>
+        <notificationGroup id="MixinMCP" displayType="BALLOON"/>
     </extensions>
 </idea-plugin>
 ```
 
 ---
 
-## 7. Shared Utilities
+## 7. Shared Utilities (dev.mixinmcp.resolve)
 
 ### 7.1 FqcnResolver
 
-Resolves fully-qualified class names to PsiClass instances **including dependency/library
-classes** via `GlobalSearchScope.allScope(project)`. Supports inner classes by progressively
-converting dots to dollar signs.
+Resolves fully qualified class names to `PsiClass` over `GlobalSearchScope.allScope`
+(project + dependencies + JDK). `resolveNested` handles inner classes written with dots
+by progressively converting dots to dollars from the right, and accepts `$` input as-is.
 
 ### 7.2 MethodResolver
 
-Resolves a method within a class by name and optional parameter type list. Falls back to
-`psiClass.methods` if `findMethodsByName` returns empty (happens with some JDK classes).
-Returns all overloads when `parameterTypes` is null; filters by signature when provided.
+Resolves a method by name plus optional `parameterTypes` (simple or canonical names) or
+`methodDescriptor` (JVM format; takes precedence when both are given). `resolveDetailed`
+returns a sealed `Resolution`: `Found(PsiMethod)` or `Error(message)`, where errors list
+the available overloads with ready-to-paste `parameterTypes` values. Runs inside
+`ReadAction.nonBlocking` with smart mode.
 
-`resolveDetailed()` returns a `Resolution` sealed class: `Found(PsiMethod)` or
-`Error(String)` with a diagnostic message listing available overloads and suggesting
-the correct `parameterTypes` values. Tools use this to produce actionable error messages
-instead of bare "Method not found" strings.
+- `findMethodsByName(name, checkBases = true)` with a `psiClass.methods` fallback for JDK
+  classes where the index returns nothing.
+- Multiple matches sharing one canonical signature (an override plus its inherited
+  declaration) are not an ambiguity: the most-derived method wins.
+- Descriptor resolution matches PSI parameters against canonical names from
+  `DescriptorParser`. When PSI matching fails, a bytecode fallback finds the exact
+  name + descriptor via `BytecodeAnalyzer` and maps back to PSI by parameter count.
 
 ### 7.3 ClassFileLocator
 
-Locates raw `.class` file bytes for a given FQCN. Validates bytes start with `0xCAFEBABE`.
-Strategy:
-1. Via `ClsFileImpl.virtualFile.contentsToByteArray()` (works for library classes)
-2. JAR fallback: parses `jar:///path/to.jar!/entry/Class.class` URL and reads directly
-3. For project source classes: looks for `.class` in output directories
+Locates raw `.class` bytes for an FQCN, validating the `0xCAFEBABE` magic.
+`locateDetailed` returns a sealed `LocateResult`: `Found(bytes, maybeStale)`, `NotFound`,
+or `NotBuilt`.
+
+1. Library classes: `ClsFileImpl` file contents; when the virtual file yields decompiled
+   text instead of class bytes, the jar entry is re-read directly from the `jar:` URL.
+2. Files with a `.class` extension: read directly.
+3. Project classes: the module's compiler output (main and test), probing sibling
+   `classes/kotlin` and `classes/groovy` directories in Gradle layouts; the newest
+   `.class` wins. Missing output yields `NotBuilt` so tools can ask for a build instead
+   of claiming the class does not exist. `maybeStale` is set when the editor has unsaved
+   changes or the source mtime is newer than the `.class`.
 
 ### 7.4 BytecodeAnalyzer
 
-ASM-based analysis producing structured `ClassAnalysis` with method/field info, access
-flags, synthetic detection, and lambda source method parsing. Also provides single-method
-bytecode extraction via `analyzeMethod()` returning javap-style output, and structured
-callee extraction via `extractCallees()` — returning a list of `CalleeRef(owner, name,
-descriptor, kind)` for every outgoing call in a method body. `extractCallees` covers
-`INVOKEVIRTUAL/STATIC/SPECIAL/INTERFACE` and resolves `INVOKEDYNAMIC` whose bootstrap is
-`LambdaMetafactory.{metafactory,altMetafactory}` back to the impl method handle, so the
-real lambda / method-reference target surfaces as a structured callee. Non-lambda
-`INVOKEDYNAMIC` (string concat, switch bootstraps) is intentionally omitted — those
-don't represent user-meaningful call targets.
+ASM-based analysis.
 
-### 7.5 PsiDescriptors
+- `analyze(bytes, includeInstructions)` returns a structured `ClassAnalysis` (version,
+  access, names, methods, fields). Methods carry access flags plus `isSynthetic`,
+  `isBridge`, `isLambda`, and `lambdaSourceMethod` parsed from the
+  `lambda$method$index` convention; fields carry `isSynthetic`. Instructions are
+  textified only on request (expensive).
+- `analyzeMethod(bytes, name, descriptor?)` returns javap-style output for one method.
+- `extractCallees(bytes, name, descriptor?)` returns each outgoing call as
+  `CalleeRef(owner, name, descriptor, kind)`. Covers
+  `INVOKEVIRTUAL/STATIC/SPECIAL/INTERFACE` and resolves `INVOKEDYNAMIC` whose bootstrap
+  is `LambdaMetafactory` back to the implementation handle, so the real lambda or
+  method-reference target surfaces. Kind is `LAMBDA` only for `lambda$` synthetics and
+  `CONSTRUCTOR` for `<init>` targets; non-lambda `INVOKEDYNAMIC` (string concat, switch
+  bootstraps) is skipped. Returns null when the method is absent from the class and an
+  empty list for abstract/native methods; deduplication is the caller's job.
 
-Converts PSI types and methods back into JVM descriptors and internal names. Erases
-generics via `TypeConversionUtil.erasure` so PSI `List<String>` → `Ljava/util/List;`,
-matching what the compiler actually emits. Used in the call-hierarchy tool so the
-source-walker and bytecode-fallback paths emit identical owner/name/descriptor strings
-and dedupe uniformly, and so output is directly paste-ready into `@At(target="...")`.
+### 7.5 DescriptorParser
+
+Parses JVM method descriptors into canonical Java type names (null on malformed input),
+handling objects, primitives, and nested arrays, and converts between canonical,
+internal, and simple-name forms for error messages.
+
+### 7.6 PsiDescriptors
+
+Converts PSI methods and types into JVM descriptors and internal names, erasing generics
+via `TypeConversionUtil.erasure` so PSI `List<String>` becomes `Ljava/util/List;`,
+matching what the compiler emits. This keeps the call-hierarchy tool's source-walker and
+bytecode paths emitting identical owner/name/descriptor triples, and makes output
+paste-ready for `@At(target = "...")`.
 
 ---
 
@@ -341,18 +346,50 @@ and dedupe uniformly, and so output is directly paste-ready into `@At(target="..
 
 ### Source Navigation
 
-| Tool | Parameters | Scope |
-|------|-----------|-------|
-| `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false`, `methodName?`, `fieldName?` | All classes (project + deps + JDK). `methodName` / `fieldName` focus the result to a single member's source plus the class header. |
-| `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` | All indexed symbols |
-| `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000`, `pathPrefix?`, `roots=all`, `contextLines=0` | Sources jars + decompiled cache. `contextLines` (0–200) renders match windows inline with merged overlaps. |
-| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` | Sources jars + decompiled cache |
-| `mixin_list_source_roots` | `maxSamplesPerRoot=5` | Diagnostic: lists all source roots with types and sample paths |
+| Tool | Parameters |
+|------|-----------|
+| `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false`, `methodName?`, `fieldName?` |
+| `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` |
+| `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000`, `pathPrefix?`, `roots=all`, `contextLines=0` |
+| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` |
+| `mixin_list_source_roots` | `maxSamplesPerRoot=5` |
 
-**Important:** `mixin_search_in_deps` and `mixin_get_dep_source` only search/read from
-`OrderRootType.SOURCES` (attached `-sources.jar` files). They do **not** search decompiled
-content from compiled-only jars. For classes without sources, use `mixin_find_class` with
-`includeSource=true` (returns decompiled source by FQCN) or the bytecode tools.
+`mixin_search_in_deps` and `mixin_get_dep_source` cover two root sets: library SOURCES
+roots (published `-sources.jar` files plus anything else attached as SOURCES, such as
+auto-attached merged game jars) and decompiled cache roots (Section 10). `roots`
+selects `all`, `library`, or `decompiled`. In `all` mode library roots are scanned first
+and cache files whose logical path already matched are skipped, so results never
+duplicate. Roots attached as library SOURCES that physically live under the decompilation
+cache keep the decompiled label, so the `roots` contract holds.
+
+**`mixin_find_class`** resolves any class by FQCN and reports header info plus a
+`SourceKind` classification (library sources, decompiled cache, project source, binary).
+`methodName`/`fieldName` focus the output to one member's source with line numbers,
+overload counts, inherited-member tags, and similar-name suggestions on a miss; binary
+members get a pointer to the bytecode tools. `includeMembers` lists methods, fields, and
+nested classes with ready-to-copy follow-up calls; `includeSource` appends the full file.
+
+**`mixin_search_symbols`** is a short-name substring search over `PsiShortNamesCache`.
+Queries that look like FQCNs are simplified to the trailing simple name with an
+explanatory note. Each kind section (classes, methods, fields) has its own `maxResults`
+budget.
+
+**`mixin_search_in_deps`** is a regex grep across dependency sources. `fileMask` is a
+case-insensitive substring of the logical path, or a glob when it contains `*`/`?` (`*`
+crosses `/`). `contextLines` (0 to 200) renders match windows with overlapping windows
+merged; matches are highlighted with `||...||` markers. Hits are grouped per file with a
+`url:` line consumable by `mixin_get_dep_source`. Regex syntax errors return escape
+hints; empty results return hints that distinguish "no files under pathPrefix" from "no
+lines matched" and add toolchain-specific guidance for vanilla/Forge/NeoForge paths.
+
+**`mixin_get_dep_source`** reads a window around `lineNumber`, marking the requested
+line. `url` (from search output) takes precedence over `path` (a package path like
+`net/minecraft/world/level/Level.java`, resolved across all roots).
+
+**`mixin_list_source_roots`** is the coverage diagnostic: all roots grouped into library
+SOURCES and decompiled cache with sample paths, MDG merged-jar detection, the auto-attach
+report (Section 11), and sentinel canary checks for vanilla, Forge, and NeoForge sources
+with per-toolchain remediation guidance.
 
 ### Semantic Navigation
 
@@ -367,67 +404,70 @@ content from compiled-only jars. For classes without sources, use `mixin_find_cl
 | `mixin_find_targeting_mixins` | `className`, `methodName?`, `maxResults=50` |
 
 Tools that take `parameterTypes` also accept `methodDescriptor` (JVM format, e.g.
-`(Lnet/minecraft/world/effect/MobEffectInstance;)Z`). For parameterless methods,
-pass `parameterTypes: []` (empty array). Error messages list available overloads with
-ready-to-copy `parameterTypes` values.
+`(Lnet/minecraft/world/effect/MobEffectInstance;)Z`), which takes precedence. For
+parameterless methods, pass `parameterTypes: []`. Error messages list available overloads
+with ready-to-copy `parameterTypes` values (Section 7.2).
 
-**`mixin_type_hierarchy` — interface listing.** With `includeInterfaces=true` (default),
-the tool emits two interface sections under the supers direction: **Direct interfaces**
-(the class's own `implements`/`extends` clause) and **Inherited interfaces** (the
-transitive closure collected by walking the superclass chain within `maxDepth` and
-following the super-interface extension graph). Inherited entries are deduplicated by
-qualified name and tagged with origin: `from X` means introduced by superclass X;
-`via X` means reached by extending interface X. First-seen wins, so closer origins
-are preferred (direct first, then each superclass nearest-to-furthest, then super-
-interface chains in BFS order).
+**`mixin_type_hierarchy` interface listing.** With `includeInterfaces=true`, the supers
+direction emits **Direct interfaces** (the class's own `implements`/`extends` clause) and
+**Inherited interfaces** (the transitive closure from walking the superclass chain within
+`maxDepth` and following the super-interface extension graph). Inherited entries are
+deduplicated by qualified name and tagged with origin: `from X` means introduced by
+superclass X, `via X` means reached by extending interface X. First seen wins, so closer
+origins are preferred.
 
-**`mixin_call_hierarchy` — callee coverage.** In the callees direction, the source walker
-visits `PsiMethodCallExpression`, `PsiNewExpression`, and `PsiMethodReferenceExpression`
-so direct calls, constructor invocations (`new Foo(...)`), and method references
-(`Foo::bar`, `Foo::new`) all surface. The bytecode fallback uses
-`BytecodeAnalyzer.extractCallees` — it walks `INVOKEVIRTUAL/STATIC/SPECIAL/INTERFACE` and
-resolves `INVOKEDYNAMIC` via `LambdaMetafactory` bootstrap handles. Tagging is consistent
-across both paths: `[ctor]` for constructors (including `Foo::new` refs and bytecode
-`INVOKEDYNAMIC` impls named `<init>`); `[lambda]` only for real compiler-generated
-synthetics (impl name starts with `lambda$`); method references whose impl is a
-non-synthetic method (e.g. `this::setPosToBed`) surface untagged — identical to a direct
-call, since that's what a mixin would target. Output is `owner#name(descriptor)` in JVM
-format, deduplicated by the full triple so overloads aren't merged. Non-lambda
-`INVOKEDYNAMIC` (string concat, switch bootstraps) is skipped.
+**`mixin_call_hierarchy` callee coverage.** The source walker visits
+`PsiMethodCallExpression`, `PsiNewExpression`, and `PsiMethodReferenceExpression`, so
+direct calls, constructor invocations, and method references all surface. Body discovery
+per node tries Java PSI, then UAST (covering Kotlin and other JVM languages), then
+bytecode via `BytecodeAnalyzer.extractCallees`. Only the bytecode path surfaces the real
+synthetic `lambda$X$N` target behind `INVOKEDYNAMIC`; the source walkers see the lambda
+body lexically. Tagging is consistent across paths: `[ctor]` for constructors (including
+`Foo::new` and `INVOKEDYNAMIC` impls named `<init>`), `[lambda]` only for compiler
+synthetics whose impl name starts with `lambda$`; method references resolving to a
+non-synthetic method surface untagged, identical to a direct call, since that is what a
+mixin would target. Output is `owner#name(descriptor)` in JVM format, deduplicated by the
+full triple so overloads are not merged.
 
-**`mixin_call_hierarchy` — recursive expansion.** Both `callers` and `callees` recurse
-up to `maxDepth` levels (default 3, hard-capped at 10 to prevent runaway walks).
-`CallHierarchyExpander` owns the traversal:
+**`mixin_call_hierarchy` recursion.** Both directions recurse to `maxDepth` (valid range
+1 to 10; out-of-range values are rejected, not clamped). Callers: a depth-first walk
+where each node runs `MethodReferencesSearch` and each reference's enclosing method
+becomes the next root; enclosing-method resolution tries Java PSI, then UAST, so
+Kotlin/Groovy/Scala callers participate. References with no enclosing method (field or
+static initializers) are terminal `(non-method context)` leaves. Callees: each discovered
+`CalleeRef` is re-resolved to PSI and walked. Leaves with no body in source or bytecode
+are labelled abstract; an abstract method whose class bytecode is present simply ends the
+branch. `maxResults` is a single budget shared across all depths and branches; each
+caller or callee line consumes a slot, and exhaustion halts the walk with a truncation
+notice.
+Cycle detection keys on the `owner#name(descriptor)` triple with the target pre-seeded,
+so self-recursion is caught immediately; re-encounters emit a `[cycle]` marker without
+recursing. Lines are indented per depth with `[L1]`, `[L2]`, ... tags.
 
-- **Callers** — BFS via `MethodReferencesSearch.search(method, scope, false)` per node.
-  Each caller's *enclosing* method becomes the next recursion root. Resolution tries
-  Java PSI first (`PsiTreeUtil.getParentOfType(PsiMethod)`), then UAST
-  (`element.getUastParentOfType<UMethod>().javaPsi`) so Kotlin / Groovy / Scala callers
-  resolve to their light `PsiMethod` bridge and participate in recursion. References
-  that still have no enclosing method (field / static initialisers) are emitted as
-  terminal `(non-method context)` leaves.
-- **Callees** — recurses into each discovered `CalleeRef` by re-resolving it to a
-  `PsiMethod` and walking its body. Body discovery is tried in this order: (1) Java
-  PSI body (`PsiMethod.body`), (2) UAST body (`UMethod.uastBody`, walked with an
-  `AbstractUastVisitor` that visits `UCallExpression` + `UCallableReferenceExpression`
-  — covers Kotlin and every other JVM language whose UAST plugin is loaded),
-  (3) bytecode (`BytecodeAnalyzer.extractCallees`). The bytecode path is still the
-  only one that surfaces the real synthetic `lambda$X$N` target behind
-  `INVOKEDYNAMIC`; the two source walkers visit the lambda body lexically. Abstract /
-  native leaves are labelled `(abstract — no body to walk)` so terminal branches read
-  distinctly from depth-cap truncation.
+**`mixin_find_references`** searches class references when `memberName` is absent. With
+`memberName`, a matching field wins outright when no type filters were passed; otherwise
+method resolution runs, falling back to field references (with a note) when a field
+exists but no method matches.
 
-`maxResults` is a **shared global budget** consumed across all depths and branches
-(single `Budget` instance threaded through recursion). This avoids per-level multiplication
-and matches the pre-existing flat-cap semantics — when the budget is exhausted the walk
-halts cleanly and a truncation notice is emitted.
+**`mixin_super_methods`** prints the declaration site, then the full super-method chain
+(most specific to most general) with `[root declaration]` and `[interface]` tags and
+per-entry source locations. When the queried class only inherits the method, an explicit
+note recommends mixing into the declaring class.
 
-Cycle detection keys on the `owner#name(descriptor)` triple so a given method is
-expanded at most once per tool call. Re-encounters (recursion, diamonds across siblings)
-emit the method with a `[cycle]` marker and do not recurse. The target method's own key
-is pre-seeded into the visited set so direct self-recursion is caught on its first
-appearance. Output is indented two spaces per depth with a `[L1]`, `[L2]`, ... tag, so
-an agent reading the response can see nesting at a glance.
+**`mixin_find_overrides`** detects unoverridable targets (constructor, static, private,
+final method, final class) and explains why instead of returning an empty list; otherwise
+it lists overrides with `[abstract]` tags and source locations.
+
+**`mixin_find_targeting_mixins`** finds mixins targeting a class via
+`AnnotatedElementsSearch` over all scope, reading both the `value` and `targets`
+attributes of `@Mixin` (class literals, arrays, string literals). It recognizes 13
+injector annotations: `@Inject`, `@Redirect`, `@Overwrite`, `@ModifyArg`, `@ModifyArgs`,
+`@ModifyConstant`, `@ModifyVariable` (SpongePowered), plus `@ModifyExpressionValue`,
+`@ModifyReturnValue`, `@ModifyReceiver`, `@WrapOperation`, `@WrapWithCondition`,
+`@WrapMethod` (MixinExtras); `@Accessor`/`@Invoker` are deliberately excluded.
+`methodName` filters by parsing each injector's `method` attribute. A regex fallback over
+the dependency source roots (library SOURCES plus decompiled cache, `.java` files) runs
+only when the annotation search finds nothing, returning FQCN and path only.
 
 ### Bytecode Inspection
 
@@ -436,8 +476,16 @@ an agent reading the response can see nesting at a glance.
 | `mixin_class_bytecode` | `className`, `filter=all`, `includeInstructions=false` |
 | `mixin_method_bytecode` | `className`, `methodName`, `methodDescriptor?` |
 
-`filter` accepts: `all`, `synthetic`, `methods`, `fields`. Use `synthetic` for mixin lambda
-target discovery.
+`filter` accepts `all`, `synthetic`, `methods`, `fields`; `synthetic` restricts both
+methods and fields to synthetic members (including fields like `this$0` and `$VALUES`).
+Whenever synthetics exist, a synthetic-method summary section is appended regardless of
+filter, tagging each as lambda (with source method), bridge, or synthetic.
+
+Both tools work on the project's own classes after a build: `ClassFileLocator` reads
+compiler output, returns a build-and-retry error when output is missing (`NotBuilt`), and
+prefixes a staleness warning when the source is newer than the `.class` or the editor has
+unsaved changes. `mixin_method_bytecode` failures are diagnostic: a missing name lists
+similar and available method names; a name with no descriptor match lists every overload.
 
 ### Project Management
 
@@ -445,66 +493,337 @@ target discovery.
 |------|-----------|
 | `mixin_sync_project` | `projectPath?` |
 | `mixin_refresh_vfs` | `path?` |
+| `mixin_safe_delete` | `className`, `methodName?`, `fieldName?`, `parameterTypes?`, `methodDescriptor?`, `force=false`, `dryRun=false` |
+| `mixin_move_file` | `className`, `targetPackage` |
 
-`mixin_sync_project` triggers Gradle sync via `ExternalSystemUtil.refreshProject()` with
-`ProgressExecutionMode.START_IN_FOREGROUND_ASYNC`. Falls back to Maven if Gradle fails.
-Runs on EDT via `invokeLater`.
+**`mixin_sync_project`** saves all documents, then triggers
+`ExternalSystemUtil.refreshProject` with `ProgressExecutionMode.START_IN_FOREGROUND_ASYNC`
+on the EDT and returns immediately (fire and forget). A Maven retry fires only when the
+Gradle call throws synchronously; async sync failures are not reported. When the Gradle
+plugin is applied, sync also re-runs `genDependencySources` (Section 10).
 
-`mixin_refresh_vfs` selects a refresh target and scope, resolves it via
-`LocalFileSystem.refreshAndFindFileByIoFile()`, then calls
-`VfsUtil.markDirtyAndRefresh(async=false, recursive, reloadChildren=true, vf)`. The target
-selection handles three shapes of caller input:
+**`mixin_refresh_vfs`** resolves a refresh target via
+`LocalFileSystem.refreshAndFindFileByIoFile`, then calls
+`VfsUtil.markDirtyAndRefresh(async=false, recursive, reloadChildren=true, vf)`. Target
+selection handles three input shapes: an existing directory (project root when `path` is
+omitted) refreshes recursively; an existing file refreshes its parent non-recursively
+(`reloadChildren` picks up the content change plus created and deleted siblings); a
+missing path walks up to the nearest existing ancestor, non-recursively, so deletions are
+noticed without fanning out. Explicit dirty-marking forces a re-read even when VFS
+believes the entry is fresh. Synchronous: returns after IntelliJ has re-scanned. Use
+after external tools mutate files that later MCP calls will query.
 
-- **Existing directory** (including project root when `path` is omitted): refreshed
-  recursively.
-- **Existing file**: parent directory refreshed non-recursively. `reloadChildren=true` on
-  the parent picks up the file's content change, any newly created siblings, and any
-  deleted siblings in one call, and does not depend on VFS already knowing about a
-  just-created child.
-- **Path that no longer exists**: walks up to the nearest existing ancestor and refreshes
-  it non-recursively, so VFS notices the deletion without fanning out over unrelated
-  siblings.
+**`mixin_safe_delete`** deletes a class, method, or field after a usage check.
+Preparation resolves the target (member resolution per Section 7.2), then collects
+`ReferencesSearch` usages plus, for methods, `OverridingMethodsSearch` results tagged
+`[override]`; a top-level class's own-file references are excluded, and deleting the sole
+top-level declaration removes the file. `dryRun` reports what would happen; existing
+usages block deletion unless `force`. The delete runs in a named `WriteCommandAction` on
+the EDT, then commits and saves all documents.
 
-Explicit dirty-marking forces VFS to re-read even when it believes the entry is fresh.
-Synchronous so the tool returns only after IntelliJ has re-scanned the path; use this
-after external tools (shell scripts, code generators) mutate files that subsequent MCP
-calls will query.
+**`mixin_move_file`** moves a top-level class to another package under the same source
+root (inner classes are rejected; target directories are created; same-name collisions
+refuse). The move runs through a `MoveFilesOrDirectoriesProcessor` subclass that
+suppresses the modal conflict dialog (which would deadlock an MCP call) with
+`searchForReferences = true` and `searchInNonJavaFiles = true`, so string references in
+mixin configs and service files update where language plugins contribute PSI references.
+Files with several top-level classes move as a unit.
 
----
+### Mappings
 
-## 9. Acceptance Test
+| Tool | Parameters |
+|------|-----------|
+| `mixin_mappings_lookup` | `symbol`, `kind`, `from`, `to`, `mcVersion?` |
 
-Tested on both **Fabric 1.21** and **Forge 1.20.1** with real Minecraft mod projects.
-
-**Scenario (Forge 1.20.1 — Otherworld-Core):**
-
-```
-Step 1: mixin_find_class
-  Args: { "className": "net.minecraft.world.level.Level", "includeMembers": true }
-  → Found Level with CapabilityProvider superclass (Forge), all methods listed
-
-Step 2: mixin_class_bytecode (filter=synthetic)
-  → Returned lambda$fillReportDetails$4, lambda$fillReportDetails$3,
-    lambda$getEntities$2, lambda$getEntities$1, lambda$new$0
-
-Step 3: mixin_method_bytecode
-  Args: { "methodName": "lambda$fillReportDetails$4" }
-  → Returned bytecode: dimension().location().toString()
-
-Step 4: mixin_super_methods
-  Args: { "methodName": "fillReportDetails", "parameterTypes": ["net.minecraft.CrashReport"] }
-  → Confirmed: declared in Level, not inherited
-
-Step 5: Created LevelMixin targeting lambda$fillReportDetails$4
-Step 6: get_file_problems → No errors
-```
-
-**Fabric 1.21 difference:** Synthetic methods use `method_XXXXX` names (Loom intermediary)
-instead of `lambda$...`. The tools work correctly for both patterns.
+Converts a class/method/field name between mapping namespaces. See Section 9.
 
 ---
 
-## 10. Known Pitfalls & Edge Cases
+## 9. Mappings Subsystem (dev.mixinmcp.mappings)
+
+`mixin_mappings_lookup` translates symbols between five namespaces: `obf`, `mojmap`,
+`intermediary`, `yarn`, `srg`. The input symbol must be in the `from` namespace. Members
+are owner-qualified (dots or slashes), with an optional JVM descriptor after `(` for
+methods and `:` for fields; an omitted descriptor matches all overloads and can return an
+ambiguous listing. Results include the owning class's names in the other loaded
+namespaces.
+
+- **SymbolParser** normalizes dots to slashes and splits owner, member, and descriptor.
+- **McVersionDetector** supplies `mcVersion` when omitted, reading `gradle.properties` in
+  the project root and first-level subdirectories (keys: `minecraft_version`,
+  `mc_version`, `minecraftVersion`, `mcVersion`, `minecraft.version`, `mc.version`).
+- **MappingsService** is an application-level service caching one `MemoryMappingTree` per
+  (mcVersion, namespace set) with a per-key mutex.
+- **MappingsLoader** builds a mapping-io `MemoryMappingTree` with source namespace `obf`
+  and the requested destination namespaces. Yarn tiny files already carry intermediary,
+  so intermediary loads separately only when Yarn is not requested; ProGuard mojmap files
+  are source-switched to obf orientation; srg loads from tsrg/tsrg2, picking the first
+  non-`id` destination namespace.
+- **MappingsDownloader** caches per version under `~/.cache/mixinmcp/mappings/<ver>/` as
+  `mojmap.txt`, `intermediary.tiny`, `yarn.tiny`, `srg.tsrg`. Sources: Mojang piston-meta
+  (launcher manifest cached with a 24h TTL) for mojmap, FabricMC maven for intermediary,
+  FabricMC meta for the newest Yarn build, and Forge `mcp_config` with a NeoForm fallback
+  for srg. Downloads stream to a `.part` file and move atomically; connect/read timeouts
+  apply; failures produce explanatory errors (e.g. versions Fabric does not cover).
+- **MappingsResolver** returns `Single`, `Ambiguous`, or `NotFound`; a missing member
+  lists up to 40 available names in the `from` namespace.
+
+---
+
+## 10. Decompilation Cache
+
+### 10.1 Problem
+
+Many dependencies ship no `-sources.jar`. IntelliJ can decompile `.class` files on
+demand, but the output is ephemeral: it exists in the PSI tree while a file is open and
+is never persisted or indexed. Without intervention there is no regex search or
+file-style reading for compiled-only dependencies, and the LLM must already know the
+exact FQCN to see any source.
+
+### 10.2 Solution
+
+The Gradle plugin decompiles (or mirrors) dependency sources into a persistent cache; the
+IntelliJ plugin exposes the cache as indexed `SyntheticLibrary` roots. The IDE side is a
+read-only consumer: it has no decompiler dependency and never writes the cache.
+Decompilation completes inside the Gradle invocation (sync or manual task run) before
+tools query, so tools never race a half-populated cache. This also makes the cache
+CI-friendly and reproducible from dependency resolution alone.
+
+### 10.3 Cache Layout
+
+```
+~/.cache/mixinmcp/decompiled/          # global, content-addressed, shared by all projects
+└── <sha256-of-jar-bytes>/
+    └── com/example/Foo.java
+
+<gradleProjectDir>/.gradle/mixinmcp/   # per Gradle (sub)project
+├── manifest.json                      # {"entries": {"<hash>": CacheEntry}}
+├── hash-memo.json                     # (path|size|mtime) -> content hash
+└── unresolved.txt                     # resolution-failure count (transient)
+```
+
+`CacheEntry` fields: `libraryName`, `classesJarPath`, `jarSize`, `jarModified`,
+`cachePath`, `decompilerVersion` (`vineflower-<version>` or `published-sources`),
+`createdAt`. The artifact hash is the SHA-256 of the jar's bytes, so renamed jars and
+multiple projects sharing a dependency hit the same entry; the persisted memo avoids
+re-hashing unchanged jars. Each subproject writes its own manifest; the IDE merges the
+root manifest with those of first-level subdirectories, falling back to a legacy global
+manifest at the cache root when none exist. Cache directories untouched for 30 days are
+evicted; every cache hit refreshes the directory mtime to keep in-use entries alive. The
+manifest format is duplicated between the two modules (kotlinx-serialization on the IDE
+side, Gson on the Gradle side) writing identical JSON.
+
+### 10.4 Gradle Plugin (dev.mixinmcp.decompile)
+
+`MixinDecompilePlugin` registers two tasks and, when the `idea.sync.active` system
+property is set, appends `genDependencySources` to the Gradle start parameters so every
+IntelliJ sync populates the cache (the same technique MDG and Loom use).
+
+**`genDependencySources`** (options `--threads=N`, default 2, and `--force`):
+
+1. Resolves `compileClasspath` through a lenient artifact view, so artifact-transform
+   failures are collected instead of failing the task. Only module components with `.jar`
+   files are processed; JDK jars are skipped.
+2. Artifacts with a published `-sources.jar` (found via an `ArtifactResolutionQuery` with
+   `SourcesArtifact`) are mirrored: the sources jar is unpacked into the cache under the
+   classes jar's content hash (zip-slip defended), entry marked `published-sources`. This
+   covers toolchains that hand IntelliJ a transformed classes jar without linking
+   sources. Group `net.minecraft` is excluded from mirroring: the toolchain's own sources
+   jar is attached directly when it exists, and plain decompilation remains the fallback
+   for a genSources-free Loom workflow; the manifest prune drops the decompiled entry
+   once a real sources jar appears.
+3. Remaining artifacts are decompiled with Vineflower
+   (`Decompiler.builder().inputs(jar).output(DirectoryResultSaver(cacheDir))`, thread
+   count from `--threads`, `REMOVE_SYNTHETIC = "0"` to keep mixin targets visible).
+   Whole-jar decompilation lets Vineflower use cross-class context.
+4. A cache hit is a non-empty hash directory; hits only add a manifest entry and touch
+   the directory. Jars process smallest first.
+5. Corrupt-download guard: the raw cached jars under
+   `~/.gradle/caches/modules-2/files-2.1` are zip-validated on every run; a corrupt
+   version directory is deleted so the next resolution re-fetches. Checksum-less
+   repositories (e.g. cursemaven) serve chunked responses that Gradle caches as complete,
+   and cleanly truncated jars can survive streaming remap transforms as valid but
+   classless output.
+6. Memory: jars of 15 MB or more are skipped when max heap is below
+   `threads x 800 MB + 500 MB` unless `--force`; an `OutOfMemoryError` deletes the
+   partial output and continues.
+7. The manifest is saved after every successful decompile or mirror (crash-resumable),
+   then pruned at the end to hashes still on the classpath; the hash memo is pruned the
+   same way. Orphaned cache
+   directories are left to the 30-day eviction, since other projects may share them.
+8. Resolution failures are summarized, matching corrupt cached artifacts are purged by
+   coordinate, and the failure count is written to `unresolved.txt` (deleted when zero);
+   the IDE turns the marker into a notification.
+
+**`cleanSourcesCache`** deletes the cache directories referenced by this project's
+manifest plus the manifest itself; `--global` wipes the entire store.
+
+### 10.5 IDE Components (dev.mixinmcp.cache)
+
+- **`DecompilationCacheService`** (project service): `getCachedRoots()` merges the
+  per-project manifests and resolves cache directories to `VirtualFile`s; `refreshVfs()`
+  synchronously refreshes the cache root so directories created outside the IDE resolve;
+  `isDecompiledCachePath` is the shared predicate used by the search tools and the
+  auto-attacher, and `normalizeJarDiskPath` backs the roots provider's duplicate
+  suppression.
+- **`MixinDecompiledRootsProvider`** (`AdditionalLibraryRootsProvider`): one
+  `SyntheticLibrary` per cached artifact via the five-parameter `newImmutableLibrary`
+  overload, with a stable `mixinmcp-<hash>` `comparisonId` enabling incremental rescans
+  and an `ExcludeFileCondition` admitting only `.java`/`.kt` files. Cache roots whose
+  classes jar already has library SOURCES attached are skipped; the filter re-evaluates
+  on every roots query, so a cache root disappears as soon as real sources are attached
+  (e.g. Loom's genSources output) and returns if they are detached. `getRootsToWatch`
+  returns the same roots.
+- **`MixinDecompileCacheStartupActivity`** (`ProjectActivity`): refreshes the cache VFS,
+  fires `AdditionalLibraryRootsListener.fireAdditionalLibraryChanged` (under a write
+  action) for existing roots, and schedules the source auto-attacher.
+- **`MixinDecompileCacheSyncListener`** (`ExternalSystemTaskNotificationListener`): on
+  each successful project resolve, does the same refresh + fire + schedule, then reads
+  the `unresolved.txt` markers and raises a warning balloon pointing at
+  `./gradlew genDependencySources`.
+
+Existing tools need no changes: `mixin_find_class` and `mixin_search_symbols` see the
+roots through `allScope()` and the index; the dep-search helpers query
+`AdditionalLibraryRootsProvider.EP_NAME` alongside library SOURCES roots.
+
+### 10.6 Design Rationale
+
+**`AdditionalLibraryRootsProvider` instead of modifying library roots.** Gradle sync
+rebuilds the project model and discards manually added library roots.
+`SyntheticLibrary` roots exist outside the build system's model, so they survive sync.
+
+**Vineflower as a library instead of IntelliJ's built-in decompiler.** `IdeaDecompiler`
+is designed for on-demand single-file editor use; batch invocation has undocumented
+threading constraints and couples the cache to the IDE's decompiler version. Vineflower
+is a pure library, safe from any thread, with deterministic versions, and it is the same
+Fernflower lineage IntelliJ bundles, so output quality is equivalent.
+
+**A Gradle task instead of IDE background decompilation.** Background decompilation races
+the MCP tools: a tool can run against a half-populated cache, and there is no good way
+for a tool to block on it. Running inside Gradle makes population a blocking step of
+sync/build, visible in console output, and usable headlessly in CI.
+
+**Alternatives rejected.** A scoped on-demand `mixin_search_decompiled` tool would add
+another tool to context and re-decompile per call. Hooking IntelliJ's ephemeral
+decompiler output would only cover classes the user has opened.
+
+---
+
+## 11. Source Auto-Attach
+
+`SourceAutoAttacher` (a project service in `cache/`) fills the gaps where a toolchain
+leaves an obvious sources artifact unattached. It is scheduled with a 1.5 s debounce
+after project open and after every successful Gradle sync; a new schedule cancels the
+pending run. One read action collects candidates (including a capped probe for `.java`
+entries inside merged jars), sources are resolved on disk outside any lock, and all
+attach operations commit in a single EDT write action wrapped in
+`ProjectRootManagerEx.mergeRootsChangesDuring`, so N library edits produce one
+rootsChanged event instead of N rescans. Every run stores a report (reason, attached
+roots, warnings) surfaced by `mixin_list_source_roots`; the tool prints it only when
+merged game jars (MDG and similar toolchains) are detected in the project. Libraries are
+enumerated from both the project library table
+and module order entries, because Gradle game jars often appear only on the latter.
+
+### 11.1 MDG merged game jars
+
+ModDevGradle does not attach sources in IntelliJ: its `-merged` artifact is a combined
+classes+sources jar, and the intended manual "Attach Sources" flow does not survive
+re-sync. The attacher targets any library CLASSES root whose path contains both
+`moddev/artifacts` and `-merged.jar`; the match is filename-agnostic, so every MDG naming
+variant matches, including NeoForm-only vanilla mode used by multiloader common modules.
+Resolution order:
+
+1. The merged jar itself, when it contains `.java` entries (the normal case; the probe
+   visits at most 5000 jar entries).
+2. The sibling `*-sources.jar` next to it, for `disableRecompilation` setups.
+3. For `forge-*-merged.jar` / `neoforge-*-merged.jar` filenames only: the newest
+   `*-sources.jar` under the Gradle cache for `net.minecraftforge:forge` /
+   `net.neoforged:neoforge` (newest by mtime across hash directories, because changing
+   versions accumulate one directory per build; `GRADLE_USER_HOME` is honored).
+
+Candidates come only from library CLASSES roots, never directory scans, so stale artifact
+versions accumulating in `build/moddev/artifacts` are inert. Attaches are deduplicated
+against the library's existing SOURCES roots and across candidates, keeping repeated
+syncs and project opens idempotent (the workspace-model `addRoot` appends without
+checking). Per-library failures become report warnings; remaining operations still run.
+
+### 11.2 IntelliJ Platform sources (plugin projects)
+
+IPGP resolves the platform from installer dists that have no sources variant, and
+DevKit's manually downloaded sources jar is detached by the next re-import. When exactly
+one IPGP dist library is on the classpath (installer or Maven coordinate forms; multiple
+dists skip with a warning), the attacher re-attaches the DevKit-downloaded platform
+sources jar from the Gradle cache to the dist library and every `bundledPlugin:` /
+`bundledModule:` library after each sync. Libraries whose only SOURCES roots are
+decompiled-cache stubs count as unattached, so stale stubs never block the real jar; when
+the jar has not been downloaded yet, the report warns and names the DevKit download
+action.
+
+---
+
+## 12. Rules & Skills Injection
+
+`RuleInjectionStartupActivity` (a `postStartupActivity`) runs on every project open. On
+projects detected as Minecraft mods (`fabric.mod.json`, `mods.toml` /
+`neoforge.mods.toml`, an existing `.gradle/mixinmcp/manifest.json`, or a known modding
+plugin id in the build file: Loom, NeoGradle, MDG, ForgeGradle, Architectury, Quilt
+Loom), it copies bundled resources into the project:
+
+- `inject/claude` to `.claude/`: skills `mixinmcp-tools` (SKILL.md +
+  `references/toolchains.md`) and `mixin-writing` (SKILL.md + `references/at-reference.md`
+  + `references/expressions-language.md`).
+- `inject/cursor` to `.cursor/`: the same two skills plus
+  `rules/minecraft-mod-project.mdc`, an always-apply rule mandating MixinMCP tools over
+  grep and jar extraction.
+
+The trees are identical except `mixinmcp-tools/SKILL.md`, which is tailored per agent
+(invocation syntax, server name). Existing files are overwritten unless the overwrite
+setting is off; rule files from older layouts are deleted. Written paths are appended to
+an existing `.gitignore` under a marker comment, skipping paths `git check-ignore`
+already covers; no `.gitignore` is created. An info notification lists what was written,
+with an opt-out action.
+
+The same activity warns (balloon, with opt-out) when a Minecraft project does not apply
+the Gradle plugin, detected via `.gradle/mixinmcp/manifest.json` or the plugin id in the
+build file, since dependency search is source-blind without the cache.
+
+---
+
+## 13. Settings
+
+`MixinMcpSettings` is a project-level `PersistentStateComponent` (storage
+`mixinmcp.xml`) with three booleans, all defaulting to true: `autoInjectCursorRules`,
+`overwriteExistingRules`, `warnMissingGradlePlugin`. `MixinMcpSettingsConfigurable`
+(Kotlin UI DSL `BoundConfigurable`) exposes them at Settings > Tools > MixinMCP; the
+overwrite checkbox is enabled only while injection is on.
+
+---
+
+## 14. Testing
+
+Automated tests are JUnit unit tests of static helpers (the auto-attacher's matchers are
+`internal` specifically to be testable):
+
+- `SourceAutoAttacherTest`: MDG merged-jar matching and sibling sources-jar naming.
+- `IjPlatformCoordinateTest`: IPGP dist coordinate parsing and bundled-library detection.
+- `SymbolParserTest`: mappings symbol parsing for all three kinds plus namespace and kind
+  parsing.
+
+The MCP tools have no automated coverage; end-to-end verification is manual against real
+Fabric and Forge/NeoForge projects. The canonical smoke test for the bytecode workflow:
+
+1. `mixin_find_class` on a game class: members and superclass resolve.
+2. `mixin_class_bytecode` with `filter=synthetic`: lambda targets are discovered.
+3. `mixin_method_bytecode` on a synthetic: its body reads back.
+4. `mixin_super_methods`: the declaring class is confirmed.
+5. Write a mixin targeting the synthetic; `get_file_problems` comes back clean.
+
+Synthetic names differ per toolchain (Loom intermediary uses `method_XXXXX`, MojMap
+toolchains use `lambda$method$index`); the tools handle both.
+
+---
+
+## 15. Known Pitfalls & Edge Cases
 
 ### Extension Point Namespace
 The namespace is `com.intellij.mcpServer` (capital S). Lowercase silently fails.
@@ -514,786 +833,51 @@ Kotlin treats `$` in annotation strings as template expressions. Escape with `\$
 `lambda\$tick\$0` not `lambda$tick$0`.
 
 ### Remapped Names
-Modding toolchains remap names between obfuscated and mapped. Our tools see **dev-time
-mapped names**. Fabric/Loom uses intermediary names for synthetics (`method_XXXXX`);
-Forge/MojMap uses `lambda$methodName$index`.
+Modding toolchains remap names between obfuscated and mapped. The tools see dev-time
+mapped names. Loom uses intermediary names for synthetics (`method_XXXXX`); MojMap
+toolchains use `lambda$methodName$index`. `BytecodeAnalyzer.lambdaSourceMethod` parses
+the `lambda$` convention. `mixin_mappings_lookup` translates between namespaces.
 
-### ReadAction Requirements
-ALL PSI access MUST be wrapped in `ReadAction.compute<T, Throwable> { }`. Tool functions
-are called on a background thread without a read lock.
+### Threading
+Tool functions are called on background threads without a read lock. PSI reads go through
+`ReadAction.nonBlocking { }.inSmartMode(project).executeSynchronously()`; PSI writes go
+through `WriteCommandAction` on the EDT.
+
+### Multi-Window Sessions
+With several projects open and no `projectPath` argument, the framework throws
+`McpExpectedError` instead of returning null. `requireProject` converts this into an
+error listing the open projects so the agent can retry.
 
 ### ProgressExecutionMode
 For project sync, use `ProgressExecutionMode.START_IN_FOREGROUND_ASYNC` (not
-`IN_FOREGROUND_ASYNC_PLAIN` which doesn't exist).
+`IN_FOREGROUND_ASYNC_PLAIN`, which does not exist).
 
 ### MethodResolver and Overloads
 `resolveSingle()` returns null for ambiguous overloads without `parameterTypes`.
-`findMethodsByName()` can return empty for JDK classes — the resolver falls back to
-`psiClass.methods` filtered by name.
+`findMethodsByName()` can return empty for JDK classes; the resolver falls back to
+`psiClass.methods` filtered by name. An override plus its inherited declaration does not
+count as ambiguity: the most-derived method wins.
 
 ### ClassInheritorsSearch Performance
 Can be slow with 100+ dependencies. Always use `maxResults` limits.
 
 ### Decompiled Source Search
-`mixin_search_in_deps` and `mixin_get_dep_source` search both SOURCES roots (attached
-`-sources.jar`) and decompiled cache roots (from `AdditionalLibraryRootsProvider`).
-Run `./gradlew genDependencySources` to populate the cache for compiled-only dependencies.
+`mixin_search_in_deps` and `mixin_get_dep_source` search both library SOURCES roots and
+decompiled cache roots. Run `./gradlew genDependencySources` to populate the cache for
+compiled-only dependencies. Cache roots duplicating an attached sources jar are not
+exposed at all, so results never double up.
+
+### Stale Bytecode
+Project classes are read from compiler output. The bytecode tools warn when the source is
+newer than the `.class` or the editor has unsaved changes, and return a build-and-retry
+error when output is missing entirely.
 
 ### Large Output
 Full decompiled source or `includeInstructions=true` can produce very large responses.
 Tool descriptions guide LLMs toward targeted queries.
 
-### Synthetic Method Naming
-Lambda synthetic names follow `lambda$<method>$<index>` (compiler convention, not spec).
-Fabric/Loom intermediary mappings use `method_XXXXX` instead. BytecodeAnalyzer's
-`lambdaSourceMethod` parser handles the standard `lambda$` pattern.
-
 ---
 
-## 11. Decompilation Cache
+## 16. License
 
-> **Status:** Implemented. IDE-side cache is read-only (Sections 11.5 Steps 4–5).
-> Gradle plugin `dev.mixinmcp.decompile` implemented (Section 11.11).
-> `MixinDecompiledRootsProvider` uses the 5-param `newImmutableLibrary` overload
-> with `comparisonId` + `ExcludeFileCondition`.
-
-### 11.1 Problem
-
-`mixin_search_in_deps` and `mixin_get_dep_source` only operate on SOURCES roots
-(`-sources.jar` files). Many dependencies ship without published sources. IntelliJ can
-decompile `.class` files on demand, but the output is ephemeral — it lives in the PSI
-tree only while a file is open and is never persisted or indexed for search.
-
-This means there is no regex search or file-style reading for compiled-only dependencies.
-The LLM must know the exact FQCN to use `mixin_find_class(includeSource=true)`, which
-requires already knowing what to look for.
-
-### 11.2 Existing Decompilation in the Ecosystem
-
-Loom, ModDevGradle, and ForgeGradle already decompile **Minecraft itself** during the
-build process and attach the result as a `-sources.jar` on the library. This is why
-`mixin_search_in_deps` works for Minecraft classes — the sources are already present as
-`OrderRootType.SOURCES` roots.
-
-However, these toolchains do **not** decompile other dependencies (mod APIs, shaded
-libraries, closed-source mod deps). The Gradle cache (`~/.gradle/caches/`) only stores
-artifacts as published — if no `-sources.jar` was published, none is cached.
-
-### 11.3 Solution: Synthetic Sources via Gradle Decompilation + IDE Exposure
-
-A **Gradle plugin** (`dev.mixinmcp.decompile`) decompiles all library JARs that lack
-SOURCES roots and writes the output to a persistent file cache. Running
-`./gradlew genDependencySources` completes decompilation as a blocking step — before the IDE
-opens or the LLM invokes tools — giving deterministic, CI-friendly results.
-
-An `AdditionalLibraryRootsProvider` in the IntelliJ plugin exposes the cached
-decompiled sources as `SyntheticLibrary` roots, making them visible in
-`GlobalSearchScope.allScope()` and indexed by IntelliJ — without modifying the
-Gradle-managed project model.
-
-This two-layer split (Gradle writes, IDE reads) solves the timing problem inherent in
-background decompilation: tools never run against a half-populated cache because
-decompilation finishes before the project model is built. See Section 11.10 for the timing analysis and Section 11.11 for the Gradle plugin
-design.
-
-### 11.4 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  GRADLE SIDE (blocking, runs before IDE)                            │
-│                                                                     │
-│  ./gradlew genDependencySources                                      │
-│        │                                                            │
-│        ▼                                                            │
-│  ┌────────────────────────────────────────────────────────────┐     │
-│  │  Gradle Plugin  (dev.mixinmcp.decompile)                   │     │
-│  │                                                            │     │
-│  │  1. Resolve configurations → find JARs without -sources    │     │
-│  │  2. Compute artifact hash per JAR                          │     │
-│  │  3. Check manifest.json for cache hits                     │     │
-│  │  4. Decompile misses via Vineflower → write .java to disk  │     │
-│  │  5. Update manifest.json                                   │     │
-│  └────────────────────────────────────────────────────────────┘     │
-│        │                                                            │
-│        ▼                                                            │
-│  ┌────────────────────────┐                                         │
-│  │  File cache on disk    │                                         │
-│  │  ~/.cache/mixinmcp/    │                                         │
-│  │  └── decompiled/       │                                         │
-│  │      ├── manifest.json │                                         │
-│  │      └── <hash>/       │                                         │
-│  │          └── com/...   │                                         │
-│  │              └── *.java│                                         │
-│  └────────────────────────┘                                         │
-└─────────────────────────────────────────────────────────────────────┘
-                │
-                │  reads (no decompilation)
-                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  IDE SIDE (IntelliJ plugin, read-only cache consumer)               │
-│                                                                     │
-│  ┌────────────────────────────────────────────────────────────┐     │
-│  │  DecompilationCacheService  (project-level service)        │     │
-│  │  Reads manifest.json, returns CachedLibraryInfo list       │     │
-│  └────────────────────────────────────────────────────────────┘     │
-│        │                                                            │
-│        ▼                                                            │
-│  ┌────────────────────────────────────────────────────────────┐     │
-│  │  MixinDecompiledRootsProvider                              │     │
-│  │  (AdditionalLibraryRootsProvider impl)                     │     │
-│  │                                                            │     │
-│  │  Returns SyntheticLibrary per cached artifact.             │     │
-│  │  Source roots = cache dirs → indexed, in allScope().       │     │
-│  └────────────────────────────────────────────────────────────┘     │
-│        │                                                            │
-│        ▼                                                            │
-│  ┌────────────────────────────────────────────────────────────┐     │
-│  │  Existing tools (no changes needed)                        │     │
-│  │  mixin_search_in_deps ◄─── collectAllSourceRoots() already│     │
-│  │  mixin_get_dep_source ◄─── queries synthetic library roots│     │
-│  │  mixin_find_class     ◄─── works automatically (allScope) │     │
-│  │  mixin_search_symbols ◄─── works automatically (indexed)  │     │
-│  └────────────────────────────────────────────────────────────┘     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Why `AdditionalLibraryRootsProvider` instead of `LibraryEx.modifiableModel`:**
-Gradle sync rebuilds the project model from scratch and **discards** manually-added
-library roots. IntelliJ's own warning: "A Library is imported from Gradle. Any changes
-made in its configuration might be lost after reimporting." The
-`AdditionalLibraryRootsProvider` / `SyntheticLibrary` mechanism is explicitly designed
-for synthetic roots that exist outside the build system's project model — they survive
-sync because they're never part of the Gradle model to begin with.
-
-**Why Vineflower as a library dependency instead of IntelliJ's built-in decompiler:**
-IntelliJ's `IdeaDecompiler` is designed for on-demand single-file use in the editor.
-Batch-invoking it from a background thread has undocumented threading constraints and
-couples us to IntelliJ's internal decompiler version. Vineflower as an explicit library
-dependency gives us full control: deterministic versions, no threading surprises, no
-dependency on editor state. It's also the same decompiler IntelliJ bundles (Fernflower
-→ Vineflower lineage), so output quality is equivalent.
-
-### 11.5 Implementation Steps
-
-> **Note:** Steps 1–3 and 5 describe the original IDE-side decompilation approach.
-> With the Gradle plugin (Section 11.11), Steps 2–3 move to the Gradle task and
-> Step 5 is simplified — the IDE only reads the cache, not writes it. Step 1 (cache
-> format) and Step 4 (roots provider) remain unchanged.
-
-#### Step 1: Cache Directory & Manifest
-
-- Cache location: `~/.cache/mixinmcp/decompiled/` (XDG-compatible, outside project).
-- `manifest.json` maps artifact identity → cache entry:
-  ```json
-  {
-    "<artifact-hash>": {
-      "libraryName": "org.example:foo:1.0",
-      "classesJarPath": "/path/to/foo-1.0.jar",
-      "jarSize": 123456,
-      "jarModified": 1700000000000,
-      "cachePath": "/home/user/.cache/mixinmcp/decompiled/a1b2c3d4/",
-      "decompilerVersion": "vineflower-1.10.1",
-      "createdAt": 1700000000000
-    }
-  }
-  ```
-- Artifact hash: SHA-256 of `(jarPath + jarSize + jarLastModified)`. Fast to compute
-  (no need to hash file contents), sufficient for invalidation.
-
-#### Step 2: Library Enumeration
-
-- After Gradle sync, iterate `ModuleManager.getInstance(project).modules` →
-  `ModuleRootManager.orderEntries` → filter `LibraryOrderEntry` instances where
-  `library.getFiles(OrderRootType.SOURCES)` is empty but
-  `library.getFiles(OrderRootType.CLASSES)` is non-empty.
-- Skip JDK/platform libraries (sources available via JDK install) — filter by
-  checking if the order entry is a `JdkOrderEntry`.
-- Collect the list of JARs to process.
-
-#### Step 3: Decompilation via Vineflower
-
-- Add Vineflower as a compile dependency in `build.gradle.kts`:
-  `implementation("org.vineflower:vineflower:1.11.2")` (or `-slim` variant).
-- For each JAR needing decompilation:
-  1. Check manifest — if a valid cache entry exists with matching hash, skip.
-  2. Create a cache subdirectory: `<cacheRoot>/<artifact-hash>/`.
-  3. Invoke Vineflower's `Decompiler` API — pass the JAR `File` as input and a
-     `DirectoryResultSaver(<cacheDir>)` as output. Vineflower handles JAR
-     enumeration, class parsing, and package-structured `.java` file output
-     internally. One call decompiles the entire JAR (see Section 11.7 for API
-     details and code sample).
-  4. Update manifest entry with artifact hash, cache path, decompiler version.
-- **Threading:** Run on a background thread via `ProgressManager.getInstance()
-  .run(Task.Backgroundable(...))`. Vineflower is a pure library with no IntelliJ
-  threading constraints — safe to call from any thread.
-- **Progress:** Report per-JAR progress in the IDE's background task indicator.
-  Optionally implement `IFernflowerLogger` to capture per-class progress from
-  Vineflower.
-- **Limits:** Cap total decompilation time per sync (configurable, default 120s).
-  Process largest/most-important JARs first (heuristic: JARs from the project's
-  direct dependencies before transitive ones).
-
-#### Step 4: Expose via AdditionalLibraryRootsProvider
-
-- Register `MixinDecompiledRootsProvider extends AdditionalLibraryRootsProvider` in
-  `plugin.xml`:
-  ```xml
-  <extensions defaultExtensionNs="com.intellij">
-      <additionalLibraryRootsProvider
-          implementation="dev.mixinmcp.cache.MixinDecompiledRootsProvider"/>
-  </extensions>
-  ```
-- `getAdditionalProjectLibraries(project)` reads the manifest and returns a
-  `SyntheticLibrary` for each cached artifact using the **5-parameter overload**
-  that accepts a `comparisonId` and `ExcludeFileCondition`:
-  ```kotlin
-  SyntheticLibrary.newImmutableLibrary(
-      "mixinmcp-${info.artifactHash}",   // comparisonId — stable per-artifact, enables incremental rescan
-      listOf(info.root),                  // sourceRoots — decompiled .java dirs
-      emptyList(),                        // binaryRoots — none needed
-      emptySet(),                         // excludedRoots — none
-      ExcludeFileCondition { isDir, filename, _, _, _ ->
-          !isDir && !filename.endsWith(".java")
-      }
-  )
-  ```
-  **Important:** The 4-parameter overload (without `comparisonId`, using `Condition`)
-  is deprecated. Per the `SyntheticLibrary` Javadoc: "Non-null [Condition] value blocks
-  from incremental rescanning of library changes." Using the 5-parameter overload with
-  `comparisonId` + `ExcludeFileCondition` allows IntelliJ to rescan only changed
-  libraries instead of re-indexing all synthetic roots on every change.
-
-  Note on parameter order: `newImmutableLibrary(sourceRoots, binaryRoots, ...)` — the
-  first list is `sourceRoots`, not `binaryRoots`. Decompiled `.java` directories belong
-  in `sourceRoots` so they are indexed as library source files and visible to
-  `GlobalSearchScope.allScope()`.
-- After decompilation completes, call
-  `AdditionalLibraryRootsListener.fireAdditionalLibraryChanged(...)` to trigger
-  IntelliJ to re-query the provider and re-index the new roots.
-- **Effect on existing tools:**
-  - `mixin_find_class`, `mixin_search_symbols`: work automatically — the decompiled
-    files are in `allScope()` and indexed by `PsiShortNamesCache`.
-  - `mixin_search_in_deps`, `mixin_get_dep_source`: `collectAllSourceRoots()` already
-    queries `AdditionalLibraryRootsProvider.EP_NAME.extensionList` to include synthetic
-    library source roots alongside `OrderRootType.SOURCES` on library order entries.
-    No further tool changes needed — decompiled content is searchable once the
-    `SyntheticLibrary` roots are exposed and indexed.
-
-#### Step 5: Sync Trigger & Invalidation
-
-- **Trigger on sync:** Register an `ExternalSystemTaskNotificationListener` (via
-  `com.intellij.externalSystemTaskNotificationListener` EP) and trigger cache refresh
-  in `onSuccess()` when the task is a project resolve/sync. Alternatively, use
-  `ExternalSystemExecutionAware` which receives the task type and listener.
-- **Trigger on project open:** Implement `ProjectActivity` to run cache refresh on
-  startup (checks manifest, attaches existing cache entries, queues decompilation for
-  any new/changed JARs).
-- **Invalidation:** On each trigger, re-enumerate libraries. For each:
-  - If JAR hash matches manifest → skip (already cached and exposed).
-  - If JAR hash changed → delete old cache entry, re-decompile, update manifest.
-  - If library was removed → delete orphaned cache entry, remove from provider.
-- **Manual trigger:** Extend `mixin_sync_project` — after Gradle sync completes,
-  also trigger the decompilation cache refresh.
-- **Notification:** After cache changes, call
-  `AdditionalLibraryRootsListener.fireAdditionalLibraryChanged()` so IntelliJ
-  re-queries the provider and re-indexes.
-
-#### Step 6: User Configuration (Optional)
-
-- Settings in plugin preferences:
-  - Enable/disable decompilation cache (default: enabled)
-  - Cache size limit (default: 2 GB)
-  - Excluded library patterns (e.g., `org.jetbrains.*`)
-  - Maximum decompilation time per sync
-
-### 11.6 Resolved Questions
-
-1. ~~**Decompiler API access**~~ → **Resolved: Use Vineflower as a library dependency.**
-   Avoids IntelliJ threading constraints and gives deterministic version control. Invoke
-   on background threads without restriction.
-
-2. ~~**Library model modification**~~ → **Resolved: Do NOT modify library roots.**
-   Gradle sync destroys manually-added roots. Use `AdditionalLibraryRootsProvider` /
-   `SyntheticLibrary` instead — these exist outside the Gradle project model and
-   survive sync. Source roots are in `GlobalSearchScope.allScope()` and indexed.
-
-3. ~~**Gradle sync listener API**~~ → **Resolved: Use
-   `ExternalSystemTaskNotificationListener`** registered via the
-   `com.intellij.externalSystemTaskNotificationListener` extension point. The
-   `onSuccess()` callback fires after sync completes. Combine with `ProjectActivity`
-   for project-open trigger.
-
-4. ~~**Timing: tools vs. background decompilation**~~ → **Resolved: Move
-   decompilation to a Gradle task** (Section 11.10, 11.11). Background decompilation
-   in the IDE creates a race condition where MCP tools execute before decompilation
-   finishes. The Gradle plugin (`./gradlew genDependencySources`) makes decompilation a
-   blocking build step, eliminating the timing gap. The IntelliJ plugin becomes a
-   read-only cache consumer.
-
-5. ~~**Concurrent access**~~ → **Resolved: Gradle daemon serialization + shared
-   cache.** The Gradle plugin runs within the Gradle daemon, which serializes task
-   execution per project. Multiple projects sharing `~/.cache/mixinmcp/` is safe
-   because the artifact hash includes the full JAR path — different projects
-   referencing the same JAR at the same path produce the same hash and the same
-   cache entry (idempotent). Different JAR paths produce different hashes. Manifest
-   file-locking is still recommended for robustness but not critical for correctness.
-
-6. ~~**Tool modification scope**~~ → **Resolved: Already implemented.**
-   `collectAllSourceRoots()` in `tools/source/DepSearchHelpers.kt` already queries
-   `AdditionalLibraryRootsProvider.EP_NAME.extensionList` to include synthetic
-   library source roots. No tool changes needed — decompiled `.java` files in
-   synthetic roots are searchable/readable via the same `VirtualFile` APIs.
-
-### 11.7 Resolved: Vineflower API
-
-Vineflower (v1.11.2) has a clean programmatic API at
-`org.jetbrains.java.decompiler.api.Decompiler`. The simplest invocation for our use
-case — decompile an entire JAR to a directory:
-
-```kotlin
-val decompiler = Decompiler.builder()
-    .inputs(jarFile)                              // File — Vineflower handles JAR enumeration
-    .output(DirectoryResultSaver(cacheDir))       // writes .java preserving package structure
-    .option(IFernflowerPreferences.REMOVE_BRIDGE, "1")
-    .option(IFernflowerPreferences.REMOVE_SYNTHETIC, "0")  // keep synthetic for mixin use
-    .logger(IFernflowerLogger.NO_OP)              // or a progress-reporting impl
-    .build()
-
-decompiler.decompile()                            // blocking, run on background thread
-```
-
-Key findings from reading the source:
-
-- **Input:** `Builder.inputs(File)` accepts JAR files directly. No need to enumerate
-  `.class` entries ourselves — Vineflower does it internally.
-- **Output:** `DirectoryResultSaver(File root)` writes decompiled `.java` files to
-  the given directory, preserving package structure. `saveClassFile()` receives the
-  `content` as a `String` and writes it via `BufferedWriter`.
-- **No in-memory needed:** We want files on disk anyway (for the cache), so
-  `DirectoryResultSaver` is the exact match. No custom `IResultSaver` required.
-- **Whole-JAR decompilation:** Processing the entire JAR in one call lets Vineflower
-  use cross-class context for better decompilation quality (resolved generics,
-  inlined constants, etc.) vs. per-class decompilation.
-- **Artifact:** `org.vineflower:vineflower:1.11.2` on Maven Central. A `-slim`
-  variant exists without plugins (smaller footprint).
-- **Thread-safe:** Pure library with no IntelliJ dependencies. Safe to call from any
-  background thread.
-
-### 11.8 Resolved: AdditionalLibraryRootsListener API
-
-The notification method to trigger re-indexing after cache changes:
-
-```kotlin
-// Must be called under write lock
-ApplicationManager.getApplication().runWriteAction {
-    AdditionalLibraryRootsListener.fireAdditionalLibraryChanged(
-        project,
-        "MixinMCP Decompiled: org.example:foo:1.0",  // presentableLibraryName (for UI)
-        emptyList(),                                   // oldRoots (empty on first attach)
-        listOf(cacheDirVirtualFile),                   // newRoots (cache dir to index)
-        "mixinmcp-decompiled"                          // libraryNameForDebug (for logs)
-    )
-}
-```
-
-Key details from the source (`AdditionalLibraryRootsListener.java`):
-
-- **`@RequiresWriteLock`** — must be called inside `runWriteAction { }`.
-- `presentableLibraryName` is nullable, used for progress titles during indexing.
-- `oldRoots` / `newRoots` are `Collection<VirtualFile>`.
-- For initial attachment: empty `oldRoots`, cache dirs as `newRoots`.
-- For cache invalidation/update: old cache dirs as `oldRoots`, new as `newRoots`.
-- Can also pass empty `oldRoots` + empty `newRoots` to force a full re-read of all
-  `AdditionalLibraryRootsProvider` instances.
-- **`@ApiStatus.Experimental`** — the API is marked experimental, but it's the
-  canonical approach used by JetBrains' own plugins. Worth noting for future
-  compatibility checks.
-- Per the Javadoc: "In particular `newRoots` would be indexed, and the Project View
-  tree would be refreshed."
-
-### 11.9 Open Questions
-
-Remaining items before implementation:
-
-1. **Re-indexing cost:** `SyntheticLibrary` roots are indexed by IntelliJ. Need to
-   measure whether exposing 50+ decompiled-source directories via the provider causes
-   noticeable IDE slowdown. The `comparisonId` mechanism should enable incremental
-   rescanning (only re-index changed libraries), but needs verification.
-
-2. **Decompiler quality & faithfulness:** Decompiled output differs from original
-   sources (different variable names, restructured control flow, lost comments/Javadoc).
-   Acceptable for search/navigation but the LLM should know the source is decompiled.
-   Consider adding a `// DECOMPILED — not original source` header to each file, or
-   implementing a custom `IResultSaver` that prepends this header before writing.
-
-3. **Loom/MDG interaction:** Loom and MDG already decompile Minecraft and attach
-   sources. Verify that our provider doesn't create duplicate synthetic libraries for
-   JARs that already have SOURCES roots (the enumeration in Step 2 should filter
-   these out, but needs testing with real Fabric/Forge projects).
-
-4. **Scale estimate:** How many libraries lack sources in a typical Minecraft mod
-   project? Determines whether background decompilation takes seconds or minutes,
-   and whether priority ordering is needed. Check in IntelliJ: Project Structure →
-   Libraries → count those without a sources JAR attached.
-
-5. **Gradle Plugin Portal publishing:** The `dev.mixinmcp.decompile` Gradle plugin
-   needs its own publishing pipeline. Determine whether to publish to the Gradle
-   Plugin Portal, Maven Central, or both. Coordinate versioning with the IntelliJ
-   plugin.
-
-### 11.10 Resolved: Timing — Tools vs. Background Decompilation
-
-The original design (Section 11.5 Step 5) triggers decompilation as a
-`Task.Backgroundable` after Gradle sync completes, and again via `ProjectActivity`
-on project open. This creates a **timing gap**: MCP tools can execute before
-decompilation finishes, causing `mixin_search_in_deps` to return incomplete results
-for decompiled content.
-
-**How the gap manifests:**
-
-1. User opens project → `MixinDecompileCacheStartupActivity` attaches cached roots
-   from the manifest immediately, then queues a background `refreshCache()` for
-   new/changed JARs.
-2. User triggers Gradle sync → `MixinDecompileCacheSyncListener.onSuccess()` queues
-   another background `refreshCache()`.
-3. LLM calls `mixin_search_in_deps` → `collectAllSourceRoots()` queries the
-   `AdditionalLibraryRootsProvider`, but decompilation is still in progress. Only
-   previously-cached roots are visible; newly-added dependencies are missing.
-
-**Why there is no good in-process fix:** The MCP tool has no mechanism to block
-until decompilation finishes. Adding one would stall the LLM on every tool call.
-Exposing a "decompilation in progress" status adds complexity to the tool protocol
-and shifts the burden to the LLM to retry.
-
-**Resolution: Move decompilation to Gradle (Section 11.11).** A Gradle task
-(`./gradlew genDependencySources`) runs decompilation as a blocking build step. The cache
-is fully populated before the IDE opens or the user starts working. The IntelliJ
-plugin becomes a read-only cache consumer — it never decompiles, only reads the
-manifest and exposes roots. This eliminates the timing gap entirely.
-
-**Fallback for the hybrid approach:** If the plugin retains background decompilation
-as a convenience fallback (see Section 11.11), the timing gap still exists for that
-path. The mitigation is to treat it as best-effort: previously-cached results are
-available immediately, and newly-decompiled content appears after the background task
-finishes and `fireAdditionalLibraryChanged()` triggers re-indexing. The Gradle task
-remains the "guaranteed complete" path.
-
-### 11.11 Gradle Plugin for Decompilation
-
-> **Status:** Implemented in `mixinmcp-gradle/` module. Published as
-> `dev.mixinmcp.decompile`. IDE-side decompilation removed; the IntelliJ
-> plugin is a read-only cache consumer.
-
-#### 11.11.1 Motivation
-
-| Concern | Background decompilation (current) | Gradle task |
-|---------|-----------------------------------|-------------|
-| **Determinism** | Tools can run before decompilation finishes | Task completes before IDE opens |
-| **Visibility** | Silent background task; errors logged to `idea.log` | Progress and errors in Gradle console output |
-| **CI support** | Requires a running IDE | `./gradlew genDependencySources` in any environment |
-| **User control** | Automatic on sync; no way to run on demand | Explicit: run when needed, skip when not |
-| **Reproducibility** | Cache state depends on when the IDE was last open | Cache state depends on dependency resolution — reproducible |
-
-#### 11.11.2 User-Facing Design
-
-Users apply the plugin in their `build.gradle.kts`:
-
-```kotlin
-plugins {
-    id("dev.mixinmcp.decompile") version "..."
-}
-```
-
-The plugin registers a `genDependencySources` task:
-
-```bash
-./gradlew genDependencySources
-```
-
-After dependency resolution, this task:
-1. Enumerates resolved configurations for JARs without `-sources.jar` counterparts.
-2. For each JAR, computes the artifact hash using the same algorithm as
-   `DecompilationManifest.computeArtifactHash` (SHA-256 of `jarPath|jarSize|jarModified`).
-3. Checks `~/.cache/mixinmcp/decompiled/manifest.json` for a cache hit.
-4. On miss: invokes Vineflower to decompile to `~/.cache/mixinmcp/decompiled/<hash>/`.
-5. Updates `manifest.json` with the new entry.
-6. Deletes orphaned cache entries for JARs no longer in the dependency graph.
-
-The task is **incremental**: re-running it after a dependency change only decompiles
-new/changed JARs. Unchanged entries are served from cache.
-
-#### 11.11.3 Shared Cache Layout
-
-The Gradle plugin writes to the **exact same** directory structure and manifest format
-as the existing `DecompilationCacheService`:
-
-```
-~/.cache/mixinmcp/decompiled/
-├── manifest.json
-├── <artifact-hash-1>/
-│   └── com/example/Foo.java
-├── <artifact-hash-2>/
-│   └── net/minecraft/...
-└── ...
-```
-
-This means:
-- `MixinDecompiledRootsProvider` reads from this cache **without any changes**.
-- `DecompilationCacheService.getCachedRoots()` works as-is — it reads `manifest.json`
-  and returns `CachedLibraryInfo` entries with VirtualFile roots.
-- No protocol or format changes between the Gradle plugin and the IntelliJ plugin.
-
-#### 11.11.4 Dependency Enumeration in Gradle
-
-In the IntelliJ plugin, library enumeration uses `ModuleRootManager.orderEntries` to
-find `LibraryOrderEntry` instances without SOURCES roots. In the Gradle plugin, the
-equivalent is resolving Gradle configurations:
-
-```kotlin
-// Pseudo-code for the Gradle task action
-val resolvedArtifacts = project.configurations
-    .filter { it.isCanBeResolved }
-    .flatMap { it.resolvedConfiguration.resolvedArtifacts }
-
-val withoutSources = resolvedArtifacts.filter { artifact ->
-    val sourcesClassifier = "${artifact.name}-sources"
-    // Check if a -sources.jar exists for this artifact
-    !resolvedArtifacts.any { it.classifier == "sources" && it.name == artifact.name }
-}
-```
-
-JARs from the JDK and JARs that already have attached `-sources.jar` are excluded,
-matching the IntelliJ-side enumeration logic.
-
-#### 11.11.5 Impact on the IntelliJ Plugin
-
-With the Gradle plugin as the primary decompilation path:
-
-- **`DecompilationCacheService`** becomes read-only. `refreshCache()` no longer
-  enumerates libraries or invokes Vineflower — it only reads `manifest.json` and
-  returns cached roots. The Vineflower dependency can be removed from the IntelliJ
-  plugin's `build.gradle.kts`, reducing plugin size.
-- **`MixinDecompileCacheSyncListener`** is simplified or removed. After Gradle sync,
-  it only calls `fireAdditionalLibraryChanged()` to re-read the (already-populated)
-  cache — no background decompilation task.
-- **`MixinDecompileCacheStartupActivity`** remains: on project open, it reads the
-  manifest and attaches existing cached roots immediately.
-- **`MixinDecompiledRootsProvider`** remains unchanged: reads manifest, returns
-  `SyntheticLibrary` per cached artifact.
-
-#### 11.11.6 Hybrid Option
-
-As an alternative to making the IntelliJ plugin fully read-only:
-
-- **Gradle task** is the "guaranteed complete" path — deterministic, CI-friendly.
-- **IntelliJ plugin** retains background decompilation as a **convenience fallback**
-  for users who haven't run `./gradlew genDependencySources` yet.
-- The plugin checks the manifest before decompiling: if the Gradle task has already
-  populated a cache entry for a given JAR hash, the plugin skips it.
-- The Gradle task is authoritative: if it has run, the plugin defers entirely.
-
-**Recommendation:** Start with the Gradle plugin as the sole decompilation path
-(simpler, no timing issues, smaller plugin). Add the hybrid fallback only if user
-feedback indicates the explicit Gradle step is too much friction.
-
-#### 11.11.7 Gradle Plugin Implementation Sketch
-
-The plugin would be a separate Gradle project/module, published to the Gradle Plugin
-Portal alongside the IntelliJ plugin on JetBrains Marketplace:
-
-```
-mixinmcp-gradle/
-├── build.gradle.kts          # Gradle plugin project
-├── src/main/kotlin/
-│   └── dev/mixinmcp/gradle/
-│       ├── MixinDecompilePlugin.kt    # Plugin entry point
-│       ├── MixinDecompileTask.kt      # Task implementation
-│       └── DecompilationManifest.kt   # Shared manifest format (duplicated or extracted)
-└── src/main/resources/
-    └── META-INF/gradle-plugins/
-        └── dev.mixinmcp.decompile.properties
-```
-
-The `DecompilationManifest` format is shared between the Gradle plugin and IntelliJ
-plugin. Options for sharing:
-1. **Duplicate the data class** — simplest; the format is ~60 lines and changes rarely.
-2. **Extract to a shared module** — cleaner but adds a multi-module build.
-
-Recommendation: duplicate for now; extract if the format evolves.
-
-### 11.12 Alternatives Considered
-
-**Scoped on-demand decompilation tool:** A new `mixin_search_decompiled` tool that
-takes a `packagePrefix`, decompiles matching classes on the fly, and runs regex over
-the result. Simpler to implement but adds another tool to context, requires the LLM to
-know which tool to use when, and re-decompiles on every invocation. Rejected in favor
-of the transparent cache approach that makes existing tools work everywhere.
-
-**IntelliJ's ephemeral decompiler cache:** IntelliJ already decompiles on demand but
-doesn't persist results. We could hook into the decompiler's output and cache it, but
-this only covers classes the user has explicitly navigated to — not useful for search
-across classes never opened.
-
----
-
-## 13. Enhancements (Implemented)
-
-> All three enhancements below are implemented and tested as of this revision.
-
-### 13.1 JVM Method Descriptor Support (`methodDescriptor` parameter) — DONE
-
-**Problem:** Tools that disambiguate overloaded methods (`mixin_call_hierarchy`,
-`mixin_find_references`, `mixin_super_methods`) require `parameterTypes` as an array
-of simple Java type names (e.g. `["MobEffectInstance", "Entity"]`). Mixin developers
-think in JVM method descriptors — they write them constantly in `@Inject(method = "...")`.
-Translating `(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z`
-to `["MobEffectInstance", "Entity"]` is unnecessary friction.
-
-**Solution:** Add an optional `methodDescriptor: String?` parameter to all tools that
-currently accept `parameterTypes`. If provided, it takes precedence over `parameterTypes`.
-
-**Implementation:**
-
-1. **`MethodResolver` — add descriptor parsing:**
-   - Add `resolveByDescriptor(project, className, methodName, descriptor)` method.
-   - Parse the JVM descriptor string to extract parameter types. The descriptor format is
-     well-defined: `(` params `)` returnType, where each param is `L` fqcn `;` (objects),
-     `[` (arrays), or single-char primitives (`I`, `Z`, `D`, etc.).
-   - Match against `PsiMethod.parameterList` by comparing canonical type names derived
-     from the descriptor against `PsiParameter.type.canonicalText`.
-   - Fallback: if PSI matching fails (remapped names differ from descriptor), match at the
-     bytecode level via `BytecodeAnalyzer.analyze()` to find the method by exact descriptor,
-     then resolve back to PSI.
-
-2. **Affected tools:**
-   - `mixin_call_hierarchy`: add `methodDescriptor: String? = null`
-   - `mixin_find_references`: add `methodDescriptor: String? = null`
-   - `mixin_super_methods`: add `methodDescriptor: String? = null`
-   - `mixin_method_bytecode`: already has `methodDescriptor` — no change needed
-
-3. **`resolveDetailed()` update:** If both `methodDescriptor` and `parameterTypes` are
-   provided, `methodDescriptor` takes precedence. Error messages should show both the
-   descriptor and the `parameterTypes` equivalent so agents learn the mapping.
-
-4. **Descriptor parsing utility:** Add `DescriptorParser` to `dev.mixinmcp.resolve`:
-   ```
-   object DescriptorParser {
-       fun parseParameterTypes(descriptor: String): List<String>
-       fun toSimpleNames(internalNames: List<String>): List<String>
-   }
-   ```
-   The parser must handle: object types (`L...;`), array types (`[`), all primitives,
-   and nested arrays of objects (`[[Ljava/lang/String;`).
-
-5. **Tool description updates:** Document `methodDescriptor` as accepting the JVM format
-   agents already see in mixin annotations (e.g. `"(Lnet/minecraft/...;)V"`).
-
-### 13.2 Vanilla Minecraft Source Root Coverage — PARTIAL (diagnostic tool done)
-
-> **Step 1 implemented:** `mixin_list_source_roots` tool lists all source roots with types and sample paths.
-
-**Problem:** `mixin_search_in_deps` and `mixin_get_dep_source` search
-`OrderRootType.SOURCES` roots and `AdditionalLibraryRootsProvider` synthetic roots.
-Whether vanilla Minecraft classes appear depends on how the mod loader registers sources:
-
-- **Fabric/Loom:** Typically attaches remapped sources to the Minecraft library entry.
-  `SOURCES` roots should include them. If not, Loom may register them as a separate library.
-- **ForgeGradle/NeoGradle:** May only provide compiled classes without a `-sources.jar`
-  attachment for the merged jar. Sources may be in a separate `_mapped_*` library or
-  not available at all via `OrderRootType.SOURCES`.
-
-The decompilation cache (Vineflower Gradle plugin) is designed to fill this gap, but
-the user may not have run `./gradlew genDependencySources`, or the Minecraft jar may be
-excluded from decompilation because the mod loader already provides a form of sources.
-
-**Investigation steps:**
-
-1. **Diagnostic tool/logging:** Add a debug mode to `mixin_search_in_deps` (or a
-   separate `mixin_list_source_roots` tool) that lists all source roots with their types
-   and sample file paths. This reveals exactly what the search covers on each loader.
-
-2. **Test matrix:** Test `collectAllSourceRoots` output on:
-   - Fabric 1.21 (Loom)
-   - NeoForge 1.21 (NeoGradle)
-   - Forge 1.20.x (ForgeGradle)
-   Document which loaders attach Minecraft sources and which don't.
-
-3. **Potential fixes:**
-   - **Include `CLASSES` roots as fallback:** If a library has no `SOURCES` root but
-     has `CLASSES`, decompile on-demand or note the gap in results.
-   - **Use PSI as bridge:** For classes resolvable via `GlobalSearchScope.allScope(project)`
-     (which includes everything), offer a `--deep` mode that decompiles matched classes
-     on the fly using IntelliJ's built-in decompiler.
-   - **Ensure decompilation cache covers Minecraft:** Update the Gradle plugin to
-     explicitly include the merged Minecraft jar if no sources are attached.
-
-4. **Interim mitigation:** Already implemented — `mixin_get_dep_source` now suggests
-   `mixin_find_class` with `includeSource=true` when a `net/minecraft/` path fails.
-
-### 13.3 Mixin Conflict Detection Tool (`mixin_find_targeting_mixins`) — DONE
-
-> **Status:** Implemented. Phase 1 (annotation search) and Phase 2 (regex fallback) both implemented.
-
-**Problem:** Discovering that another mod's mixin targets the same method you're
-injecting into currently requires accidental discovery via `mixin_find_references`
-(which returns string references in mixin annotations alongside code references).
-A dedicated tool would make cross-mod conflict analysis first-class.
-
-**Proposed tool:** `mixin_find_targeting_mixins`
-
-**Parameters:**
-```
-className: String          // Target class (e.g. net.minecraft.server.level.ServerPlayer)
-methodName: String? = null // Optionally narrow to a specific method
-maxResults: Int = 50
-projectPath: String? = null
-```
-
-**Returns:** All `@Mixin` classes across project and dependencies that target the given
-class, with their injection points (`@Inject`, `@Redirect`, `@Overwrite`, `@ModifyArg`,
-etc.) and `@At` targets.
-
-**Implementation approach:**
-
-1. **Phase 1 — Annotation-based search:**
-   - Use `AnnotatedElementsSearch` to find all classes annotated with
-     `@org.spongepowered.asm.mixin.Mixin` across `GlobalSearchScope.allScope(project)`.
-   - For each `@Mixin` class, read the `value` or `targets` annotation parameter.
-   - Filter to those targeting `className`.
-   - If `methodName` is specified, further filter by scanning `@Inject(method=...)`,
-     `@Redirect(method=...)`, etc. in the mixin class.
-
-2. **Phase 2 — String search fallback:**
-   - Some mixin annotations may be in compiled dependencies without full PSI annotation
-     support. Fall back to `mixin_search_in_deps`-style regex search for
-     `@Mixin.*className` patterns.
-
-3. **Output format:**
-   ```
-   === Mixins targeting net.minecraft.server.level.ServerPlayer#addEffect ===
-
-   1. com.example.mod.mixin.MixinServerPlayer
-      @Inject(method = "addEffect", at = @At("HEAD"))
-      Source: jar:///path/to/mod.jar!/com/example/mod/mixin/MixinServerPlayer.java
-
-   2. io.othermod.mixin.PlayerEffectMixin
-      @Redirect(method = "addEffect", at = @At(value = "INVOKE", target = "..."))
-      Source: jar:///path/to/othermod.jar!/io/othermod/mixin/PlayerEffectMixin.java
-   ```
-
-4. **Challenges:**
-   - `AnnotatedElementsSearch` may not index annotations in all dependencies.
-     The index coverage depends on whether sources are attached.
-   - Mixin `targets` can use string names (`"net.minecraft.server.level.ServerPlayer"`)
-     or class references (`ServerPlayer.class`). Both need matching.
-   - For compiled-only dependencies, annotation info may only be available via bytecode.
-     Consider using ASM to scan class files for `@Mixin` annotations as a fallback.
-
-5. **Dependencies:** This tool benefits from #13.2 (vanilla source coverage) being
-   resolved first, since mixin annotations in dependencies need to be indexed.
-
----
-
-## 14. License
-
-Apache-2.0 (matching JetBrains ecosystem conventions).
+GPL-3.0 (see `LICENSE`).

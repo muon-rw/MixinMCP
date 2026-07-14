@@ -2,7 +2,9 @@
 
 # MixinMCP Changelog
 
-## [Unreleased]
+## [1.1.1]
+### Improved
+- Minor bits of documentation and skills related to changes in 1.1.0
 
 ## [1.1.0]
 
@@ -18,6 +20,7 @@ Minimum IntelliJ version is now 2026.1
 - Gradle plugin: Minecraft jars are no longer source-mirrored into the cache; each toolchain's own sources jar is used when present, keeping decompilation as the fallback *only* when it isn't.
 - Gradle plugin: the unresolved-artifact warning now lists the actual failure causes (e.g. corrupt cached jars) instead of guessing at missing mapping data
 - Gradle plugin: Added QoL feature to detect and purge automatically corrupt or truncated cached downloads. Thank you Cursemaven, very cool.
+- Injected skills/references updated for the above: MDG vanilla-mode coverage, the sibling sources fallback, decompiled-root dedup semantics, the corrupt-download purge flow, and synthetic fields in `mixin_class_bytecode`
 - Plugin SDK compliance: source auto-attach is now a project service on a coroutine scope, removing EDT file IO, an internal Alarm constructor, and a Project-parented disposable. 
 - Plugin SDK compliance: No longer bundle kotlin-stdlib or org.jetbrains annotations
 

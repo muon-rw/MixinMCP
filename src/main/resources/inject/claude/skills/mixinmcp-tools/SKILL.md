@@ -123,7 +123,7 @@ mixin_find_references(className="net.minecraft.world.entity.LivingEntity", membe
   - Does NOT match jar names or Maven coordinates.
   - **Caution:** Short substrings like `apotheosis` will also match paths in *other* mods' compatibility packages (e.g. `compat/apotheosis/`). Use longer path fragments or `pathPrefix` for precision.
 - `pathPrefix`: restricts to files whose logical path starts with the prefix (e.g. `net/minecraft/` or `io/redspace/ironsspellbooks/`). Use forward slashes.
-- `roots`: `all` (default), `library` (only published -sources.jar), `decompiled` (only MixinMCP cache). When `all`, cache files are skipped if the same path already matched in library sources.
+- `roots`: `all` (default), `library` (only published -sources.jar), `decompiled` (only MixinMCP cache). When `all`, cache files are skipped if the same path already matched in library sources. Cache roots that duplicate an already-attached sources jar are not indexed at all, so `decompiled` only contains deps with no sources anywhere (typically cursemaven jars).
 - `contextLines` (default 0, max 200): include N lines around each match. Match lines stay highlighted with `||markers||` and are prefixed with `>`; overlapping windows are merged per file. Use small values (3–10) when you expect a **short** matched body (a few-line override) so the result captures the body inline and you can skip the follow-up `mixin_get_dep_source` call. For longer methods or unfocused searches keep the default 0.
 - Broad searches can time out. Increase `timeout` (e.g. 20000–30000) for searches without a fileMask.
 
@@ -170,6 +170,7 @@ actually present, not just nominally on the classpath.
 
 ### mixin_class_bytecode
 - Decompiled source does NOT show synthetic method names. To target a lambda in @Redirect or @Inject, you MUST use this tool with `filter="synthetic"`.
+- `filter="synthetic"` also lists synthetic fields (`this$0`, `$VALUES`, switch-map fields), useful for @Shadow targeting of outer-class references.
 
 ### mixin_method_bytecode
 - Each INVOKE* instruction shows the **real owner class**, not the declaring class from source. Always use this owner when writing `@At(target = "...")`.

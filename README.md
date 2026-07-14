@@ -63,7 +63,9 @@ MixinMCP has two parts. You need **both** for full-classpath search to work:
 Use IntelliJ's **Auto-Configure** option for your client (or configure manually using the ip address), then restart the client. The auto-configured server name is usually **`user-jetbrains`**
 
 > [!CAUTION]
-> MixinMCP exposes full project and dependency source, classpath metadata, and bytecode to whatever connects to the MCP server. These tools aren't hardened for remote access. IntelliJ binds the server to localhost by default — leave it that way unless you have a specific reason, and expose it more broadly at your own risk.
+> MixinMCP exposes full project and dependency source, classpath metadata, and most importantly, *file editing and directory refactoring tools*, to whatever connects to the MCP server. These tools aren't hardened for remote access. 
+> 
+> IntelliJ binds the server to localhost only by default, and you should leave it that way unless you have a specific reason and you know the risks. 
 
 For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-rules-and-skills).
 
@@ -71,8 +73,12 @@ For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-r
 
 > [!IMPORTANT]
 > Without this step, `mixin_search_in_deps` and `mixin_get_dep_source` can only see dependencies that published a `-sources.jar`.
-> This means that local jar dependencies, Cursemaven dependencies, and many from Modrinth Maven dependencies are totally invisible.
-> The Gradle plugin decompiles these via [Vineflower](https://github.com/Vineflower/vineflower) into a local cache that the IntelliJ plugin indexes automatically.
+> Local jar dependencies, Cursemaven dependencies, and many Modrinth Maven dependencies will be invisible to these tools. 
+> 
+> You'll also be totally on your own to ensure your *loader's* generated sources jar is actually attached, which often has to be done manually.
+> 
+> The Gradle plugin ensures most common loader-merged-jars are attached automatically, and decompiles any remaining dependencies without sources via [Vineflower](https://github.com/Vineflower/vineflower) 
+> into a cache that all tools also read, ensuring all dependencies can be indexed fully. 
 
 
 **1. Add the MixinMCP maven repository to your mod project's `settings.gradle` or `settings.gradle.kts`:**
@@ -123,7 +129,7 @@ For more info, see [Decompilation cache details](#decompilation-cache-details)
 
 The IntelliJ plugin reads the dependency sources cache on project open and after every Gradle sync/task run. 
 
-MixinMCP warns on project open when the Gradle plugin is missing. If you don't need full-classpath decompilation and want to silence this, disable **Warn when Gradle plugin is not detected** in **Settings → Tools → MixinMCP**.
+MixinMCP warns on project open when the Gradle plugin is missing. If you don't need full-classpath decompilation or source auto-attach and want to silence this, disable **Warn when Gradle plugin is not detected** in **Settings → Tools → MixinMCP**.
 
 For local development against an unpublished build, see [Decompilation cache details](#decompilation-cache-details) below.
 
@@ -149,7 +155,7 @@ You can edit these manually, but if you use the same name and do not change the 
 ## Tool reference
 
 <details>
-<summary>All 18 tools (click to expand)</summary>
+<summary>All 19 tools (click to expand)</summary>
 
 ### Source Navigation
 

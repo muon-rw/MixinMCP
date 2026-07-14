@@ -24,14 +24,17 @@ bug report.
 Vanilla MC sources are properly attached as Library SOURCES roots out of the box.
 `mixin_search_in_deps` can grep `net/minecraft/` directly with no extra steps.
 
-## ModDevGradle (MDG) — Forge MDG and NeoForge
+## ModDevGradle (MDG): vanilla mode, Forge, and NeoForge
 
-Vanilla Minecraft and the loader game API ship together in a **merged JAR** under
-`build/moddev/artifacts/`. MixinMCP auto-attaches that merged jar as a Library SOURCES
-root after each Gradle sync, falling back to a Gradle `*-sources.jar` (e.g.
-`net.minecraftforge:forge:*-sources` or `net.neoforged:neoforge:*-sources` under
-`~/.gradle/caches`) when the merged jar has no `.java` entries (i.e. when MDG
-recompilation is disabled).
+Vanilla Minecraft (plus, on Forge/NeoForge, the loader game API) ships in a **merged JAR**
+under `build/moddev/artifacts/`; naming varies by mode and version
+(`vanilla-*-merged.jar`, `minecraft-patched-*-merged.jar`, `forge-*-merged.jar`,
+`neoforge-*-minecraft-merged.jar`). MixinMCP auto-attaches the merged jar as a Library
+SOURCES root after each Gradle sync. This covers MDG's NeoForm-only vanilla mode too,
+as used by the common module of multiloader projects. When the merged jar has no `.java`
+entries (MDG recompilation disabled), MixinMCP falls back to the sibling `*-sources.jar`
+next to the merged jar, then to a Gradle-cache `*-sources.jar`
+(`net.minecraftforge:forge` or `net.neoforged:neoforge`).
 
 After auto-attach completes, `mixin_search_in_deps` is the primary tool for
 `net/minecraft/`, `net/minecraftforge/`, and `net/neoforged/` paths.
@@ -43,8 +46,20 @@ If search is still empty:
 
 ## Fabric Loom
 
-Run `./gradlew genSources` to materialise Minecraft sources, then call
-`mixin_sync_project` so IntelliJ picks up the new `-sources.jar`.
+`./gradlew genSources` materialises Loom's own Minecraft sources jar; after
+`mixin_sync_project`, IntelliJ attaches it as the vanilla Library SOURCES root.
+Without genSources output, MixinMCP's `genDependencySources` decompiles the Loom
+minecraft jar into the cache instead, so vanilla stays searchable either way. Once
+the real sources jar appears, the decompiled copy is dropped automatically; the two
+never produce duplicate results.
+
+## Corrupt or truncated downloads
+
+Repositories without checksums (cursemaven) can leave truncated jars in the Gradle
+cache; these surface as "artifact(s) could not be resolved" or as remap/decompile
+failures. `genDependencySources` detects and purges them automatically, warning
+"purged from the Gradle cache; re-sync to re-download". No manual cache surgery is
+needed: re-syncing (or re-running the task) retries the download until it lands whole.
 
 ## "Sources are missing entirely" recovery
 
