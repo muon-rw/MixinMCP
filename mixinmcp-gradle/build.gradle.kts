@@ -20,7 +20,7 @@ java {
 dependencies {
     implementation("org.vineflower:vineflower:1.11.2")
     implementation(gradleApi())
-    implementation("com.google.code.gson:gson:2.11.0")
+    implementation("com.google.code.gson:gson:2.14.0")
 }
 
 gradlePlugin {
