@@ -2,8 +2,12 @@
 
 # MixinMCP Changelog
 
+## [Unreleased]
+
 ## [1.1.1]
+
 ### Improved
+
 - Minor bits of documentation and skills related to changes in 1.1.0
 
 ## [1.1.0]
@@ -255,7 +259,8 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.1.0...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.1.1...HEAD
+[1.1.1]: https://github.com/muon-rw/MixinMCP/compare/1.1.0...1.1.1
 [1.1.0]: https://github.com/muon-rw/MixinMCP/compare/1.0.6...1.1.0
 [1.0.6]: https://github.com/muon-rw/MixinMCP/compare/1.0.5...1.0.6
 [1.0.5]: https://github.com/muon-rw/MixinMCP/compare/1.0.4...1.0.5

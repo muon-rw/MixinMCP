@@ -7,7 +7,7 @@ Minecraft mod development, with the goal of improving mixin writing and inter-mo
 GitHub:
 https://github.com/muon-rw/MixinMCP
 
-For all features, you will also need the Gradle plugin - see https://github.com/muon-rw/MixinMCP#Setup
+For all features, you will also need the Gradle plugin - see https://github.com/muon-rw/MixinMCP#setup
 
 ## Key features:
 ### 1. Broad-scoped search:
@@ -21,7 +21,7 @@ For all features, you will also need the Gradle plugin - see https://github.com/
 **Regex search across your *entire* classpath including dependencies:**
 
 - Alternative tools have a central problem: You can not perform broad, text-based search like regex on files that aren't in your project's own source. 
-This is exactly the use case that Minecraft development (and mixin writing) needs so desparately - 100 other projects might be interacting with what you are, and you need to know what and how.
+This is exactly the use case that Minecraft development (and mixin writing) needs so desperately - 100 other projects might be interacting with what you are, and you need to know what and how.
 While other tools might be able to read individual files in Minecraft sources, loader or mod APIs, libraries, or other mods you've added for integration or compatibility, they don't have a good way to *search through them*.
 - With this plugin, agents can easily scan the whole project dependency network on their own, including dependencies without published sources. 
 - Circumvents the need to manually copy and paste snippets into context, or for agents to find jars in your gradle cache and unzip/analyze them manually one by one. 
@@ -162,22 +162,22 @@ You can edit these manually, but if you use the same name and do not change the 
 | Tool | Description |
 |------|-------------|
 | `mixin_find_class` | Look up any class by FQCN across project, libraries, and JDK. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. |
-| `mixin_search_symbols` | Find classes, methods, or fields by name pattern across project and all dependencies. |
+| `mixin_search_symbols` | Find classes, methods, or fields by name substring across project and all dependencies. |
 | `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath. Pass `contextLines` to capture short method bodies inline. |
 | `mixin_get_dep_source` | Read source from dependency jars or decompiled cache. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java). |
 | `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
 
 ### Semantic Navigation
 
-| Tool | Description |
-|------|-------------|
-| `mixin_type_hierarchy` | Full inheritance chain (supertypes and subtypes). Essential before writing mixins. |
-| `mixin_find_impls` | Find all implementations of an interface or abstract class. |
-| `mixin_find_references` | Find all usages of a class, method, or field. |
-| `mixin_call_hierarchy` | Callers and callees of a method, recursive to `maxDepth` (default 3, cap 10) — trace execution flow across levels with cycle detection. Callees cover direct calls, `new Foo(...)`, `Foo::bar`, and the real synthetic target behind each lambda. |
-| `mixin_super_methods` | Find where a method is originally declared in the hierarchy. |
-| `mixin_find_overrides` | Find all overrides of a method across the class hierarchy (project, mods, loader, libraries). |
-| `mixin_find_targeting_mixins` | Find all `@Mixin` classes that target a given class/method — cross-mod conflict analysis. |
+| Tool                          | Description                                                                                                                                                                                                                                       |
+|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `mixin_type_hierarchy`        | Full inheritance chain (supertypes and subtypes). Essential before writing mixins.                                                                                                                                                                |
+| `mixin_find_impls`            | Find all implementations of an interface or abstract class.                                                                                                                                                                                       |
+| `mixin_find_references`       | Find all usages of a class, method, or field.                                                                                                                                                                                                     |
+| `mixin_call_hierarchy`        | Callers and callees of a method, recursive to `maxDepth` (default 3, cap 10), traces execution flow across levels with cycle detection. Callees cover direct calls, `new Foo(...)`, `Foo::bar`, and the real synthetic target behind each lambda. |
+| `mixin_super_methods`         | Find where a method is originally declared in the hierarchy.                                                                                                                                                                                      |
+| `mixin_find_overrides`        | Find all overrides of a method across the class hierarchy (project, mods, loader, libraries).                                                                                                                                                     |
+| `mixin_find_targeting_mixins` | Find all `@Mixin` classes that target a given class/method, for cross-mod conflict analysis.                                                                                                                                                      |
 
 ### Bytecode Inspection
 
@@ -259,6 +259,19 @@ On large modded projects (50+ dependencies, some JARs over 100MB), you might nee
 
 The task saves progress after each JAR, so if things do crash, just resync Gradle or run the task manually and Decompile will pick up where it left off.
 
+### Clearing the cache
+
+```bash
+# Delete this project's cache entries and manifest
+./gradlew cleanSourcesCache
+
+# Delete the entire cache, for all projects
+./gradlew cleanSourcesCache --global
+```
+
+Cache entries untouched for 30 days are also evicted automatically, so manual cleanup is
+rarely needed.
+
 **Prefer native sources when available.** Decompiled output lacks comments,
 meaningful parameter names, and local variable names. If a library publishes
 sources (Maven Central, JitPack, etc.), add the `-sources` classifier in your
@@ -285,14 +298,14 @@ Then swap `maven { url = uri("https://maven.muon.rip/releases") }` for
 ### Building:
 First clone the project and build:
 ```bash
-git clone https://github.com/muon-rw/mixin-mcp.git
-cd mixin-mcp
+git clone https://github.com/muon-rw/MixinMCP.git
+cd MixinMCP
 ./gradlew buildPlugin # IntelliJ plugin
-./gradlew build # Gradle Plugin
+./gradlew :mixinmcp-gradle:build # Gradle plugin
 ```
 Recommended: Publish the Gradle Plugin locally
 ```bash
-./gradlew publishToMavenLocal
+./gradlew :mixinmcp-gradle:publishToMavenLocal
 ```
 
 ### Using: 
@@ -302,7 +315,11 @@ Option 1: Run a sandboxed instance with the plugin installed
 ```
 
 Option 2:
-After `buildPlugin`, The plugin ZIP will be at `build/distributions/mixin-mcp-<version>.zip`.
+After `buildPlugin`, the plugin ZIP will be at `build/distributions/MixinMCP-<version>.zip`.
 
 In IntelliJ: **Settings → Plugins** → ⚙ → **Install Plugin from Disk…**
 </details>
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
