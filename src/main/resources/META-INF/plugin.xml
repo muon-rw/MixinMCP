@@ -19,6 +19,11 @@
         <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.mappings.MappingsToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.ChangeSignatureToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.ExtractToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.InlineToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.MemberMoveToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.SymbolRefactorToolset"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.intellij">

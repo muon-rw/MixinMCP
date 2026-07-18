@@ -13,6 +13,7 @@ import dev.mixinmcp.mappings.SymbolParser
 import dev.mixinmcp.tools.softProject
 import kotlin.coroutines.coroutineContext
 
+@Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class MappingsToolset : McpToolset {
 
     @McpTool

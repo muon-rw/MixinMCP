@@ -4,12 +4,15 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.FieldVisitor
 import org.objectweb.asm.Handle
+import org.objectweb.asm.Label
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
 import org.objectweb.asm.util.Textifier
 import org.objectweb.asm.util.TraceMethodVisitor
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.util.zip.CRC32
 
 /**
  * ASM-based bytecode analysis. Identifies synthetic methods, lambdas,
@@ -45,6 +48,7 @@ object BytecodeAnalyzer {
         val descriptor: String,
         val signature: String?,
         var instructions: String? = null,
+        var codeHash: Long? = null,
     ) {
         val isSynthetic: Boolean get() = access and Opcodes.ACC_SYNTHETIC != 0
         val isBridge: Boolean get() = access and Opcodes.ACC_BRIDGE != 0
@@ -84,8 +88,16 @@ object BytecodeAnalyzer {
     /**
      * Performs full class analysis. Set includeInstructions=true to also
      * capture bytecode instructions for each method (expensive).
+     * Set includeCodeHashes=true to compute a stable per-method [MethodInfo.codeHash]
+     * over access flags, signature, instructions, and try/catch blocks; debug info
+     * (line numbers, local variable tables) and stack map frames are excluded, so
+     * debug-only differences hash identically.
      */
-    fun analyze(classBytes: ByteArray, includeInstructions: Boolean = false): ClassAnalysis {
+    fun analyze(
+        classBytes: ByteArray,
+        includeInstructions: Boolean = false,
+        includeCodeHashes: Boolean = false,
+    ): ClassAnalysis {
         val reader = ClassReader(classBytes)
         val methods = mutableListOf<MethodInfo>()
         val fields = mutableListOf<FieldInfo>()
@@ -101,12 +113,14 @@ object BytecodeAnalyzer {
                 ): MethodVisitor? {
                     val info = MethodInfo(access, name, descriptor, signature)
                     methods.add(info)
+                    if (!includeInstructions && !includeCodeHashes) return null
 
+                    var mv: MethodVisitor? = null
                     if (includeInstructions) {
                         val sw = StringWriter()
                         val printer = Textifier()
                         val tmv = TraceMethodVisitor(printer)
-                        return object : MethodVisitor(Opcodes.ASM9, tmv) {
+                        mv = object : MethodVisitor(Opcodes.ASM9, tmv) {
                             override fun visitEnd() {
                                 super.visitEnd()
                                 printer.print(PrintWriter(sw))
@@ -114,7 +128,12 @@ object BytecodeAnalyzer {
                             }
                         }
                     }
-                    return null
+                    if (includeCodeHashes) {
+                        mv = CodeHashVisitor(access, name, descriptor, signature, mv) {
+                            info.codeHash = it
+                        }
+                    }
+                    return mv
                 }
 
                 override fun visitField(
@@ -128,7 +147,11 @@ object BytecodeAnalyzer {
                     return null
                 }
             },
-            if (includeInstructions) 0 else ClassReader.SKIP_CODE,
+            when {
+                includeInstructions -> 0
+                includeCodeHashes -> ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES
+                else -> ClassReader.SKIP_CODE
+            },
         )
 
         return ClassAnalysis(
@@ -286,6 +309,185 @@ object BytecodeAnalyzer {
         if (!methodFound) return null
         if (!methodHasCode) return emptyList()
         return callees
+    }
+
+    /**
+     * CRC32 over a canonical encoding of the method's code. Labels are numbered in
+     * first-reference order so the hash is independent of debug-only labels; frames,
+     * line numbers, local variable tables, and annotations are not hashed.
+     */
+    private class CodeHashVisitor(
+        access: Int,
+        name: String,
+        descriptor: String,
+        signature: String?,
+        downstream: MethodVisitor?,
+        private val onDone: (Long) -> Unit,
+    ) : MethodVisitor(Opcodes.ASM9, downstream) {
+
+        private val crc = CRC32()
+        private val labelIds = HashMap<Label, Int>()
+
+        private companion object {
+            const val TRY_CATCH_TAG: Int = 0x100
+        }
+
+        init {
+            putInt(access)
+            put(name)
+            put(descriptor)
+            put(signature ?: "")
+        }
+
+        private fun putInt(v: Int) {
+            crc.update(v ushr 24)
+            crc.update(v ushr 16)
+            crc.update(v ushr 8)
+            crc.update(v)
+        }
+
+        private fun put(s: String) {
+            crc.update(s.toByteArray())
+            crc.update(0)
+        }
+
+        private fun putLabel(label: Label) {
+            putInt(labelIds.getOrPut(label) { labelIds.size })
+        }
+
+        private fun putConst(value: Any?) {
+            when (value) {
+                null -> put("null")
+                is Handle -> {
+                    putInt(value.tag)
+                    put(value.owner)
+                    put(value.name)
+                    put(value.desc)
+                }
+                is Type -> put(value.descriptor)
+                else -> {
+                    put(value.javaClass.name)
+                    put(value.toString())
+                }
+            }
+        }
+
+        override fun visitInsn(opcode: Int) {
+            putInt(opcode)
+            super.visitInsn(opcode)
+        }
+
+        override fun visitIntInsn(opcode: Int, operand: Int) {
+            putInt(opcode)
+            putInt(operand)
+            super.visitIntInsn(opcode, operand)
+        }
+
+        override fun visitVarInsn(opcode: Int, varIndex: Int) {
+            putInt(opcode)
+            putInt(varIndex)
+            super.visitVarInsn(opcode, varIndex)
+        }
+
+        override fun visitTypeInsn(opcode: Int, type: String) {
+            putInt(opcode)
+            put(type)
+            super.visitTypeInsn(opcode, type)
+        }
+
+        override fun visitFieldInsn(opcode: Int, owner: String, name: String, descriptor: String) {
+            putInt(opcode)
+            put(owner)
+            put(name)
+            put(descriptor)
+            super.visitFieldInsn(opcode, owner, name, descriptor)
+        }
+
+        override fun visitMethodInsn(
+            opcode: Int,
+            owner: String,
+            name: String,
+            descriptor: String,
+            isInterface: Boolean,
+        ) {
+            putInt(opcode)
+            put(owner)
+            put(name)
+            put(descriptor)
+            putInt(if (isInterface) 1 else 0)
+            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface)
+        }
+
+        override fun visitInvokeDynamicInsn(
+            name: String,
+            descriptor: String,
+            bootstrapMethodHandle: Handle,
+            vararg bootstrapMethodArguments: Any?,
+        ) {
+            putInt(Opcodes.INVOKEDYNAMIC)
+            put(name)
+            put(descriptor)
+            putConst(bootstrapMethodHandle)
+            bootstrapMethodArguments.forEach { putConst(it) }
+            super.visitInvokeDynamicInsn(name, descriptor, bootstrapMethodHandle, *bootstrapMethodArguments)
+        }
+
+        override fun visitJumpInsn(opcode: Int, label: Label) {
+            putInt(opcode)
+            putLabel(label)
+            super.visitJumpInsn(opcode, label)
+        }
+
+        override fun visitLdcInsn(value: Any?) {
+            putInt(Opcodes.LDC)
+            putConst(value)
+            super.visitLdcInsn(value)
+        }
+
+        override fun visitIincInsn(varIndex: Int, increment: Int) {
+            putInt(Opcodes.IINC)
+            putInt(varIndex)
+            putInt(increment)
+            super.visitIincInsn(varIndex, increment)
+        }
+
+        override fun visitTableSwitchInsn(min: Int, max: Int, dflt: Label, vararg labels: Label) {
+            putInt(Opcodes.TABLESWITCH)
+            putInt(min)
+            putInt(max)
+            putLabel(dflt)
+            labels.forEach { putLabel(it) }
+            super.visitTableSwitchInsn(min, max, dflt, *labels)
+        }
+
+        override fun visitLookupSwitchInsn(dflt: Label, keys: IntArray, labels: Array<Label>) {
+            putInt(Opcodes.LOOKUPSWITCH)
+            putLabel(dflt)
+            keys.forEach { putInt(it) }
+            labels.forEach { putLabel(it) }
+            super.visitLookupSwitchInsn(dflt, keys, labels)
+        }
+
+        override fun visitMultiANewArrayInsn(descriptor: String, numDimensions: Int) {
+            putInt(Opcodes.MULTIANEWARRAY)
+            put(descriptor)
+            putInt(numDimensions)
+            super.visitMultiANewArrayInsn(descriptor, numDimensions)
+        }
+
+        override fun visitTryCatchBlock(start: Label, end: Label, handler: Label, type: String?) {
+            putInt(TRY_CATCH_TAG)
+            putLabel(start)
+            putLabel(end)
+            putLabel(handler)
+            put(type ?: "")
+            super.visitTryCatchBlock(start, end, handler, type)
+        }
+
+        override fun visitEnd() {
+            super.visitEnd()
+            onDone(crc.value)
+        }
     }
 
     private fun isLambdaMetafactory(handle: Handle): Boolean {

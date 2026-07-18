@@ -4,6 +4,32 @@
 
 ## [Unreleased]
 
+## [1.2.0]
+
+### Added
+
+- New tool `mixin_rename`. Rename a class, method, field, parameter, or local (more configurable against blocking factors than IntelliJ's built-in `rename_refactoring`, which discards conflicts silently)
+- New reference-aware refactor tools: `mixin_extract_method`, `mixin_introduce_variable`, `mixin_inline` (method/field/local), and `mixin_move_members`
+- Note: the above have minimal to no Kotlin support for now, and are mostly tested against Java. 
+
+### Improved
+
+- New setting (off by default): inject only the `mixinmcp-tools` skill into all JVM projects (not just Minecraft), since the tool is now fairly generalizable
+- All tool read actions are now cancellable suspending reads that yield to IDE writes and wait for indexing; should reduce most remaining UI-freeze impact
+- Same-name copies of a file (e.g. in a multiloader project with platform modules) now collapse into one annotated line (`Mob (3 variants, 2 distinct)`); a `module` parameter (e.g. `common.main`) can pin a specific version  
+- `mixin_list_source_roots` is condensed by default; `verbose=true` restores the full per-root listing
+- Error feedback UX improvements for a few tools
+- `mixin_search_symbols` now ranks exact > prefix > substring and excludes Gradle's shaded `impldep` classes; `mixin_search_in_deps` now leads a timed-out partial result with a `Search INCOMPLETE` banner
+- Version-stamp injected skills for better tracking
+- Vineflower bumped to 1.12.0 (better decompiled output, mostly Kotlin related)
+- Add explicit support for Loom-style NeoForge/Forge toolchains (neo-loom, likely Arch Loom)
+
+### Fixed
+
+- `mixin_safe_delete` and `mixin_move_file` no longer throw on Kotlin targets (light-class elements are unwrapped to their source declarations)
+- `mixin_find_targeting_mixins` resolves `Outer$Inner` dollar-form input correctly and no longer lists stale copies of your own mixins from build-output jars
+- Semantic searches: `mixin_find_references` no longer over-scans the classpath, and searches stop once `maxResults` is reached
+
 ## [1.1.1]
 
 ### Improved
@@ -259,7 +285,8 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.1.1...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.2.0...HEAD
+[1.2.0]: https://github.com/muon-rw/MixinMCP/compare/1.1.1...1.2.0
 [1.1.1]: https://github.com/muon-rw/MixinMCP/compare/1.1.0...1.1.1
 [1.1.0]: https://github.com/muon-rw/MixinMCP/compare/1.0.6...1.1.0
 [1.0.6]: https://github.com/muon-rw/MixinMCP/compare/1.0.5...1.0.6

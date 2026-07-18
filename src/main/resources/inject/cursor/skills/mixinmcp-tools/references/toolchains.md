@@ -53,6 +53,18 @@ minecraft jar into the cache instead, so vanilla stays searchable either way. On
 the real sources jar appears, the decompiled copy is dropped automatically; the two
 never produce duplicate results.
 
+## Loom-style NeoForge/Forge (neo-loom, Architectury Loom)
+
+Minecraft ships as regular `net.minecraft` GAV dependencies (`minecraft-fml`, a
+patched `minecraft-merged`, and on newer versions a separate `neoforgeuniversal`
+artifact) resolved from a loom-cache maven, NOT as MDG artifacts.
+`mixin_list_source_roots` shows no "MDG merged artifacts" section on these projects;
+that is expected, not a failure. Recovery is the Loom flow: `./gradlew genSources`
+then `mixin_sync_project`, with `genDependencySources` covering the gap via
+decompilation until then. NeoForge game API sources live inside `minecraft-merged`
+on 1.21.x and in the `neoforgeuniversal` artifact on newer versions; the sentinel
+checks scan every SOURCES root, so either layout passes.
+
 ## Corrupt or truncated downloads
 
 Repositories without checksums (cursemaven) can leave truncated jars in the Gradle
@@ -68,8 +80,8 @@ If `mixin_list_source_roots` shows no Minecraft root at all (nothing under
 
 | Toolchain     | Command                                                       |
 | ------------- | ------------------------------------------------------------- |
-| Fabric Loom   | `./gradlew genSources`                                        |
-| NeoForge MDG  | `./gradlew downloadAssets`                                    |
+| Loom toolchains (Fabric, Architectury, neo-loom) | `./gradlew genSources`     |
+| NeoForge/Forge via MDG | `./gradlew downloadAssets`                           |
 | Any loader    | `./gradlew genDependencySources --force` (needs `org.gradle.jvmargs=-Xmx4g`) |
 
 Then run `mixin_sync_project` to refresh IntelliJ's project model.

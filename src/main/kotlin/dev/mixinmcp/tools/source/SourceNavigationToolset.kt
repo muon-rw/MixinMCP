@@ -4,7 +4,8 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
-import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.application.smartReadAction
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
@@ -18,7 +19,12 @@ import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.ProjectScope
 import com.intellij.psi.search.PsiShortNamesCache
 import dev.mixinmcp.cache.SourceAutoAttacher
+import dev.mixinmcp.resolve.ClassVariants
 import dev.mixinmcp.resolve.FqcnResolver
+import dev.mixinmcp.resolve.ModuleScopeResult
+import dev.mixinmcp.resolve.ModuleScopes
+import dev.mixinmcp.tools.ClassContentDeduper
+import dev.mixinmcp.tools.VARIANT_GROUPING_FOOTER
 import dev.mixinmcp.tools.requireProject
 import kotlin.coroutines.coroutineContext
 import java.nio.charset.StandardCharsets
@@ -28,10 +34,11 @@ import java.util.regex.Pattern
  * Source-navigation tools: FQCN lookup, short-name search, dependency regex
  * grep, dependency source reading, and source-root diagnostics.
  */
+@Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class SourceNavigationToolset : McpToolset {
 
     @McpTool
-    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures, all fields with types, and any nested classes/interfaces/enums/records (with FQCN follow-up calls suggested). For utility classes that organise constants in nested classes (e.g. net.minecraftforge.common.Tags) the Methods/Fields sections may look empty even though the API lives in nested classes — always check the Nested classes section before concluding a class is empty. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration.")
+    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Loom toolchain artifact (binary under .gradle/loom-cache; genSources provides real sources), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures, all fields with types, and any nested classes/interfaces/enums/records (with FQCN follow-up calls suggested). For utility classes that organise constants in nested classes (e.g. net.minecraftforge.common.Tags) the Methods/Fields sections may look empty even though the API lives in nested classes — always check the Nested classes section before concluding a class is empty. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration. module: pins ALL resolution to one module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); unknown names list available modules. Without module, when multiple classpath copies of the class differ, a Variants block (bytecode-structural diff per jar) is appended; with module it is suppressed and the pinned module is noted in the header. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
@@ -39,17 +46,38 @@ class SourceNavigationToolset : McpToolset {
         includeSource: Boolean = false,
         methodName: String? = null,
         fieldName: String? = null,
+        module: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
         val focused: Boolean = !methodName.isNullOrBlank() || !fieldName.isNullOrBlank()
 
-        val result: String? = ReadAction.nonBlocking<String?> {
-            val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@nonBlocking null
+        return smartReadAction(project) {
+            val pinned: ModuleScopeResult.Found? = if (module.isNullOrBlank()) {
+                null
+            } else {
+                when (val r = ModuleScopes.resolve(project, module)) {
+                    is ModuleScopeResult.Found -> r
+                    is ModuleScopeResult.Error -> return@smartReadAction McpToolCallResult.error(r.message)
+                }
+            }
+            val scope: GlobalSearchScope = pinned?.scope ?: GlobalSearchScope.allScope(project)
+            val pinnedModule: String? = pinned?.module?.name
 
-            buildString {
+            val psiClass: PsiClass = FqcnResolver.resolveNested(project, className, scope)
+                ?: return@smartReadAction McpToolCallResult.error(
+                    if (pinnedModule != null) {
+                        "Class not found in module '$pinnedModule': $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}"
+                    } else {
+                        "Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}"
+                    },
+                )
+
+            val text: String = buildString {
                 appendLine("=== ${psiClass.qualifiedName} ===")
+                if (pinnedModule != null) {
+                    appendLine("Pinned module: $pinnedModule (variants suppressed)")
+                }
                 appendLine()
                 val pkg: String = psiClass.qualifiedName?.let { q ->
                     if ('.' in q) q.substringBeforeLast('.') else "(default)"
@@ -127,11 +155,16 @@ class SourceNavigationToolset : McpToolset {
                     navigationFile?.text?.let { appendLine(it) }
                 }
             }
-        }.inSmartMode(project).executeSynchronously()
 
-        return when {
-            result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Class not found: $className")
+            val variantsFooter: String? = if (pinnedModule == null) {
+                ClassVariants.findVariants(project, psiClass.qualifiedName ?: className)
+                    ?.let { ClassVariants.renderIfMultiple(it) }
+            } else {
+                null
+            }
+            McpToolCallResult.text(
+                if (variantsFooter == null) text else text.trimEnd('\n') + "\n\n" + variantsFooter,
+            )
         }
     }
 
@@ -269,7 +302,7 @@ class SourceNavigationToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Use when you don't know the full class name — search by short name substring across project and dependencies. Pass a simple name like 'LivingEntity' or 'getHealth', NOT a fully-qualified name (FQCNs are auto-simplified). kind: class (default), method, field, all. scope: all (default), project, libraries. Returns FQCN for classes, class#method(params) for methods, class.field: type for fields. maxResults defaults to 50.")
+    @McpDescription("Use when you don't know the full class name — search by short name substring across project and dependencies. Pass a simple name like 'LivingEntity' or 'getHealth', NOT a fully-qualified name (FQCNs are auto-simplified). kind: class (default), method, field, all. scope: all (default), project, libraries. Results are ranked: exact simple-name matches first, then prefix matches, then substring matches. Returns FQCN for classes, class#method(params) for methods, class.field: type for fields. maxResults defaults to 50. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
     suspend fun mixin_search_symbols(
         query: String,
@@ -280,7 +313,20 @@ class SourceNavigationToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val searchScope: GlobalSearchScope = when (scope) {
+        val kindMode: String = kind.trim().lowercase()
+        if (kindMode !in setOf("class", "method", "field", "all")) {
+            return McpToolCallResult.error(
+                "Invalid kind: \"$kind\". Use class, method, field, or all.",
+            )
+        }
+        val scopeMode: String = scope.trim().lowercase()
+        if (scopeMode !in setOf("all", "project", "libraries")) {
+            return McpToolCallResult.error(
+                "Invalid scope: \"$scope\". Use all, project, or libraries.",
+            )
+        }
+
+        val searchScope: GlobalSearchScope = when (scopeMode) {
             "project" -> ProjectScope.getContentScope(project)
             "libraries" -> ProjectScope.getLibrariesScope(project)
             else -> GlobalSearchScope.allScope(project)
@@ -288,12 +334,26 @@ class SourceNavigationToolset : McpToolset {
 
         val effectiveQuery: String = extractSimpleName(query)
 
-        val result: String = ReadAction.nonBlocking<String> {
+        val result: String = smartReadAction(project) {
             val cache: PsiShortNamesCache = PsiShortNamesCache.getInstance(project)
             val q: String = if (caseSensitive) effectiveQuery else effectiveQuery.lowercase()
-            fun matches(name: String): Boolean {
+            fun rankOf(name: String): Int {
                 val n = if (caseSensitive) name else name.lowercase()
-                return n.contains(q)
+                return when {
+                    n == q -> 0
+                    n.startsWith(q) -> 1
+                    n.contains(q) -> 2
+                    else -> 3
+                }
+            }
+            fun rankedNames(names: Array<String>): List<String> {
+                val ranked: MutableList<Pair<String, Int>> = mutableListOf()
+                for (name: String in names) {
+                    ProgressManager.checkCanceled()
+                    val rank: Int = rankOf(name)
+                    if (rank < 3) ranked.add(name to rank)
+                }
+                return ranked.sortedBy { it.second }.map { it.first }
             }
 
             buildString {
@@ -302,77 +362,100 @@ class SourceNavigationToolset : McpToolset {
                     appendLine()
                 }
 
-                if (kind == "class" || kind == "all") {
+                var annotationEmitted: Boolean = false
+
+                fun renderEntries(entries: List<Pair<String?, String>>, deduper: ClassContentDeduper) {
+                    for ((key, line) in entries) {
+                        val note: String? = deduper.annotationFor(key)
+                        if (note != null) annotationEmitted = true
+                        appendLine(line + (note ?: ""))
+                    }
+                    if (entries.size >= maxResults) appendLine("  ... (truncated)")
+                }
+
+                if (kindMode == "class" || kindMode == "all") {
                     appendLine("--- Classes ---")
-                    val allClassNames: Array<String> = cache.allClassNames
-                    var count: Int = 0
-                    for (name: String in allClassNames) {
-                        if (count >= maxResults) break
-                        if (!matches(name)) continue
-                        val classes: Array<PsiClass> = cache.getClassesByName(name, searchScope)
-                        for (c: PsiClass in classes) {
-                            if (count >= maxResults) break
-                            appendLine("  ${c.qualifiedName ?: name}")
-                            count++
+                    val deduper = ClassContentDeduper()
+                    val entries: MutableList<Pair<String?, String>> = mutableListOf()
+                    outer@ for (name: String in rankedNames(cache.allClassNames)) {
+                        ProgressManager.checkCanceled()
+                        for (c: PsiClass in cache.getClassesByName(name, searchScope)) {
+                            if (isShadedImpldep(c.qualifiedName)) continue
+                            if (!deduper.record(c.qualifiedName, c.containingFile?.virtualFile)) continue
+                            entries.add(c.qualifiedName to "  ${c.qualifiedName ?: name}")
+                            if (entries.size >= maxResults) break@outer
                         }
                     }
-                    if (count >= maxResults) appendLine("  ... (truncated)")
+                    renderEntries(entries, deduper)
                     appendLine()
                 }
 
-                if (kind == "method" || kind == "all") {
+                if (kindMode == "method" || kindMode == "all") {
                     appendLine("--- Methods ---")
-                    val allMethodNames: Array<String> = cache.allMethodNames
-                    var count: Int = 0
-                    for (name: String in allMethodNames) {
-                        if (count >= maxResults) break
-                        if (!matches(name)) continue
-                        val methods: Array<PsiMethod> = cache.getMethodsByName(name, searchScope)
-                        for (m: PsiMethod in methods) {
-                            if (count >= maxResults) break
+                    val deduper = ClassContentDeduper()
+                    val entries: MutableList<Pair<String?, String>> = mutableListOf()
+                    outer@ for (name: String in rankedNames(cache.allMethodNames)) {
+                        ProgressManager.checkCanceled()
+                        for (m: PsiMethod in cache.getMethodsByName(name, searchScope)) {
                             val declClass: PsiClass? = m.containingClass
+                            val ownerFqcn: String? = declClass?.qualifiedName
+                            if (isShadedImpldep(ownerFqcn)) continue
+                            val signature: String = m.parameterList.parameters
+                                .joinToString(",") { it.type.canonicalText }
+                            val key: String? = ownerFqcn?.let { "$it#$name($signature)" }
+                            if (!deduper.record(key, declClass?.containingFile?.virtualFile)) continue
                             val params: String = m.parameterList.parameters
                                 .joinToString(", ") { it.type.presentableText }
-                            appendLine("  ${declClass?.qualifiedName ?: "?"}#$name($params)")
-                            count++
+                            entries.add(key to "  ${ownerFqcn ?: "?"}#$name($params)")
+                            if (entries.size >= maxResults) break@outer
                         }
                     }
-                    if (count >= maxResults) appendLine("  ... (truncated)")
+                    renderEntries(entries, deduper)
                     appendLine()
                 }
 
-                if (kind == "field" || kind == "all") {
+                if (kindMode == "field" || kindMode == "all") {
                     appendLine("--- Fields ---")
-                    val allFieldNames: Array<String> = cache.allFieldNames
-                    var count: Int = 0
-                    for (name: String in allFieldNames) {
-                        if (count >= maxResults) break
-                        if (!matches(name)) continue
-                        val fields: Array<PsiField> = cache.getFieldsByName(name, searchScope)
-                        for (f: PsiField in fields) {
-                            if (count >= maxResults) break
+                    val deduper = ClassContentDeduper()
+                    val entries: MutableList<Pair<String?, String>> = mutableListOf()
+                    outer@ for (name: String in rankedNames(cache.allFieldNames)) {
+                        ProgressManager.checkCanceled()
+                        for (f: PsiField in cache.getFieldsByName(name, searchScope)) {
                             val declClass: PsiClass? = f.containingClass
-                            appendLine("  ${declClass?.qualifiedName ?: "?"}.${f.name}: ${f.type.presentableText}")
-                            count++
+                            val ownerFqcn: String? = declClass?.qualifiedName
+                            if (isShadedImpldep(ownerFqcn)) continue
+                            val key: String? = ownerFqcn?.let { "$it#${f.name}" }
+                            if (!deduper.record(key, declClass?.containingFile?.virtualFile)) continue
+                            entries.add(key to "  ${ownerFqcn ?: "?"}.${f.name}: ${f.type.presentableText}")
+                            if (entries.size >= maxResults) break@outer
                         }
                     }
-                    if (count >= maxResults) appendLine("  ... (truncated)")
+                    renderEntries(entries, deduper)
+                }
+
+                if (annotationEmitted) {
+                    appendLine(VARIANT_GROUPING_FOOTER)
                 }
             }
-        }.inSmartMode(project).executeSynchronously()
+        }
 
         return McpToolCallResult.text(result)
     }
 
+    private fun isShadedImpldep(fqcn: String?): Boolean {
+        return fqcn?.startsWith("org.gradle.internal.impldep.") == true
+    }
+
     @McpTool
-    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar) and MixinMCP decompiled cache. Detects MDG merged JARs under build/moddev/; MixinMCP auto-attaches them as Library SOURCES after Gradle sync so vanilla/Forge/NeoForge .java files are usually searchable. Diagnoses vanilla (net/minecraft/*), Forge game API (net/minecraftforge/event/*), and NeoForge game API (net/neoforged/neoforge/event/*) plus last auto-attach run. Shows root URL, type, and sample file paths per root. maxSamplesPerRoot: 5 default.")
+    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar) and MixinMCP decompiled cache. Detects MDG merged JARs under build/moddev/; MixinMCP auto-attaches them as Library SOURCES after Gradle sync so vanilla/Forge/NeoForge .java files are usually searchable. Loom toolchains (Fabric Loom, Architectury Loom, neo-loom) instead get sources from their genSources jar or the decompiled cache; no MDG section appears for them. Diagnoses vanilla (net/minecraft/*), Forge game API (net/minecraftforge/event/*), and NeoForge game API (net/neoforged/neoforge/event/*) plus last auto-attach run. Default output is condensed: Minecraft/game roots, roots with warnings, and decompiled-cache roots show full URL plus sample file paths; other library sources roots collapse to a grouped jar-name list. verbose: true restores full per-root URL and sample paths for every root. maxSamplesPerRoot: 5 default.")
     @Suppress("unused")
     suspend fun mixin_list_source_roots(
         maxSamplesPerRoot: Int = 5,
+        verbose: Boolean = false,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val result: String = ReadAction.nonBlocking<String> {
+        val result: String = smartReadAction(project) {
             val roots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
             buildString {
                 appendLine("=== Source roots (mixin_search_in_deps / mixin_get_dep_source scope) ===")
@@ -382,13 +465,14 @@ class SourceNavigationToolset : McpToolset {
                 appendLine("MixinMCP auto-attaches MDG merged jars as Library SOURCES after Gradle sync (see section below).")
                 appendLine()
                 appendLine("If vanilla Minecraft (net/minecraft/*) is still missing from search results:")
-                appendLine("  - Fabric Loom: run ./gradlew genSources to generate Minecraft sources")
+                appendLine("  - Loom toolchains (Fabric Loom, Architectury Loom, neo-loom): run ./gradlew genSources to generate Minecraft sources")
                 appendLine("  - MDG: confirm Gradle sync finished and check the MDG auto-attach section for warnings")
                 appendLine("  - Any loader: run ./gradlew genDependencySources --force to decompile large JARs")
                 appendLine("  - Then call mixin_sync_project to refresh IntelliJ's project model")
                 appendLine()
                 appendLine("If Forge game API (net/minecraftforge/event/*) or NeoForge (net/neoforged/neoforge/event/*) is still missing:")
-                appendLine("  - Read the \"MDG merged-jar source auto-attach\" section below (warnings mean attachment failed).")
+                appendLine("  - On MDG: read the \"MDG merged-jar source auto-attach\" section below (warnings mean attachment failed).")
+                appendLine("  - On a Loom-style Forge/NeoForge toolchain (neo-loom, Architectury Loom): run ./gradlew genSources; no MDG section will appear and that is expected.")
                 appendLine("  - Fallback: mixin_find_class(includeSource=true), mixin_search_symbols, or mixin_search_in_deps without pathPrefix.")
                 appendLine()
 
@@ -433,7 +517,8 @@ class SourceNavigationToolset : McpToolset {
                         appendLine("Vanilla Minecraft sources ARE available in Library SOURCES roots (merged jar and/or other libs).")
                         appendLine("mixin_search_in_deps CAN search net/minecraft/ files.")
                     } else {
-                        appendLine("No vanilla Minecraft .java sentinels (e.g. net/minecraft/world/level/Level.java) were found")
+                        appendLine("No vanilla Minecraft .java sentinels (mojmap net/minecraft/world/level/Level.java or")
+                        appendLine("yarn net/minecraft/world/World.java) were found")
                         appendLine("in any Library SOURCES root. If the auto-attach section shows warnings, fix those first;")
                         appendLine("the merged jar may omit .java when MDG disableRecompilation is true (Gradle *-sources.jar fallback).")
                         appendLine("Fallback: mixin_find_class(includeSource=true), mixin_method_bytecode, mixin_class_bytecode.")
@@ -465,8 +550,11 @@ class SourceNavigationToolset : McpToolset {
                     appendLine("Vanilla Minecraft classes were not found in any Library SOURCES root")
                     appendLine("or in a local MDG merged artifact. PSI-based tools (mixin_find_class,")
                     appendLine("type_hierarchy, find_references, etc.) may still work if the classes")
-                    appendLine("are on the classpath. Run ./gradlew genSources (Fabric Loom) or")
-                    appendLine("./gradlew genDependencySources --force to generate searchable sources.")
+                    appendLine("are on the classpath. Recovery by toolchain:")
+                    appendLine("  - Loom toolchains (Fabric Loom, Architectury Loom, neo-loom): ./gradlew genSources")
+                    appendLine("  - NeoForge/Forge via MDG: ./gradlew downloadAssets")
+                    appendLine("  - Any loader: ./gradlew genDependencySources --force to generate searchable sources")
+                    appendLine("Then call mixin_sync_project to refresh IntelliJ's project model.")
                     appendLine()
                 } else if (!hasForgeGameEventsInLibSources && !hasNeoForgeGameEventsInLibSources) {
                     appendLine("=== No Forge / NeoForge game API event sources in Library SOURCES ===")
@@ -475,10 +563,8 @@ class SourceNavigationToolset : McpToolset {
                     appendLine()
                 }
 
-                appendLine("=== Library SOURCES roots (${libRoots.size}) ===")
-                appendLine()
-                for ((i, info: SourceRootInfo) in libRoots.withIndex()) {
-                    appendLine("--- Root ${i + 1}: ${info.typeLabel} ---")
+                fun appendRootDetail(index: Int, info: SourceRootInfo, emptyNote: String) {
+                    appendLine("--- Root $index: ${info.typeLabel} ---")
                     appendLine("  URL: ${info.root.url}")
                     val samples: List<String> = collectSamplePaths(info.root, maxSamplesPerRoot)
                     if (samples.isNotEmpty()) {
@@ -487,7 +573,56 @@ class SourceNavigationToolset : McpToolset {
                             appendLine("    $p")
                         }
                     } else {
-                        appendLine("  (no .java files found or root empty)")
+                        appendLine(emptyNote)
+                    }
+                    appendLine()
+                }
+
+                val libEmptyNote = "  (no .java files found or root empty)"
+                if (verbose) {
+                    appendLine("=== Library SOURCES roots (${libRoots.size}) ===")
+                    appendLine()
+                    for ((i, info: SourceRootInfo) in libRoots.withIndex()) {
+                        appendRootDetail(i + 1, info, libEmptyNote)
+                    }
+                } else {
+                    val (gameRoots, otherRoots) = libRoots.partition { isGameSourceRoot(project, it.root) }
+                    val (emptyRoots, genericRoots) = otherRoots.partition {
+                        collectSamplePaths(it.root, 1).isEmpty()
+                    }
+
+                    appendLine("=== Minecraft / game Library SOURCES roots (${gameRoots.size} of ${libRoots.size}) ===")
+                    appendLine()
+                    if (gameRoots.isEmpty()) {
+                        appendLine("  (none detected)")
+                        appendLine()
+                    }
+                    for ((i, info: SourceRootInfo) in gameRoots.withIndex()) {
+                        appendRootDetail(i + 1, info, libEmptyNote)
+                    }
+
+                    if (emptyRoots.isNotEmpty()) {
+                        appendLine("=== Library SOURCES roots with warnings (${emptyRoots.size}) ===")
+                        appendLine()
+                        for ((i, info: SourceRootInfo) in emptyRoots.withIndex()) {
+                            appendRootDetail(i + 1, info, libEmptyNote)
+                        }
+                    }
+
+                    appendLine("=== Other library sources roots (${genericRoots.size}) ===")
+                    appendLine("  (jar names only; pass verbose=true for per-root URLs and sample paths)")
+                    val nameCounts: Map<String, Int> = genericRoots
+                        .groupingBy { sourceRootDisplayName(it.root) }
+                        .eachCount()
+                    val names: List<String> = nameCounts.entries
+                        .sortedBy { it.key.lowercase() }
+                        .map { (n, c) -> if (c > 1) "$n (x$c)" else n }
+                    val cap = 50
+                    for (chunk: List<String> in names.take(cap).chunked(3)) {
+                        appendLine("  ${chunk.joinToString(", ")}")
+                    }
+                    if (names.size > cap) {
+                        appendLine("  and ${names.size - cap} more (verbose=true lists all)")
                     }
                     appendLine()
                 }
@@ -495,31 +630,20 @@ class SourceNavigationToolset : McpToolset {
                 appendLine("=== Decompiled cache roots (${cacheRoots.size}) ===")
                 appendLine()
                 for ((i, info: SourceRootInfo) in cacheRoots.withIndex()) {
-                    appendLine("--- Root ${i + 1}: ${info.typeLabel} ---")
-                    appendLine("  URL: ${info.root.url}")
-                    val samples: List<String> = collectSamplePaths(info.root, maxSamplesPerRoot)
-                    if (samples.isNotEmpty()) {
-                        appendLine("  Sample paths:")
-                        for (p in samples) {
-                            appendLine("    $p")
-                        }
-                    } else {
-                        appendLine("  (empty — dependency may not have classes or decompilation pending)")
-                    }
-                    appendLine()
+                    appendRootDetail(i + 1, info, "  (empty — dependency may not have classes or decompilation pending)")
                 }
 
                 if (roots.isEmpty()) {
                     appendLine("No source roots found. Add dependencies and run ./gradlew genDependencySources for compiled-only jars.")
                 }
             }
-        }.inSmartMode(project).executeSynchronously()
+        }
 
         return McpToolCallResult.text(result)
     }
 
     @McpTool
-    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync — try this tool first for vanilla/Forge/NeoForge; empty results append hints (check mixin_list_source_roots auto-attach section). roots: all (default) — search Gradle library -sources.jar then MixinMCP cache; when all, cache files are skipped if the same path already matched in library sources (no duplicate FML/vanilla hits). library — only published -sources.jar roots. decompiled — only MixinMCP decompiled cache. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default. contextLines: include N lines of context around each match (default 0). Use small values (3–10) to capture short method bodies inline so you don't need a follow-up mixin_get_dep_source call; max 200. Match lines are prefixed with `>`, context lines with two spaces; overlapping windows are merged per file.")
+    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync — try this tool first for vanilla/Forge/NeoForge; on Loom toolchains vanilla comes from the genSources jar or the decompiled cache; empty results append hints (check mixin_list_source_roots auto-attach section). roots: all (default) — search Gradle library -sources.jar then MixinMCP cache; when all, cache files are skipped if the same path already matched in library sources (no duplicate FML/vanilla hits). library — only published -sources.jar roots. decompiled — only MixinMCP decompiled cache. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default. contextLines: include N lines of context around each match (default 0). Use small values (3–10) to capture short method bodies inline so you don't need a follow-up mixin_get_dep_source call; max 200. Match lines are prefixed with `>`, context lines with two spaces; overlapping windows are merged per file. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
@@ -533,6 +657,11 @@ class SourceNavigationToolset : McpToolset {
     ): McpToolCallResult {
         if (contextLines < 0 || contextLines > 200) {
             return McpToolCallResult.error("contextLines must be between 0 and 200 (got $contextLines)")
+        }
+        if (timeout < 1000) {
+            return McpToolCallResult.error(
+                "timeout is in milliseconds; minimum 1000 (got $timeout)",
+            )
         }
         val project = coroutineContext.requireProject { return it }
 
@@ -570,8 +699,9 @@ class SourceNavigationToolset : McpToolset {
 
         val matchesMask: (String) -> Boolean = buildFileMaskMatcher(fileMask)
 
-        val startTime: Long = System.currentTimeMillis()
-        val scanResult: DepRegexScanResult = ReadAction.nonBlocking<DepRegexScanResult> {
+        val requestStart: Long = System.currentTimeMillis()
+        val scanResult: DepRegexScanResult = smartReadAction(project) {
+            val startTime: Long = System.currentTimeMillis()
             val hits: MutableList<DepSearchHit> = mutableListOf()
             var timedOut: Boolean = false
             val pathPrefixFilesSeen: BooleanArray? =
@@ -631,9 +761,9 @@ class SourceNavigationToolset : McpToolset {
                     emptyList()
                 }
             DepRegexScanResult(hits = hits.toList(), timedOut = timedOut, noMatchHints = noMatchHints)
-        }.inSmartMode(project).executeSynchronously()
+        }
 
-        val elapsed: Long = System.currentTimeMillis() - startTime
+        val elapsed: Long = System.currentTimeMillis() - requestStart
         val hits: List<DepSearchHit> = scanResult.hits
         val timedOut: Boolean = scanResult.timedOut
         val result: String = buildString {
@@ -654,12 +784,13 @@ class SourceNavigationToolset : McpToolset {
                     appendLine("(search timed out after ${elapsed}ms — try a more specific pattern, add fileMask, pathPrefix, or increase timeout)")
                 }
             } else {
+                if (timedOut) {
+                    appendLine("Search INCOMPLETE (timed out after ${elapsed}ms); not all files were searched, results below are partial.")
+                    appendLine()
+                }
                 formatGroupedHitsWithContext(this, hits, contextLines)
                 if (hits.size >= maxResults) {
                     appendLine("  ... (truncated at $maxResults matches)")
-                }
-                if (timedOut) {
-                    appendLine("  ... (search timed out after ${elapsed}ms — not all files were searched)")
                 }
             }
         }
@@ -668,7 +799,7 @@ class SourceNavigationToolset : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Reads source from dependency jars or decompiled cache. Use this tool to view library code that grep/read_file cannot access. Pass url (exact url: string from mixin_search_in_deps results — may be jar://…!/path/File.java or file://…/path/File.java) or path (package path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java — not a filesystem path). url takes precedence if both given. lineNumber, linesBefore (default 30), linesAfter (default 70) define a window around a specific line.")
+    @McpDescription("Reads source from dependency jars or decompiled cache. Use this tool to view library code that grep/read_file cannot access. Pass url (exact url: string from mixin_search_in_deps results — may be jar://…!/path/File.java or file://…/path/File.java) or path (package path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java — not a filesystem path). url takes precedence if both given. lineNumber, linesBefore (default 30), linesAfter (default 70) define a window around a specific line. module: restricts the path lookup to source roots on that module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); url lookups only validate the name.")
     @Suppress("unused")
     suspend fun mixin_get_dep_source(
         url: String? = null,
@@ -676,6 +807,7 @@ class SourceNavigationToolset : McpToolset {
         lineNumber: Int = 1,
         linesBefore: Int = 30,
         linesAfter: Int = 70,
+        module: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
@@ -685,9 +817,19 @@ class SourceNavigationToolset : McpToolset {
             )
         }
 
+        val moduleResult: ModuleScopeResult? = if (module.isNullOrBlank()) {
+            null
+        } else {
+            smartReadAction(project) { ModuleScopes.resolve(project, module) }
+        }
+        if (moduleResult is ModuleScopeResult.Error) {
+            return McpToolCallResult.error(moduleResult.message)
+        }
+        val pinned: ModuleScopeResult.Found? = moduleResult as? ModuleScopeResult.Found
+
         val vf: VirtualFile? = when {
-            !url.isNullOrBlank() -> VirtualFileManager.getInstance().findFileByUrl(url!!)
-            else -> locateDepSourceByPath(project, path!!.trim())
+            !url.isNullOrBlank() -> VirtualFileManager.getInstance().findFileByUrl(url)
+            else -> smartReadAction(project) { locateDepSourceByPath(project, path!!.trim(), pinned?.scope) }
         }
 
         if (vf == null || !vf.isValid) {
@@ -696,15 +838,20 @@ class SourceNavigationToolset : McpToolset {
             } else {
                 val normalizedPath: String = path!!.trim()
                 if (normalizedPath.startsWith("net/minecraft/")) {
-                    "Vanilla Minecraft classes may not be available via path lookup " +
-                        "(they live in the merged jar, not the decompiled cache). " +
+                    "Vanilla Minecraft classes may not be available via path lookup: on MDG they live in the " +
+                        "merged jar; on Loom toolchains they come from the genSources jar, or from the decompiled " +
+                        "cache when genSources has not run. " +
                         "Use mixin_find_class with includeSource=true to read the source, " +
                         "or mixin_search_in_deps to get the jar url. " +
                         "If Minecraft sources are missing entirely, the user may need to run " +
-                        "./gradlew genSources (Fabric) or ./gradlew genDependencySources --force."
+                        "./gradlew genSources (Loom toolchains) or ./gradlew genDependencySources --force."
                 } else {
+                    val pinHint: String = pinned?.let {
+                        " Module pin '${it.module.name}' restricts the lookup to that module's classpath; drop module= to search all roots." +
+                            " Module pinning always excludes decompiled-cache roots (synthetic roots with no module order entries), so drop module= for cache-resolved paths."
+                    } ?: ""
                     "Path not found in dependency sources. " +
-                        "Use mixin_search_in_deps to find the file, then pass its `url` to this tool."
+                        "Use mixin_search_in_deps to find the file, then pass its `url` to this tool.$pinHint"
                 }
             }
             return McpToolCallResult.error("File not found. $hint")
@@ -716,16 +863,17 @@ class SourceNavigationToolset : McpToolset {
             return McpToolCallResult.error("Failed to read file: ${e.message}")
         }
 
-        val sourceKind: String = ReadAction.nonBlocking<String> {
+        val sourceKind: String = smartReadAction(project) {
             classifySourceFile(project, vf)
-        }.inSmartMode(project).executeSynchronously()
+        }
 
         val lines: List<String> = content.lines()
         val start: Int = (lineNumber - linesBefore).coerceAtLeast(1)
         val end: Int = (lineNumber + linesAfter).coerceAtMost(lines.size)
 
         val result: String = buildString {
-            appendLine("=== ${vf.name} (lines $start-$end) [sourceKind: $sourceKind] ===")
+            val modSuffix: String = pinned?.let { " [pinned module: ${it.module.name}]" } ?: ""
+            appendLine("=== ${vf.name} (lines $start-$end) [sourceKind: $sourceKind]$modSuffix ===")
             appendLine()
             for (i in start..end) {
                 if (i >= 1 && i <= lines.size) {

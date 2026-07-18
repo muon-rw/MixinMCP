@@ -85,4 +85,20 @@ class SourceAutoAttacherTest {
         assertNull(SourceAutoAttacher.siblingSourcesJarName("vanilla-26.1.2-1-sources.jar"))
         assertNull(SourceAutoAttacher.siblingSourcesJarName("merged.jar"))
     }
+
+    @Test
+    fun rejectsLoomCacheMinecraftJars() {
+        assertFalse(
+            SourceAutoAttacher.isMdgMergedJarForAttach(
+                "/p/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-merged-ff8a080d8e/26.1.2/minecraft-merged-ff8a080d8e-26.1.2.jar",
+            ),
+        )
+        assertFalse(
+            SourceAutoAttacher.isMdgMergedJarForAttach(
+                "/p/.gradle/loom-cache/minecraftMaven/net/minecraft/" +
+                    "nfrt-net.neoforged.neoforge_26.1.2-minecraft-merged-deobf/26.1.2/" +
+                    "nfrt-net.neoforged.neoforge_26.1.2-minecraft-merged-deobf-26.1.2.jar",
+            ),
+        )
+    }
 }

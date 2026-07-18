@@ -1,11 +1,15 @@
 package dev.mixinmcp.rules
 
+import com.intellij.ide.plugins.PluginManagerCore
+import com.intellij.ide.util.PropertiesComponent
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
 import com.intellij.openapi.vfs.LocalFileSystem
+import dev.mixinmcp.settings.MixinMcpAppSettings
 import dev.mixinmcp.settings.MixinMcpSettings
 import java.io.IOException
 import java.net.JarURLConnection
@@ -24,12 +28,18 @@ class RuleInjectionStartupActivity : ProjectActivity {
         val projectRoot = Path.of(basePath)
 
         if (!isMinecraftProject(projectRoot)) {
-            LOG.info("MixinMCP: project '${project.name}' is not a Minecraft mod project, skipping")
+            if (MixinMcpAppSettings.getInstance().injectToolsSkillIntoJvmProjects && isJvmProject(projectRoot)) {
+                injectToolsSkillOnly(projectRoot, project)
+            } else {
+                LOG.info("MixinMCP: project '${project.name}' is not a Minecraft mod project, skipping")
+            }
             return
         }
 
         if (settings.autoInjectCursorRules) {
             injectAssistantFiles(projectRoot, settings, project)
+        } else {
+            notifyStaleSkillsOnce(project, projectRoot)
         }
 
         if (settings.warnMissingGradlePlugin && !hasGradlePlugin(projectRoot)) {
@@ -37,9 +47,73 @@ class RuleInjectionStartupActivity : ProjectActivity {
         }
     }
 
+    // The injected files are gitignored, version-stamped, plugin-managed artifacts, so this path always
+    // overwrites; that keeps the stamp current on upgrade and avoids coupling to the Minecraft-only settings.
+    private fun injectToolsSkillOnly(projectRoot: Path, project: Project) {
+        val removedLegacy = cleanupRemovedManifestEntries(projectRoot, project)
+
+        val written = mutableListOf<String>()
+        written += copyBundledTree(
+            projectRoot = projectRoot,
+            bundlePrefix = BUNDLE_CURSOR,
+            destinationRoot = projectRoot.resolve(".cursor"),
+            overwrite = true,
+            pathFilter = ::isToolsSkillPath,
+        )
+        written += copyBundledTree(
+            projectRoot = projectRoot,
+            bundlePrefix = BUNDLE_CLAUDE,
+            destinationRoot = projectRoot.resolve(".claude"),
+            overwrite = true,
+            pathFilter = ::isToolsSkillPath,
+        )
+
+        if (written.isNotEmpty()) {
+            addToGitignore(projectRoot, written)
+            recordInjectedFiles(project, written)
+            LOG.info("MixinMCP: injected tool skill into JVM project: ${written.joinToString()}")
+            val props = PropertiesComponent.getInstance(project)
+            if (!props.getBoolean(TOOLS_SKILL_NOTIFIED_KEY, false)) {
+                props.setValue(TOOLS_SKILL_NOTIFIED_KEY, true)
+                showToolsSkillNotification(project, written)
+            }
+        }
+
+        if (written.isNotEmpty() || removedLegacy.isNotEmpty()) {
+            refreshDirectoryRecursively(projectRoot.resolve(".cursor"))
+            refreshDirectoryRecursively(projectRoot.resolve(".claude"))
+            refreshSingleFile(projectRoot.resolve(".gitignore"))
+        }
+    }
+
+    private fun isToolsSkillPath(relativeInside: String): Boolean =
+        relativeInside.startsWith("skills/mixinmcp-tools/") &&
+            relativeInside != "skills/mixinmcp-tools/references/toolchains.md"
+
+    private fun showToolsSkillNotification(project: Project, written: List<String>) {
+        val fileList = written.joinToString(", ")
+        NotificationGroupManager.getInstance()
+            .getNotificationGroup("MixinMCP")
+            .createNotification(
+                "MixinMCP",
+                "Injected the MixinMCP tool skill into this JVM project: $fileList",
+                NotificationType.INFORMATION,
+            )
+            .addAction(object : com.intellij.notification.NotificationAction("Don't do this again") {
+                override fun actionPerformed(
+                    e: com.intellij.openapi.actionSystem.AnActionEvent,
+                    notification: com.intellij.notification.Notification,
+                ) {
+                    MixinMcpAppSettings.getInstance().injectToolsSkillIntoJvmProjects = false
+                    notification.expire()
+                }
+            })
+            .notify(project)
+    }
+
     private fun injectAssistantFiles(projectRoot: Path, settings: MixinMcpSettings, project: Project) {
         val overwrite = settings.overwriteExistingRules
-        val removedLegacy = removeLegacyCursorRules(projectRoot)
+        val removedLegacy = removeLegacyCursorRules(projectRoot) + cleanupRemovedManifestEntries(projectRoot, project)
 
         val written = mutableListOf<String>()
         written += copyBundledTree(
@@ -57,17 +131,22 @@ class RuleInjectionStartupActivity : ProjectActivity {
 
         if (written.isNotEmpty()) {
             addToGitignore(projectRoot, written)
+            recordInjectedFiles(project, written)
             LOG.info("MixinMCP: injected assistant files: ${written.joinToString()}")
             showRuleNotification(project, written, settings)
         }
 
         if (removedLegacy.isNotEmpty()) {
-            LOG.info("MixinMCP: removed legacy Cursor rules: ${removedLegacy.joinToString()}")
+            LOG.info("MixinMCP: removed legacy or stale injected files: ${removedLegacy.joinToString()}")
+        }
+
+        if (!overwrite) {
+            notifyStaleSkillsOnce(project, projectRoot)
         }
 
         if (written.isNotEmpty() || removedLegacy.isNotEmpty()) {
             refreshDirectoryRecursively(projectRoot.resolve(".cursor"))
-            if (written.isNotEmpty()) {
+            if (written.isNotEmpty() || removedLegacy.any { it.startsWith(".claude/") }) {
                 refreshDirectoryRecursively(projectRoot.resolve(".claude"))
             }
             refreshSingleFile(projectRoot.resolve(".gitignore"))
@@ -195,6 +274,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
         bundlePrefix: String,
         destinationRoot: Path,
         overwrite: Boolean,
+        pathFilter: (String) -> Boolean = { true },
     ): List<String> {
         val entries = listBundledResourcePaths(bundlePrefix)
         if (entries.isEmpty()) {
@@ -209,6 +289,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
         for (entry in entries) {
             if (!entry.startsWith(prefix)) continue
             val relativeInside = entry.removePrefix(prefix)
+            if (!pathFilter(relativeInside)) continue
             val target = destinationRoot.resolve(relativeInside)
             if (!overwrite && Files.exists(target)) continue
 
@@ -221,6 +302,9 @@ class RuleInjectionStartupActivity : ProjectActivity {
                 Files.createDirectories(target.parent)
                 stream.use { input ->
                     Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+                if (target.fileName.toString() == SKILL_FILE_NAME) {
+                    stampSkillVersion(target)
                 }
                 written += projectRoot.relativize(target).toString().replace('\\', '/')
             } catch (e: IOException) {
@@ -312,6 +396,124 @@ class RuleInjectionStartupActivity : ProjectActivity {
         throw IOException("could not resolve inject bundle root for $bundlePrefix from $anchorFile")
     }
 
+    private fun stampSkillVersion(skill: Path) {
+        val version = pluginVersion() ?: return
+        try {
+            val separator = if (Files.readString(skill).endsWith("\n")) "" else "\n"
+            Files.writeString(skill, "$separator$STAMP_PREFIX $version $STAMP_SUFFIX\n", StandardOpenOption.APPEND)
+        } catch (e: IOException) {
+            LOG.warn("MixinMCP: failed to stamp '$skill': ${e.message}")
+        }
+    }
+
+    private fun readSkillStamp(skill: Path): String? {
+        if (!Files.isRegularFile(skill)) return null
+        return try {
+            Files.readString(skill).lineSequence()
+                .lastOrNull { it.startsWith(STAMP_PREFIX) }
+                ?.removePrefix(STAMP_PREFIX)
+                ?.removeSuffix(STAMP_SUFFIX)
+                ?.trim()
+        } catch (_: IOException) {
+            null
+        }
+    }
+
+    private fun notifyStaleSkillsOnce(project: Project, projectRoot: Path) {
+        val version = pluginVersion() ?: return
+        val props = PropertiesComponent.getInstance(project)
+        if (props.getValue(STALE_SKILL_NOTIFIED_KEY) == version) return
+        val stale = findStaleStampedSkills(projectRoot, version)
+        if (stale.isEmpty()) return
+        props.setValue(STALE_SKILL_NOTIFIED_KEY, version)
+        NotificationGroupManager.getInstance()
+            .getNotificationGroup("MixinMCP")
+            .createNotification(
+                "MixinMCP",
+                "Injected skill files were written by an older MixinMCP version: ${stale.joinToString(", ")}. " +
+                    "Enable auto-injection in Settings | Tools | MixinMCP to refresh them.",
+                NotificationType.INFORMATION,
+            )
+            .notify(project)
+    }
+
+    private fun findStaleStampedSkills(projectRoot: Path, version: String): List<String> {
+        val stale = mutableListOf<String>()
+        for (skillsDir in listOf(projectRoot.resolve(".claude/skills"), projectRoot.resolve(".cursor/skills"))) {
+            if (!Files.isDirectory(skillsDir)) continue
+            try {
+                Files.list(skillsDir).use { dirs ->
+                    dirs.map { it.resolve(SKILL_FILE_NAME) }.forEach { skill ->
+                        val stamp = readSkillStamp(skill) ?: return@forEach
+                        if (stamp != version) {
+                            stale += projectRoot.relativize(skill).toString().replace('\\', '/')
+                        }
+                    }
+                }
+            } catch (e: IOException) {
+                LOG.warn("MixinMCP: failed to scan '$skillsDir': ${e.message}")
+            }
+        }
+        return stale
+    }
+
+    /** Deletes previously injected files no longer present in the current bundle. Touches only manifest entries. */
+    private fun cleanupRemovedManifestEntries(projectRoot: Path, project: Project): List<String> {
+        val manifest = loadManifest(project)
+        if (manifest.isEmpty()) return emptyList()
+        val expected = expectedBundleTargets() ?: return emptyList()
+        val originalSize = manifest.size
+        val removed = mutableListOf<String>()
+        for (entry in manifest.toList()) {
+            if (entry in expected || !isSafeManifestEntry(entry)) continue
+            val path = projectRoot.resolve(entry)
+            try {
+                if (Files.isRegularFile(path)) {
+                    Files.delete(path)
+                    removed += entry
+                }
+                manifest.remove(entry)
+            } catch (e: IOException) {
+                LOG.warn("MixinMCP: failed to remove stale injected file '$entry': ${e.message}")
+            }
+        }
+        if (manifest.size != originalSize) {
+            saveManifest(project, manifest)
+        }
+        return removed
+    }
+
+    private fun expectedBundleTargets(): Set<String>? {
+        val cursor = listBundledResourcePaths(BUNDLE_CURSOR)
+        val claude = listBundledResourcePaths(BUNDLE_CLAUDE)
+        if (cursor.isEmpty() || claude.isEmpty()) return null
+        val targets = mutableSetOf<String>()
+        cursor.mapTo(targets) { ".cursor/" + it.removePrefix("$BUNDLE_CURSOR/") }
+        claude.mapTo(targets) { ".claude/" + it.removePrefix("$BUNDLE_CLAUDE/") }
+        return targets
+    }
+
+    private fun isSafeManifestEntry(entry: String): Boolean =
+        (entry.startsWith(".cursor/") || entry.startsWith(".claude/")) && ".." !in entry.split('/')
+
+    private fun recordInjectedFiles(project: Project, written: List<String>) {
+        if (written.isEmpty()) return
+        saveManifest(project, loadManifest(project) + written)
+    }
+
+    private fun loadManifest(project: Project): MutableList<String> =
+        PropertiesComponent.getInstance(project).getValue(MANIFEST_KEY)
+            ?.lineSequence()?.filter { it.isNotBlank() }?.toMutableList()
+            ?: mutableListOf()
+
+    private fun saveManifest(project: Project, entries: Collection<String>) {
+        PropertiesComponent.getInstance(project)
+            .setValue(MANIFEST_KEY, entries.distinct().sorted().joinToString("\n"))
+    }
+
+    private fun pluginVersion(): String? =
+        PluginManagerCore.getPlugin(PluginId.getId(PLUGIN_ID))?.version
+
     private fun refreshDirectoryRecursively(dir: Path) {
         if (!Files.isDirectory(dir)) return
         val vf = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(dir) ?: return
@@ -331,6 +533,14 @@ class RuleInjectionStartupActivity : ProjectActivity {
 
         private const val BUNDLE_CURSOR = "inject/cursor"
         private const val BUNDLE_CLAUDE = "inject/claude"
+
+        private const val PLUGIN_ID = "dev.mixinmcp"
+        private const val SKILL_FILE_NAME = "SKILL.md"
+        private const val STAMP_PREFIX = "<!-- mixinmcp-skill-version:"
+        private const val STAMP_SUFFIX = "-->"
+        private const val STALE_SKILL_NOTIFIED_KEY = "mixinmcp.staleSkillNotifiedVersion"
+        private const val TOOLS_SKILL_NOTIFIED_KEY = "mixinmcp.toolsSkillNotified"
+        private const val MANIFEST_KEY = "mixinmcp.injectedFileManifest"
     }
 }
 
@@ -344,6 +554,7 @@ private val MC_BUILD_PLUGIN_PATTERNS = listOf(
     "net.minecraftforge.gradle",
     "dev.architectury",
     "org.quiltmc.loom",
+    "org.relativitymc.neo-loom",
 )
 
 internal fun hasGradlePlugin(root: Path): Boolean {
@@ -362,6 +573,13 @@ internal fun hasGradlePlugin(root: Path): Boolean {
         buildFileContainsPlugin(root.resolve("build.gradle.kts"))
 }
 
+internal fun isJvmProject(root: Path): Boolean =
+    Files.exists(root.resolve("build.gradle")) ||
+        Files.exists(root.resolve("build.gradle.kts")) ||
+        Files.exists(root.resolve("settings.gradle")) ||
+        Files.exists(root.resolve("settings.gradle.kts")) ||
+        Files.exists(root.resolve("pom.xml"))
+
 internal fun isMinecraftProject(root: Path): Boolean {
     // Fabric
     if (Files.exists(root.resolve("fabric.mod.json")) ||
@@ -376,9 +594,25 @@ internal fun isMinecraftProject(root: Path): Boolean {
     // MixinMCP Gradle plugin already configured
     if (Files.exists(root.resolve(".gradle/mixinmcp/manifest.json"))) return true
 
-    // Scan build files for Minecraft-related plugin IDs
+    // Scan build files for Minecraft-related plugin IDs; multiloader roots often keep
+    // loader plugins only in subproject build files, so also check immediate children.
     return hasMcPluginInBuildFile(root.resolve("build.gradle")) ||
-        hasMcPluginInBuildFile(root.resolve("build.gradle.kts"))
+        hasMcPluginInBuildFile(root.resolve("build.gradle.kts")) ||
+        hasMcPluginInChildBuildFiles(root)
+}
+
+private val CHILD_BUILD_FILE_NAMES =
+    listOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
+
+private fun hasMcPluginInChildBuildFiles(root: Path): Boolean {
+    return try {
+        Files.list(root).use { children ->
+            children.filter { Files.isDirectory(it) }
+                .anyMatch { child -> CHILD_BUILD_FILE_NAMES.any { hasMcPluginInBuildFile(child.resolve(it)) } }
+        }
+    } catch (_: IOException) {
+        false
+    }
 }
 
 private fun hasMcPluginInBuildFile(buildFile: Path): Boolean {

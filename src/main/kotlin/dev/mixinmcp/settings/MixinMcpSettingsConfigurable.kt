@@ -31,5 +31,17 @@ class MixinMcpSettingsConfigurable(private val project: Project) : BoundConfigur
                     .bindSelected(settings::warnMissingGradlePlugin)
             }
         }
+        group("Non-Minecraft JVM Projects") {
+            row {
+                checkBox("Also inject the MixinMCP tool skill into non-Minecraft JVM projects")
+                    .bindSelected(MixinMcpAppSettings.getInstance()::injectToolsSkillIntoJvmProjects)
+            }
+            row {
+                comment(
+                    "Applies to every JVM project you open, so assistants prefer MixinMCP for classpath and " +
+                        "dependency search. Minecraft-specific skills and references are not included.",
+                )
+            }
+        }
     }
 }

@@ -1,75 +1,86 @@
 ---
 name: mixinmcp-tools
 description: >
-  MixinMCP IntelliJ tooling for searching Minecraft, mod, and dependency sources.
-  ALWAYS use this skill instead of grep, read_file, or jar extraction when you need
-  to search or read vanilla Minecraft code, mod code, or any dependency on the classpath.
-  Use when looking up classes, methods, fields, bytecode, inheritance hierarchies,
-  call graphs, mixin conflicts, or dependency sources. Also use when writing @At(target)
-  strings, targeting lambdas, or diagnosing "target not found" errors.
+  IntelliJ-backed code search and refactoring across a JVM project's entire
+  classpath: any dependency, library, or JDK source, and on Minecraft projects
+  also vanilla and mod sources. ALWAYS use these tools instead of grep, read_file,
+  or jar extraction to look up or search code that lives in a dependency: they
+  index inside jars grep cannot see, and add type-hierarchy, call-graph, reference,
+  and bytecode tools that beat text search on accuracy and context cost. Use for
+  class/method/field lookup, finding usages/implementations/overrides, inheritance
+  and call graphs, reading dependency source, bytecode inspection, and
+  reference-aware refactors (rename, extract, inline, change-signature, move). On
+  Minecraft projects also use for mixin work: @At(target) owners, synthetic/lambda
+  names, mapping-namespace conversion, and cross-mod conflicts.
 ---
 
 # MixinMCP Tools
 
-MixinMCP tools run on the **user-jetbrains** MCP server and can intelligently search
-Minecraft sources and dependency sources more efficiently than grep or file reading.
-They search and read inside dependency jars natively. Dependencies without published
-sources are decompiled via the MixinMCP Gradle plugin (Vineflower) so every library
-on the classpath is searchable.
+These tools run on the **user-jetbrains** MCP server and search a JVM project's whole
+classpath, including inside dependency jars that grep cannot see. They add dedicated
+type-hierarchy, call-graph, reference-finding, and bytecode tools that are faster and
+more accurate than text search, and return structured results that cost far less
+context than raw file dumps. Dependencies without published sources are decompiled
+(Vineflower, via the MixinMCP Gradle plugin) so every library on the classpath is
+searchable.
 
-**ALWAYS prefer these tools over grep, read_file, or jar extraction.**
+**Prefer these over grep, read_file, or jar extraction for anything on the classpath.**
+The search, hierarchy, bytecode, and refactoring tools work on any Gradle/Maven JVM
+project. The mapping, mixin, and Minecraft-toolchain features are used only on Minecraft projects.
 
-## Invoking Tools
+## Invoking
 
-```
-CallMcpTool(server="user-jetbrains", toolName="<tool>", arguments={...})
-```
-
-**Arguments must be valid JSON.** No trailing commas, no single quotes, no
-unescaped special characters.
-
-## Tool Selection
-
-| Goal | Tool |
-|------|------|
-| Look up a class by FQCN | `mixin_find_class` (if SourceKind is "Classes JAR (binary)", use `mixin_get_dep_source` for better source) |
-| Read just one method's body | `mixin_find_class(className, methodName=...)`. Returns one method instead of dumping the whole file (huge for `Block` / `BlockBehaviour`). Pair with `fieldName` for a single field. |
-| Search names across classpath | `mixin_search_symbols` |
-| Grep dependency sources by regex | `mixin_search_in_deps` → then `mixin_get_dep_source` with returned `url`. For **short** matched bodies, pass `contextLines` and skip the follow-up read. |
-| Read a known dependency file | `mixin_get_dep_source` (pass `path`, e.g. `io/redspace/.../Utils.java`) |
-| Inheritance chain | `mixin_type_hierarchy` |
-| All implementors | `mixin_find_impls` |
-| All usages of a class/method/field | `mixin_find_references` (supports both methods and fields via `memberName`) |
-| All call sites across MC + all deps | `mixin_find_references` (more complete than `mixin_search_in_deps` for call-site enumeration) |
-| Cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins` — finds all @Mixin classes + their injection points |
-| Call graph | `mixin_call_hierarchy` |
-| Method origin in hierarchy | `mixin_super_methods` |
-| All overrides of a method | `mixin_find_overrides` — walks down the class hierarchy; mirror of `mixin_super_methods` |
-| Synthetic/lambda method names | `mixin_class_bytecode` (filter="synthetic") |
-| Exact @At(target) for an INVOKE | `mixin_method_bytecode` — read the owner class from INVOKE* instructions |
-| Bytecode for a specific method | `mixin_method_bytecode` |
-| Convert a name between mapping namespaces | `mixin_mappings_lookup` — mojmap / yarn / intermediary / srg / obf, for class / method / field |
-| Diagnose missing source roots | `mixin_list_source_roots` |
-
-## Examples
-
-Look up a class:
+Call them through the MCP interface, e.g.:
 ```
 CallMcpTool(
   server="user-jetbrains",
   toolName="mixin_find_class",
-  arguments={"className": "net.minecraft.world.level.Level", "includeMembers": true}
+  arguments={"className": "java.util.concurrent.ConcurrentHashMap"}
+)
+```
+**Arguments must be valid JSON** (no trailing commas, no single quotes). Each tool's
+description documents its parameters and defaults; read it before calling rather than guessing.
+
+## Tool selection
+
+| Goal | Tool |
+|------|------|
+| Look up a class by FQCN | `mixin_find_class` (if SourceKind is a binary "Classes JAR", read real source via `mixin_get_dep_source`) |
+| Read one method/field, not the whole class | `mixin_find_class` with `methodName` or `fieldName` — avoids dumping a 50KB class |
+| Search names across the classpath | `mixin_search_symbols` (short names, one at a time) |
+| Regex-grep dependency source | `mixin_search_in_deps` → `mixin_get_dep_source` with the returned `url`; `contextLines` captures short bodies inline |
+| Read a known dependency file | `mixin_get_dep_source` (by `path`, e.g. `com/google/common/collect/Lists.java`) |
+| Inheritance chain / all subtypes | `mixin_type_hierarchy` |
+| All implementors of an interface | `mixin_find_impls` |
+| All usages of a class/method/field | `mixin_find_references` (methods and fields via `memberName`; more complete than text search) |
+| Method origin upward / all overrides downward | `mixin_super_methods` / `mixin_find_overrides` |
+| Call graph | `mixin_call_hierarchy` |
+| Bytecode of a class or method | `mixin_class_bytecode` / `mixin_method_bytecode` |
+| Pin a lookup to one module's classpath | `"module"` (e.g. `"common.main"`) on `mixin_find_class`, `mixin_get_dep_source`, bytecode tools |
+| Rename / delete / move / change-sig / extract / inline / move-members | see **Refactoring** |
+| Diagnose missing or empty source roots | `mixin_list_source_roots` |
+| **Minecraft:** synthetic/lambda names, `@At(target)` owner | `mixin_class_bytecode` with `"filter": "synthetic"`, `mixin_method_bytecode` |
+| **Minecraft:** cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins` |
+| **Minecraft:** convert a name between mapping namespaces | `mixin_mappings_lookup` |
+
+## Examples
+
+Read one method from a large class instead of the whole file:
+```
+CallMcpTool(
+  server="user-jetbrains",
+  toolName="mixin_find_class",
+  arguments={"className": "com.google.common.collect.Iterables", "methodName": "partition"}
 )
 ```
 
-Search dependency sources, then read the result:
+Grep dependency source, then read a hit (results are grouped by file with a `url:` line):
 ```
 CallMcpTool(
   server="user-jetbrains",
   toolName="mixin_search_in_deps",
-  arguments={"regexPattern": "destroyBlock", "fileMask": "Level"}
+  arguments={"regexPattern": "computeIfAbsent\\(", "pathPrefix": "java/util/"}
 )
-// Pass the url: line from results to mixin_get_dep_source:
 CallMcpTool(
   server="user-jetbrains",
   toolName="mixin_get_dep_source",
@@ -77,43 +88,7 @@ CallMcpTool(
 )
 ```
 
-Search and capture the matched method body inline (skip the follow-up read):
-```
-CallMcpTool(
-  server="user-jetbrains",
-  toolName="mixin_search_in_deps",
-  arguments={"regexPattern": "isPathfindable\\(", "pathPrefix": "net/minecraft/", "contextLines": 8}
-)
-```
-
-Read just one method from a huge class (e.g. `Block` / `BlockBehaviour`):
-```
-CallMcpTool(
-  server="user-jetbrains",
-  toolName="mixin_find_class",
-  arguments={"className": "net.minecraft.world.level.block.state.BlockBehaviour", "methodName": "isPathfindable"}
-)
-```
-
-Narrow to Minecraft-only sources with pathPrefix:
-```
-CallMcpTool(
-  server="user-jetbrains",
-  toolName="mixin_search_in_deps",
-  arguments={"regexPattern": "addEffect\\(", "pathPrefix": "net/minecraft/", "timeout": 25000}
-)
-```
-
-Read source by known path:
-```
-CallMcpTool(
-  server="user-jetbrains",
-  toolName="mixin_get_dep_source",
-  arguments={"path": "io/redspace/ironsspellbooks/player/ServerPlayerEvents.java", "lineNumber": 360, "linesBefore": 20, "linesAfter": 20}
-)
-```
-
-Find field references:
+Find every usage of a field, including string refs in mixin config JSON:
 ```
 CallMcpTool(
   server="user-jetbrains",
@@ -122,125 +97,86 @@ CallMcpTool(
 )
 ```
 
-## Common Pitfalls
+## Usage notes
 
-### mixin_find_class
-- For huge classes like `Block`, `BlockBehaviour`, `LivingEntity`: prefer `methodName=` (or `fieldName=`) to read just the member you care about. `includeSource=true` dumps the full file (50KB+ for some vanilla classes) and forces extra grep work.
-- When a name is only inherited, the tool shows the inherited declaration with an `(inherited from X)` tag. Follow up with `mixin_super_methods` to walk the chain or call `mixin_find_class` on `X` directly for canonical declarations.
-- Overloads are listed in order, each with its own line range header. Disambiguate by reading the parameter list, not the index.
+Only what isn't obvious from the tool descriptions.
 
-### mixin_find_class
-- The Methods/Fields sections list only members declared **directly** on the class — not inherited ones, and not members of nested classes.
-- Utility classes commonly group their public surface into **nested classes** (e.g. `net.minecraftforge.common.Tags` exposes `Tags.Blocks`, `Tags.Items`, etc., each holding the actual constants). The outer class will look empty in Methods/Fields even though the API lives one level down. **Always check the Nested classes section before concluding a class has no members.**
-- For each nested class, the result includes the FQCN and a ready-to-paste follow-up call. Use that to drill in.
+**Searching dependency source** (`mixin_search_in_deps` / `mixin_get_dep_source`)
+- `regexPattern` is Java regex — escape metacharacters (`addEffect\\(`, not `addEffect(`). Unescaped, the tool hints the fix.
+- `fileMask` without wildcards is a case-insensitive substring on the path, so a short fragment like `apotheosis` also matches `compat/apotheosis/` inside other jars; use a longer fragment or `pathPrefix`. It never matches jar names or Maven coordinates.
+- Broad searches with no `fileMask` can time out — raise `timeout` to 20000–30000.
+- Each hit's `--- path [root] ---` header names the matching root; prefer `Library SOURCES` over decompiled. Copy the `url:` line verbatim into `mixin_get_dep_source`.
+- `contextLines` (3–10) captures a short matched body inline so you can skip the follow-up read; leave it 0 for long methods.
+- `mixin_get_dep_source` takes that `url` verbatim, or a package `path` (`.../Foo.java`, not a filesystem path). If `path` misses, search first and use the returned `url`.
 
-### mixin_search_in_deps
-- `regexPattern` is **Java regex**. Escape metacharacters: `addEffect\\(` not `addEffect(`.
-  If you pass unescaped metacharacters, the tool will return a hint suggesting the fix.
-- Each result's `url:` line includes `[rootKind: ...]`. Prefer Library SOURCES hits over decompiled ones.
-- `fileMask` matches file path inside jar (e.g. `net/minecraft/world/entity/LivingEntity.java`):
-  - No wildcards → case-insensitive **substring** match anywhere in the path
-  - With wildcards → glob
-  - Does NOT match jar names or Maven coordinates.
-  - **Caution:** Short substrings like `apotheosis` will also match paths in *other* mods' compatibility packages (e.g. `compat/apotheosis/`). Use longer path fragments or `pathPrefix` for precision.
-- `pathPrefix`: restricts to files whose logical path starts with the prefix (e.g. `net/minecraft/` or `io/redspace/ironsspellbooks/`). Use forward slashes.
-- `roots`: `all` (default), `library` (only published -sources.jar), `decompiled` (only MixinMCP cache). When `all`, cache files are skipped if the same path already matched in library sources. Cache roots that duplicate an already-attached sources jar are not indexed at all, so `decompiled` only contains deps with no sources anywhere (typically cursemaven jars).
-- `contextLines` (default 0, max 200): include N lines around each match. Match lines stay highlighted with `||markers||` and are prefixed with `>`; overlapping windows are merged per file. Use small values (3–10) when you expect a **short** matched body (a few-line override) so the result captures the body inline and you can skip the follow-up `mixin_get_dep_source` call. For longer methods or unfocused searches keep the default 0.
-- Broad searches can time out. Increase `timeout` (e.g. 20000–30000) for searches without a fileMask.
+**Reading a class** (`mixin_find_class`)
+- For big classes prefer `methodName`/`fieldName` over `"includeSource": true` (which dumps 50KB+ and forces extra grep).
+- Methods/Fields list only members declared **directly** on the class. Utility classes often hide their real API in **nested classes** (e.g. `Tags.Blocks`, `Tags.Items`), so the outer class looks empty; always read the Nested classes section, which gives ready-to-paste follow-up calls. Inherited members show `(inherited from X)` — follow up on `X` or via `mixin_super_methods`.
 
-### Vanilla / Forge / NeoForge sources are empty
+**Usages, hierarchy, call graph**
+- Disambiguate overloaded methods (for `mixin_find_references` / `_call_hierarchy` / `_super_methods` / `_find_overrides` / `_rename`) with `"parameterTypes": ["Entity","DamageSource"]` or `"methodDescriptor": "(L…;)Z"` (parameterless: `"parameterTypes": []`). On failure the error lists overloads with ready-to-copy values.
+- `mixin_find_references` returns runtime call sites plus string refs in annotations. `mixin_call_hierarchy` output is `owner#name(descriptor)` (paste-ready for `@At`), tags `[lambda]`/`[ctor]`/`[cycle]`, resolves lambdas through the INVOKEDYNAMIC handle, and walks Java/Kotlin/Groovy/Scala via UAST; `maxResults` is a global budget, so raise it for wide graphs or start at `"maxDepth": 1`.
+- `mixin_super_methods` marks `[root declaration]` entries — usually the best mixin target; `mixin_find_overrides` is its downward mirror. `mixin_type_hierarchy`: check both **Direct** and **Inherited** interface sections (inherited tagged `(from X)`/`(via X)`) before concluding a class doesn't implement something; `"direction": "supers"` skips the subtype list.
 
-When `mixin_search_in_deps` returns nothing for `net/minecraft/`,
-`net/minecraftforge/`, or `net/neoforged/`, follow this triage order:
+**Bytecode** (`mixin_class_bytecode` / `mixin_method_bytecode`)
+- INVOKE* instructions show the **real owner class**, not the source-declared one — use that owner in `@At(target=…)`.
+- `"filter": "synthetic"` reveals lambda/bridge names (`lambda$X$N`) and synthetic fields (`this$0`, `$VALUES`) that decompiled source hides; it is the only way to target a lambda.
 
-1. **Run `mixin_list_source_roots`** and read the **MDG merged-jar source auto-attach** section.
-2. **Auto-attach warnings → fix or report those first.** Until attachment succeeds, every other fallback is fighting the wrong fire.
-3. **Sources truly missing for the toolchain?** See `references/toolchains.md` for the per-toolchain recovery commands (Fabric Loom `genSources`, NeoForge MDG `downloadAssets`, any loader `genDependencySources --force`). Then call `mixin_sync_project`.
-4. **Last resort fallbacks:** `mixin_find_class(includeSource=true)` and `mixin_method_bytecode` work via PSI / classfile and don't depend on the source roots being attached.
+**Module pinning and classpath variants**
+- Multi-module classpaths carry several copies of a class. `"module"` (exact or dot-boundary suffix, e.g. `"neoforge.main"`) on `mixin_find_class`/`_get_dep_source`/bytecode tools pins resolution; unknown names error with the available list.
+- Without `module`, tools append a Variants block: byte-identical copies merge; patched copies get a structural diff tagged by provenance (`[loader-patched]`, `[loom-remapped vanilla]`, `[MDG/NeoForm-recompiled vanilla]`). Two-vanilla diffs collapse to a count (toolchain noise); only `[loader-patched]` diffs are real changes. `mixin_method_bytecode` adds a `NOTE:` when a method differs in another variant.
 
-`mixin_list_source_roots` uses canary `.java` paths (e.g.
-`net/minecraft/world/level/Level.java`,
-`net/minecraftforge/event/entity/EntityEvent.java`,
-`net/neoforged/neoforge/event/Event.java`) to confirm each game-API tree is
-actually present, not just nominally on the classpath.
+**Minecraft: `net/minecraft/`, `net/minecraftforge/`, or `net/neoforged/` sources come back empty**
+1. Run `mixin_list_source_roots` and read the MDG merged-jar auto-attach section.
+2. Fix or report any auto-attach warning first; until attachment succeeds, every other fallback fights the wrong fire.
+3. Sources genuinely missing for the toolchain? See `references/toolchains.md` for per-toolchain recovery (Loom/neo-loom `genSources`, NeoForge/Forge MDG `downloadAssets`, `genDependencySources --force`), then `mixin_sync_project`.
+4. Last resort: `mixin_find_class` with `"includeSource": true` and `mixin_method_bytecode` work via PSI/classfile and do not need attached source roots.
 
-### mixin_get_dep_source
-- `url`: copy the exact `url:` string from search results (strip `[rootKind: ...]` suffix).
-- `path`: package path with `/` separators and `.java` extension (e.g. `io/redspace/.../Utils.java`). NOT a filesystem path.
-- If a path is not found, fall back to `mixin_search_in_deps` then use the returned `url`.
-- **Vanilla Minecraft classes** in MDG projects should resolve via `path` once the merged jar is auto-attached. If `path` fails, the issue is almost always attachment, not the path; see the "Vanilla / Forge / NeoForge sources are empty" triage above and `references/toolchains.md` for recovery.
+**Minecraft: `mixin_mappings_lookup`**
+- The input symbol must already be in the `from` namespace (e.g. `"from": "srg"` wants `net/minecraft/src/C_12_`, not the mojmap name). Member inputs include the owner (`net/minecraft/src/C_12_.m_8793_`); descriptor optional.
+- MC version auto-detects from `gradle.properties`; pass `mcVersion` if that fails. Namespaces: mojmap / yarn / intermediary / srg / obf.
 
-### mixin_find_references / mixin_call_hierarchy / mixin_super_methods / mixin_find_overrides
-- `memberName` supports **both methods and fields**. For fields, no disambiguation is needed. For methods, disambiguate overloads with:
-  - `"parameterTypes": ["MobEffectInstance", "Entity"]` — simple type names
-  - `"methodDescriptor": "(Lnet/...;)Z"` — JVM descriptor
-  - Parameterless: `"parameterTypes": []` or `"methodDescriptor": "()V"`
-- If disambiguation fails, the error lists all overloads with ready-to-copy `parameterTypes` and declaring class.
-- `mixin_find_references` returns both runtime call sites AND string references in mixin annotations.
-- For dedicated mixin conflict analysis, prefer `mixin_find_targeting_mixins`.
-- `mixin_call_hierarchy` callees cover direct method calls, constructor invocations (`new Foo(...)`), method references (`Foo::bar`, `Foo::new`), and the real synthetic target behind each lambda. The `lambda$X$N` synthetic is resolved through the `INVOKEDYNAMIC` bootstrap handle and tagged `[lambda]`; constructors are tagged `[ctor]`. Method references that resolve to an existing non-synthetic method (e.g. `this::setPosToBed`) surface as untagged callees — indistinguishable from a direct call, because that's the method you'd mixin into. Output is `owner#name(descriptor)` in JVM format, ready to paste into `@At(target = "...")`. Non-lambda `INVOKEDYNAMIC` (string concat, switch bootstraps) is intentionally omitted. If the method body is not available in source (binary class), the tool automatically falls back to structured bytecode analysis that covers the same cases.
-- `mixin_call_hierarchy` recurses up to `maxDepth` (default 3, capped at 10). Each depth is indented two spaces and tagged `[L1]`, `[L2]`, ... so nesting is visible at a glance; cycles and already-expanded nodes are marked `[cycle]` and not re-expanded; abstract / native leaves show `(abstract — no body to walk)` so terminal branches read distinctly from depth-cap truncation. `maxResults` is a **global budget across all depths and branches** — raise it for wide hierarchies, or narrow the query (start with `maxDepth=1` and grow) if output is too long. For callers, references from field/static initialisers appear as `(non-method context)` leaves and don't recurse. Both callers and callees work across JVM languages via UAST (Java, Kotlin, Groovy, Scala) — Kotlin callers resolve to their enclosing function and Kotlin method bodies are walked for callees, alongside the Java PSI and bytecode paths.
-- `mixin_find_overrides` is the downward counterpart to `mixin_super_methods` — use it when you need to know every concrete implementation of an abstract/interface method before injecting. `[abstract]` tags mark overrides that are themselves abstract (interface extensions, not implementations). For non-overridable methods (static/private/final/constructors/final classes) the tool returns an explanation and no list.
-- `mixin_super_methods` walks the **full** chain to every root declaration (both superclass and super-interface paths), not just the direct super. Output is indented by depth; entries tagged `[root declaration]` are the original declarations — usually the best mixin target when you want to affect all overriders. When a method overrides both a class method and an interface default, multiple roots are listed and summarized at the end.
+## Refactoring
 
-### mixin_search_symbols
-- Searches **short names** only, not FQCNs. Pass `LivingEntity` not the full package path.
-  (FQCNs are auto-simplified with a note — use `mixin_find_class` for exact FQCN lookup.)
-- Required parameter is `query` (a single name substring). Search one name at a time.
-- Method results include parameter types for disambiguation.
+Reference-aware: they update or check every reference project-wide (including mixin
+config JSON and javadoc links), so prefer them over hand-editing, which fixes one site
+and leaves the rest dangling. Shared contract: `"dryRun": true` reports the resolved
+target, per-file usage counts, and conflicts without changing anything; conflicts are
+listed one per line tagged `[library]`/`[source]` (`[library]` usually means a stale
+build-output jar, not a real clash); `"ignoreConflicts": true` proceeds anyway, the
+headless equivalent of the IDE's "Continue". The signature/extract/introduce/inline/
+move-members tools are Java-source only. Read each tool's description for parameters;
+below is only what isn't obvious there.
 
-### mixin_class_bytecode
-- Decompiled source does NOT show synthetic method names. To target a lambda in @Redirect or @Inject, you MUST use this tool with `filter="synthetic"`.
-- `filter="synthetic"` also lists synthetic fields (`this$0`, `$VALUES`, switch-map fields), useful for @Shadow targeting of outer-class references.
+- `mixin_rename` — class/method/field, plus `"memberKind": "parameter"`/`"local"` (with `variableName` naming the variable inside the method). Unlike the built-in `rename_refactoring`, it reports conflicts instead of silently discarding them.
+- `mixin_safe_delete` — usage-checked across project and dependencies; handles Kotlin (a Kotlin class delete removes the declaration but leaves the file).
+- `mixin_move_file` — moves a class to a new package, updating the package declaration and every reference (including mixin config JSON).
+- `mixin_change_signature` — `parametersJson` is a JSON-array string: `{"oldIndex": N}` keeps a parameter, `{"oldIndex": -1, "name": …, "type": …, "defaultValue": …}` adds one (inserted at every call site), omitted parameters are removed.
+- `mixin_extract_method` / `mixin_introduce_variable` — address a `filePath` plus `startLine`..`endLine` range.
+- `mixin_inline` — `"kind": "method"|"field"|"local"`; refuses recursive methods, enum constants, and non-final fields with write usages.
+- `mixin_move_members` — `"direction": "up"|"down"|"toClass"`; `members` are `name` or `name#descriptor`. Moving members *into* a `@Mixin` class flags external references to them as blocking `[mixin]` conflicts, since mixin members can't be referenced from ordinary classes at runtime.
 
-### mixin_method_bytecode
-- Each INVOKE* instruction shows the **real owner class**, not the declaring class from source. Always use this owner when writing `@At(target = "...")`.
+## Mixin workflow
 
-### mixin_find_targeting_mixins
-- Increase `maxResults` (default 50) for heavily-targeted classes like `LivingEntity` or `Player`.
+1. **Type hierarchy first.** Run `mixin_type_hierarchy` before designing the @Mixin. The target's parent often declares the method you actually want; injecting into the subclass means rewriting once you find the real declaration site.
+2. **Bytecode for synthetics.** Decompiled source hides lambda and bridge names; `mixin_class_bytecode` with `"filter": "synthetic"` is the only way to get the `lambda$X$N` symbol for `method = "…"`.
+3. **Bytecode owner for `@At(target)`.** The owner in an INVOKE instruction can differ from the source-declared class (devirtualisation, override resolution, mixin re-application). It is what runs at injection time, so read it from `mixin_method_bytecode`.
+4. **Origin questions.** `mixin_super_methods` walks up to the original declaration; `mixin_find_overrides` walks down to every implementation.
+5. **After writing a mixin**, validate for errors before committing.
+6. **After dependency changes**, run `./gradlew genDependencySources` then `mixin_sync_project` so the index matches the new classpath.
 
-### mixin_type_hierarchy
-- Increase `maxResults` (default 50) for heavily-inherited classes like `LivingEntity` or `Block` when you need the full subtype list. Otherwise the output shows `... (truncated at N results)`.
-- Use `direction="supers"` to skip the potentially-large subtype listing when you only need the inheritance chain upward.
-- **Direct interfaces** are the class's own `implements`/`extends` clause. **Inherited interfaces** are the transitive closure — everything picked up from the superclass chain and from super-interface extension. Each inherited entry is tagged `(from X)` (introduced by superclass X) or `(via X)` (reached by extending interface X). Check both sections before assuming a class does not implement something: e.g. `LivingEntity` does not directly implement `CommandSource`, but inherits it from `Entity`.
+For injector selection (`@ModifyExpressionValue` vs `@WrapOperation` vs `@Inject` vs …),
+`@At` parameter format, and MixinExtras `@Expression` syntax, switch to the
+**mixin-writing** skill once the tools above have pinned down the target.
 
-### mixin_mappings_lookup
-- **Input symbol must be in the `from` namespace** — if `from="srg"` the class must be the SRG name (e.g. `net/minecraft/src/C_12_`), not the mojmap/yarn name. Cross-namespace class renames mean you can't mix-and-match.
-- Method / field inputs include the **owner class**: `net/minecraft/src/C_12_.m_8793_`. Accepts `.` or `/` as package separator; last dot before `(` (method) or `:` (field) splits owner from member.
-- Method descriptor is optional (e.g. `m_8793_(Ljava/util/function/BooleanSupplier;)V`) — if omitted, all overloads on the class are returned. Same for field type descriptors (`entities:Lnet/...;` vs just `entities`).
-- MC version is auto-detected from `gradle.properties` (keys: `minecraft_version`, `mc_version`, `minecraftVersion`, `mcVersion`, `minecraft.version`, `mc.version`, checking root + each subproject). Pass `mcVersion` explicitly if auto-detect fails.
-- First call per MC version downloads mappings (Mojang launcher meta + Fabric Maven + Forge/NeoForge Maven) to `~/.cache/mixinmcp/mappings/`. Subsequent calls are cached in memory for the IDE session.
-- `obf` (the obfuscated production names) is available as a namespace even though mod authors rarely type it directly — useful for mixin debugging.
-- **SRG** is published by Forge's `mcp_config` and NeoForged's `neoform`. If neither has published for a very new MC version yet, the error names both URLs tried.
-- **Yarn** tiny files often carry only `intermediary → named` (no obf); the tool bridges through the separately-downloaded intermediary mappings automatically.
-- ProGuard (Mojang) mappings do NOT carry field descriptors — mojmap field lookups may show the name without a type.
-
-Example:
-```
-CallMcpTool(
-  server="user-jetbrains",
-  toolName="mixin_mappings_lookup",
-  arguments={"symbol": "net/minecraft/src/C_12_.m_8793_", "kind": "method", "from": "srg", "to": "mojmap", "mcVersion": "1.20.1"}
-)
-```
-
-## Mixin Workflow
-
-1. **Type hierarchy first.** Run `mixin_type_hierarchy` before designing the @Mixin. The target's parent often defines the method you really want to inject into; jumping straight at the subclass means rewriting the mixin once you discover the real declaration site.
-2. **Bytecode for synthetics.** Decompiled source hides lambda and bridge names. `mixin_class_bytecode(filter="synthetic")` is the only way to get the actual `lambda$X$N` symbol you need to put in `method = "..."`.
-3. **Bytecode owner for `@At(target)`.** The owner emitted in an INVOKE instruction can differ from the declaring class shown in source (devirtualisation, override resolution, mixin re-application). The bytecode owner is what runs at injection time, so use `mixin_method_bytecode` and copy that owner into your `@At`.
-4. **Method origin questions.** `mixin_super_methods` walks up the chain to the original declaration; `mixin_find_overrides` walks down to every concrete implementation.
-5. **After writing a mixin**, use `get_file_problems` to validate before committing.
-6. **After dependency changes**, run `./gradlew genDependencySources` then `mixin_sync_project` so the indexed sources match the new classpath.
-
-For injector selection (`@ModifyExpressionValue` vs `@WrapOperation` vs `@Inject` vs ...), `@At` parameter format, and MixinExtras `@Expression` syntax, switch to the **mixin-writing** skill once you've nailed down the target via the tools above.
-
-**Note:** Only `mixin_sync_project` accepts an optional `projectPath` parameter. All other tools automatically use the open project.
+**Note:** the IntelliJ MCP framework auto-injects a `projectPath` argument into every
+tool. Pass it when multiple IDE windows are open; with one window it can be omitted. An
+ambiguous project produces an error listing the candidate paths.
 
 ## Troubleshooting
 
-**If `mixin_*` tools are not found:**
-The `user-jetbrains` MCP server only appears after Cursor connects to IntelliJ's MCP Server.
-1. Ensure IntelliJ is running with the project open
-2. Check IntelliJ: Settings → Plugins → verify "MCP Server" and "MixinMCP" are enabled
-3. **Restart Cursor** — the MCP server list is cached at startup
+**If the `mixin_*` tools are not available:**
+1. Ensure IntelliJ is running with the project open.
+2. In IntelliJ, Settings → Plugins: verify both "MCP Server" and "MixinMCP" are enabled.
+3. Verify the IntelliJ MCP server (`user-jetbrains`) is configured in your Cursor MCP settings.
+4. **Restart Cursor** if IntelliJ started after Cursor's MCP connection was established.

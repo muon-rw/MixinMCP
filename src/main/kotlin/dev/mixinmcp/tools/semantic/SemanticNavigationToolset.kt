@@ -4,7 +4,7 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
-import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiDocumentManager
@@ -17,8 +17,12 @@ import com.intellij.psi.search.searches.AnnotatedElementsSearch
 import com.intellij.psi.search.searches.ClassInheritorsSearch
 import com.intellij.psi.search.searches.OverridingMethodsSearch
 import com.intellij.psi.search.searches.ReferencesSearch
+import com.intellij.util.Processor
+import com.intellij.util.concurrency.annotations.RequiresReadLock
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.MethodResolver
+import dev.mixinmcp.tools.ClassContentDeduper
+import dev.mixinmcp.tools.VARIANT_GROUPING_FOOTER
 import dev.mixinmcp.tools.requireProject
 import kotlin.coroutines.coroutineContext
 
@@ -26,10 +30,11 @@ import kotlin.coroutines.coroutineContext
  * Semantic-navigation tools: type hierarchy, implementors, mixin target
  * discovery, super-method chains, references, and call hierarchy.
  */
+@Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class SemanticNavigationToolset : McpToolset {
 
     @McpTool
-    @McpDescription("Retrieves the type hierarchy of a class. Use this tool to understand inheritance before writing mixins. direction: supers (superclass chain + all interfaces, direct and transitively inherited), subs (inheritors), both (default). maxDepth limits superclass traversal (default 10, must be >= 1); also bounds how far up the superclass chain inherited interfaces are collected from. includeInterfaces: default true. Inherited interfaces are collected from the full superclass chain (within maxDepth) and from super-interface extension, deduplicated by qualified name, and each tagged with origin (from X = introduced by superclass X; via X = inherited by extending interface X). maxResults caps subclasses/implementors (default 50, must be >= 1) — raise for heavily-inherited classes like LivingEntity or Block.")
+    @McpDescription("Retrieves the type hierarchy of a class. Use this tool to understand inheritance before writing mixins. direction: supers (superclass chain + all interfaces, direct and transitively inherited), subs (inheritors), both (default). maxDepth limits superclass traversal (default 10, must be >= 1); also bounds how far up the superclass chain inherited interfaces are collected from. includeInterfaces: default true. Inherited interfaces are collected from the full superclass chain (within maxDepth) and from super-interface extension, deduplicated by qualified name, and each tagged with origin (from X = introduced by superclass X; via X = inherited by extending interface X). maxResults caps subclasses/implementors (default 50, must be >= 1) — raise for heavily-inherited classes like LivingEntity or Block. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
     suspend fun mixin_type_hierarchy(
         className: String,
@@ -39,6 +44,11 @@ class SemanticNavigationToolset : McpToolset {
         maxResults: Int = 50,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
+        if (direction != "supers" && direction != "subs" && direction != "both") {
+            return McpToolCallResult.error(
+                "direction must be 'supers', 'subs', or 'both' (got '$direction')",
+            )
+        }
         if (maxResults < 1) {
             return McpToolCallResult.error("maxResults must be >= 1 (got $maxResults)")
         }
@@ -46,9 +56,9 @@ class SemanticNavigationToolset : McpToolset {
             return McpToolCallResult.error("maxDepth must be >= 1 (got $maxDepth)")
         }
 
-        val result: String? = ReadAction.nonBlocking<String?> {
+        val result: String? = smartReadAction(project) {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@nonBlocking null
+                ?: return@smartReadAction null
 
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
 
@@ -75,28 +85,38 @@ class SemanticNavigationToolset : McpToolset {
                 if (direction == "subs" || direction == "both") {
                     appendLine("--- Subclasses / implementors (max $maxResults) ---")
                     val query = ClassInheritorsSearch.search(psiClass, scope, true)
-                    var count: Int = 0
-                    query.forEach { sub: PsiClass ->
-                        if (count >= maxResults) return@forEach
-                        val displayName: String =
+                    val deduper = ClassContentDeduper()
+                    val entries: MutableList<String> = mutableListOf()
+                    query.forEach(Processor<PsiClass> { sub ->
+                        val key: String? =
                             sub.qualifiedName
                                 ?: sub.containingClass?.qualifiedName?.let { "$it\$anonymous" }
                                 ?: sub.name
-                                ?: return@forEach
-                        appendLine("  $displayName")
-                        count++
+                        if (key != null && deduper.record(key, sub.containingFile?.virtualFile)) {
+                            entries.add(key)
+                        }
+                        entries.size < maxResults
+                    })
+                    var annotated = false
+                    for (key: String in entries) {
+                        val annotation: String? = if ("\$anonymous" in key) null else deduper.annotationFor(key)
+                        if (annotation != null) annotated = true
+                        appendLine("  $key${annotation ?: ""}")
                     }
-                    if (count >= maxResults) {
+                    if (entries.size >= maxResults) {
                         appendLine("  ... (truncated at $maxResults results)")
+                    }
+                    if (annotated) {
+                        appendLine("  $VARIANT_GROUPING_FOOTER")
                     }
                     appendLine()
                 }
             }
-        }.inSmartMode(project).executeSynchronously()
+        }
 
         return when {
             result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Class not found: $className")
+            else -> McpToolCallResult.error("Class not found: $className\n${FqcnResolver.CLASS_NOT_FOUND_HINT}")
         }
     }
 
@@ -186,9 +206,9 @@ class SemanticNavigationToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val result: String? = ReadAction.nonBlocking<String?> {
+        val result: String? = smartReadAction(project) {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@nonBlocking null
+                ?: return@smartReadAction null
 
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
             val query = ClassInheritorsSearch.search(psiClass, scope, true)
@@ -196,32 +216,44 @@ class SemanticNavigationToolset : McpToolset {
             buildString {
                 appendLine("=== Implementors of ${psiClass.qualifiedName} ===")
                 appendLine()
-                var count: Int = 0
-                query.forEach { sub: PsiClass ->
-                    if (count >= maxResults) return@forEach
-                    // Filter null: anonymous/inner classes may have null qualifiedName
-                    val displayName: String =
+                val deduper = ClassContentDeduper()
+                val entries: MutableList<String> = mutableListOf()
+                query.forEach(Processor<PsiClass> { sub ->
+                    // Fallback naming: anonymous/inner classes may have null qualifiedName
+                    val key: String =
                         sub.qualifiedName
                             ?: sub.containingClass?.qualifiedName?.let { "$it\$anonymous" }
                             ?: sub.name
                             ?: "(anonymous)"
-                    appendLine("  $displayName")
-                    count++
+                    if (deduper.record(key, sub.containingFile?.virtualFile)) {
+                        entries.add(key)
+                    }
+                    entries.size < maxResults
+                })
+                var annotated = false
+                for (key: String in entries) {
+                    val annotation: String? =
+                        if ("\$anonymous" in key || key == "(anonymous)") null else deduper.annotationFor(key)
+                    if (annotation != null) annotated = true
+                    appendLine("  $key${annotation ?: ""}")
                 }
-                if (count >= maxResults) {
+                if (entries.size >= maxResults) {
                     appendLine("  ... (truncated at $maxResults results)")
                 }
+                if (annotated) {
+                    appendLine("  $VARIANT_GROUPING_FOOTER")
+                }
             }
-        }.inSmartMode(project).executeSynchronously()
+        }
 
         return when {
             result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Class not found: $className")
+            else -> McpToolCallResult.error("Class not found: $className\n${FqcnResolver.CLASS_NOT_FOUND_HINT}")
         }
     }
 
     @McpTool
-    @McpDescription("Finds all @Mixin classes that target a given class (and optionally a specific method). Use this for cross-mod conflict analysis — discover which other mods inject into the same target. Returns mixin FQCN, injection points (@Inject, @Redirect, @Overwrite, etc.), and source location. methodName: optionally narrow to mixins targeting that method. maxResults: 50 default.")
+    @McpDescription("Finds all @Mixin classes that target a given class (and optionally a specific method). Use this for cross-mod conflict analysis — discover which other mods inject into the same target. Returns mixin FQCN, injection points (@Inject, @Redirect, @Overwrite, etc.), and source location. methodName: optionally narrow to mixins targeting that method. maxResults: 50 default. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
     suspend fun mixin_find_targeting_mixins(
         className: String,
@@ -229,34 +261,55 @@ class SemanticNavigationToolset : McpToolset {
         maxResults: Int = 50,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
+        if (maxResults < 1) {
+            return McpToolCallResult.error("maxResults must be >= 1 (got $maxResults)")
+        }
 
-        val result: String = ReadAction.nonBlocking<String> {
-            val normalizedTarget: String = className.replace('/', '.')
+        return smartReadAction(project) {
+            val targetClass: PsiClass = FqcnResolver.resolveNested(project, className)
+                ?: return@smartReadAction McpToolCallResult.error(
+                    "Class not found: $className (no mixin scan performed)\n${FqcnResolver.CLASS_NOT_FOUND_HINT}",
+                )
+            val normalizedTarget: String = targetClass.qualifiedName ?: className.replace('/', '.')
             val mixinAnnotationClass: PsiClass? =
                 FqcnResolver.resolveNested(project, "org.spongepowered.asm.mixin.Mixin")
 
             val mixins: MutableList<Pair<PsiClass, List<String>>> = mutableListOf()
+            val deduper = ClassContentDeduper()
+            var ownBuildSkipped: Int = 0
 
             if (mixinAnnotationClass != null) {
                 val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
+                val ownRoots: List<String> = projectContentRootPaths(project)
                 val query = AnnotatedElementsSearch.searchPsiClasses(mixinAnnotationClass, scope)
-                query.forEach { psiClass: PsiClass ->
-                    if (mixins.size >= maxResults) return@forEach
+                query.forEach(Processor<PsiClass> { psiClass ->
                     val targets: List<String> = extractMixinTargets(psiClass)
                     if (targets.any { normalizeForMatch(it) == normalizeForMatch(normalizedTarget) }) {
-                        val injections: List<String> = if (methodName != null) {
-                            extractInjectionsForMethod(psiClass, methodName)
-                        } else {
-                            extractAllInjections(psiClass)
-                        }
-                        if (methodName == null || injections.isNotEmpty()) {
-                            mixins.add(psiClass to injections)
+                        val vf = psiClass.containingFile?.virtualFile
+                        if (isOwnBuildOutput(vf, ownRoots)) {
+                            ownBuildSkipped++
+                        } else if (deduper.record(psiClass.qualifiedName, vf)) {
+                            val injections: List<String> = if (methodName != null) {
+                                extractInjectionsForMethod(psiClass, methodName)
+                            } else {
+                                extractAllInjections(psiClass)
+                            }
+                            if (methodName == null || injections.isNotEmpty()) {
+                                mixins.add(psiClass to injections)
+                            }
                         }
                     }
-                }
+                    mixins.size < maxResults
+                })
             }
 
-            if (mixins.isEmpty()) {
+            fun StringBuilder.appendSkipFooter() {
+                if (ownBuildSkipped == 0) return
+                val noun: String = if (ownBuildSkipped == 1) "stale copy" else "stale copies"
+                appendLine("(skipped $ownBuildSkipped $noun from this project's build output)")
+            }
+
+            val text: String = if (mixins.isEmpty()) {
                 val fallback: List<Pair<String, String>> = findTargetingMixinsByRegex(project, normalizedTarget, methodName, maxResults)
                 buildString {
                     appendLine("=== Mixins targeting $normalizedTarget${if (methodName != null) "#$methodName" else ""} ===")
@@ -273,16 +326,20 @@ class SemanticNavigationToolset : McpToolset {
                             appendLine()
                         }
                     }
+                    appendSkipFooter()
                 }
             } else {
                 buildString {
                     appendLine("=== Mixins targeting $normalizedTarget${if (methodName != null) "#$methodName" else ""} ===")
                     appendLine()
+                    var annotated = false
                     for ((i, pair) in mixins.withIndex()) {
                         val (psiClass, injections) = pair
                         val fqcn: String = psiClass.qualifiedName ?: psiClass.name ?: "?"
+                        val annotation: String? = deduper.annotationFor(psiClass.qualifiedName)
+                        if (annotation != null) annotated = true
                         val source: String = psiClass.containingFile?.virtualFile?.path ?: "(unknown)"
-                        appendLine("${i + 1}. $fqcn")
+                        appendLine("${i + 1}. $fqcn${annotation ?: ""}")
                         for (inj in injections.take(10)) {
                             appendLine("   $inj")
                         }
@@ -295,11 +352,14 @@ class SemanticNavigationToolset : McpToolset {
                     if (mixins.size >= maxResults) {
                         appendLine("  ... (truncated at $maxResults results)")
                     }
+                    if (annotated) {
+                        appendLine(VARIANT_GROUPING_FOOTER)
+                    }
+                    appendSkipFooter()
                 }
             }
-        }.inSmartMode(project).executeSynchronously()
-
-        return McpToolCallResult.text(result)
+            McpToolCallResult.text(text)
+        }
     }
 
     @McpTool
@@ -313,17 +373,17 @@ class SemanticNavigationToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val resolution = MethodResolver.resolveDetailed(
-            project, className, methodName,
-            parameterTypes = parameterTypes,
-            methodDescriptor = methodDescriptor,
-        )
-        if (resolution is MethodResolver.Resolution.Error) {
-            return McpToolCallResult.error(resolution.message)
-        }
-        val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
+        return smartReadAction(project) {
+            val resolution = MethodResolver.resolveDetailed(
+                project, className, methodName,
+                parameterTypes = parameterTypes,
+                methodDescriptor = methodDescriptor,
+            )
+            if (resolution is MethodResolver.Resolution.Error) {
+                return@smartReadAction McpToolCallResult.error(resolution.message)
+            }
+            val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
-        val result: String = ReadAction.nonBlocking<String> {
             val containingClass: PsiClass? = psiMethod.containingClass
             val containingFqn: String = containingClass?.qualifiedName ?: "?"
             val queriedFqn: String? = FqcnResolver.resolveNested(project, className)?.qualifiedName
@@ -333,7 +393,7 @@ class SemanticNavigationToolset : McpToolset {
             val chain: List<SuperChainEntry> = buildSuperChain(psiMethod)
             val rootEntries: List<SuperChainEntry> = chain.filter { it.isRoot }
 
-            buildString {
+            val result: String = buildString {
                 appendLine("=== Super methods for ${psiMethod.name} ===")
                 appendLine()
                 appendLine("Declared in: $containingFqn")
@@ -373,9 +433,8 @@ class SemanticNavigationToolset : McpToolset {
                     }
                 }
             }
-        }.inSmartMode(project).executeSynchronously()
-
-        return McpToolCallResult.text(result)
+            McpToolCallResult.text(result)
+        }
     }
 
     /**
@@ -392,8 +451,9 @@ class SemanticNavigationToolset : McpToolset {
 
     /**
      * Returns "path:line" for [method] when a containing file with line info
-     * is available, or null otherwise. Must be called inside a ReadAction.
+     * is available, or null otherwise.
      */
+    @RequiresReadLock
     private fun sourceLocation(project: Project, method: PsiMethod): String? {
         val file = method.containingFile ?: return null
         val path: String = file.virtualFile?.path ?: return null
@@ -406,9 +466,9 @@ class SemanticNavigationToolset : McpToolset {
     /**
      * Recursively walks super methods of [start] via DFS. De-duplicates by
      * (declaringClassFqn, methodName, canonicalParamTypes) so diamond
-     * interface hierarchies don't inflate the chain. Must be called inside a
-     * ReadAction.
+     * interface hierarchies don't inflate the chain.
      */
+    @RequiresReadLock
     private fun buildSuperChain(start: PsiMethod): List<SuperChainEntry> {
         fun keyOf(method: PsiMethod): String {
             val clazz: String = method.containingClass?.qualifiedName ?: "?"
@@ -448,23 +508,23 @@ class SemanticNavigationToolset : McpToolset {
             return McpToolCallResult.error("maxResults must be >= 1 (got $maxResults)")
         }
 
-        val resolution = MethodResolver.resolveDetailed(
-            project, className, methodName,
-            parameterTypes = parameterTypes,
-            methodDescriptor = methodDescriptor,
-        )
-        if (resolution is MethodResolver.Resolution.Error) {
-            return McpToolCallResult.error(resolution.message)
-        }
-        val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
+        return smartReadAction(project) {
+            val resolution = MethodResolver.resolveDetailed(
+                project, className, methodName,
+                parameterTypes = parameterTypes,
+                methodDescriptor = methodDescriptor,
+            )
+            if (resolution is MethodResolver.Resolution.Error) {
+                return@smartReadAction McpToolCallResult.error(resolution.message)
+            }
+            val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
-        val result: String = ReadAction.nonBlocking<String> {
             val containingClass: PsiClass? = psiMethod.containingClass
             val declFqcn: String = containingClass?.qualifiedName ?: className
             val paramList: String = psiMethod.parameterList.parameters
                 .joinToString { "${it.type.presentableText} ${it.name}" }
 
-            buildString {
+            val result: String = buildString {
                 appendLine("=== Overrides of $declFqcn#${psiMethod.name} ===")
                 appendLine()
                 appendLine("Declared in: $declFqcn")
@@ -488,24 +548,31 @@ class SemanticNavigationToolset : McpToolset {
                 appendLine("--- Overrides (max $maxResults) ---")
                 val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
                 val query = OverridingMethodsSearch.search(psiMethod, scope, true)
-                val overrides: MutableList<PsiMethod> = mutableListOf()
-                query.forEach { overriding: PsiMethod ->
-                    if (overrides.size >= maxResults) return@forEach
-                    overrides.add(overriding)
-                }
+                val deduper = ClassContentDeduper()
+                val overrides: MutableList<Pair<String, PsiMethod>> = mutableListOf()
+                query.forEach(Processor<PsiMethod> { overriding ->
+                    val overridingClass: PsiClass? = overriding.containingClass
+                    val key: String =
+                        overridingClass?.qualifiedName
+                            ?: overridingClass?.containingClass?.qualifiedName?.let { "$it\$anonymous" }
+                            ?: overridingClass?.name
+                            ?: "(unknown)"
+                    if (deduper.record(key, overridingClass?.containingFile?.virtualFile)) {
+                        overrides.add(key to overriding)
+                    }
+                    overrides.size < maxResults
+                })
 
                 if (overrides.isEmpty()) {
                     appendLine("  (no overrides found in the current classpath)")
                     return@buildString
                 }
 
-                for ((i, overriding: PsiMethod) in overrides.withIndex()) {
-                    val declClass: PsiClass? = overriding.containingClass
-                    val fqcn: String =
-                        declClass?.qualifiedName
-                            ?: declClass?.containingClass?.qualifiedName?.let { "$it\$anonymous" }
-                            ?: declClass?.name
-                            ?: "(unknown)"
+                var annotated = false
+                for ((i, entry: Pair<String, PsiMethod>) in overrides.withIndex()) {
+                    val (fqcn: String, overriding: PsiMethod) = entry
+                    val annotation: String? = if (fqcn == "(unknown)") null else deduper.annotationFor(fqcn)
+                    if (annotation != null) annotated = true
                     val isAbstract: Boolean = overriding.hasModifierProperty(PsiModifier.ABSTRACT)
                     val abstractTag: String = if (isAbstract) " [abstract]" else ""
                     val vf = overriding.containingFile?.virtualFile
@@ -518,20 +585,22 @@ class SemanticNavigationToolset : McpToolset {
                     } ?: 0
                     val locationSuffix: String = if (line > 0) ":$line" else ""
 
-                    appendLine("  ${i + 1}. $fqcn$abstractTag")
+                    appendLine("  ${i + 1}. $fqcn$abstractTag${annotation ?: ""}")
                     appendLine("     Source: $path$locationSuffix")
                 }
                 if (overrides.size >= maxResults) {
                     appendLine("  ... (truncated at $maxResults results)")
                 }
+                if (annotated) {
+                    appendLine("  $VARIANT_GROUPING_FOOTER")
+                }
             }
-        }.inSmartMode(project).executeSynchronously()
-
-        return McpToolCallResult.text(result)
+            McpToolCallResult.text(result)
+        }
     }
 
     @McpTool
-    @McpDescription("Find all references to a class or member across project and dependencies. Without memberName: references to the class. With memberName: references to that method or field. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\". maxResults: 100 default.")
+    @McpDescription("Find all references to a class or member across project and dependencies. Without memberName: references to the class. With memberName: references to that method or field. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\". maxResults: 100 default. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
     suspend fun mixin_find_references(
         className: String,
@@ -541,26 +610,25 @@ class SemanticNavigationToolset : McpToolset {
         maxResults: Int = 100,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
+        if (maxResults < 1) {
+            return McpToolCallResult.error("maxResults must be >= 1 (got $maxResults)")
+        }
 
         if (memberName != null) {
-            val fieldResult: PsiField? = ReadAction.nonBlocking<PsiField?> {
+            return smartReadAction(project) {
                 val psiClass: PsiClass? = FqcnResolver.resolveNested(project, className)
-                psiClass?.findFieldByName(memberName, true)
-            }.inSmartMode(project).executeSynchronously()
+                val fieldResult: PsiField? = psiClass?.findFieldByName(memberName, true)
 
-            if (fieldResult != null && parameterTypes == null && methodDescriptor == null) {
-                val result: String = ReadAction.nonBlocking<String> {
+                if (fieldResult != null && parameterTypes == null && methodDescriptor == null) {
                     val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
                     val query = ReferencesSearch.search(fieldResult, scope, true)
                     val refs: MutableList<PsiReference> = mutableListOf()
-                    var count: Int = 0
-                    query.forEach { ref ->
-                        if (count >= maxResults) return@forEach
+                    query.forEach(Processor<PsiReference> { ref ->
                         refs.add(ref)
-                        count++
-                    }
+                        refs.size < maxResults
+                    })
 
-                    buildString {
+                    val result: String = buildString {
                         appendLine("=== References to $className.$memberName (field) ===")
                         appendLine()
                         appendLine("Field type: ${fieldResult.type.presentableText}")
@@ -580,29 +648,25 @@ class SemanticNavigationToolset : McpToolset {
                             appendLine("  ... (truncated at $maxResults results)")
                         }
                     }
-                }.inSmartMode(project).executeSynchronously()
-                return McpToolCallResult.text(result)
-            }
+                    return@smartReadAction McpToolCallResult.text(result)
+                }
 
-            val resolution = MethodResolver.resolveDetailed(
-                project, className, memberName,
-                parameterTypes = parameterTypes,
-                methodDescriptor = methodDescriptor,
-            )
-            if (resolution is MethodResolver.Resolution.Error) {
-                if (fieldResult != null) {
-                    val result: String = ReadAction.nonBlocking<String> {
+                val resolution = MethodResolver.resolveDetailed(
+                    project, className, memberName,
+                    parameterTypes = parameterTypes,
+                    methodDescriptor = methodDescriptor,
+                )
+                if (resolution is MethodResolver.Resolution.Error) {
+                    if (fieldResult != null) {
                         val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
                         val query = ReferencesSearch.search(fieldResult, scope, true)
                         val refs: MutableList<PsiReference> = mutableListOf()
-                        var count: Int = 0
-                        query.forEach { ref ->
-                            if (count >= maxResults) return@forEach
+                        query.forEach(Processor<PsiReference> { ref ->
                             refs.add(ref)
-                            count++
-                        }
+                            refs.size < maxResults
+                        })
 
-                        buildString {
+                        val result: String = buildString {
                             appendLine("=== References to $className.$memberName (field) ===")
                             appendLine()
                             appendLine("Field type: ${fieldResult.type.presentableText}")
@@ -623,25 +687,21 @@ class SemanticNavigationToolset : McpToolset {
                                 appendLine("  ... (truncated at $maxResults results)")
                             }
                         }
-                    }.inSmartMode(project).executeSynchronously()
-                    return McpToolCallResult.text(result)
+                        return@smartReadAction McpToolCallResult.text(result)
+                    }
+                    return@smartReadAction McpToolCallResult.error(resolution.message)
                 }
-                return McpToolCallResult.error(resolution.message)
-            }
-            val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
+                val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
-            val result: String = ReadAction.nonBlocking<String> {
                 val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
                 val query = ReferencesSearch.search(psiMethod, scope, true)
                 val refs: MutableList<PsiReference> = mutableListOf()
-                var count: Int = 0
-                query.forEach { ref ->
-                    if (count >= maxResults) return@forEach
+                query.forEach(Processor<PsiReference> { ref ->
                     refs.add(ref)
-                    count++
-                }
+                    refs.size < maxResults
+                })
 
-                buildString {
+                val result: String = buildString {
                     appendLine("=== References to $className#$memberName ===")
                     appendLine()
                     for (ref: PsiReference in refs) {
@@ -659,24 +719,22 @@ class SemanticNavigationToolset : McpToolset {
                         appendLine("  ... (truncated at $maxResults results)")
                     }
                 }
-            }.inSmartMode(project).executeSynchronously()
-            return McpToolCallResult.text(result)
+                McpToolCallResult.text(result)
+            }
         }
 
         // Class-level reference search
-        val result: String? = ReadAction.nonBlocking<String?> {
+        val result: String? = smartReadAction(project) {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-                ?: return@nonBlocking null
+                ?: return@smartReadAction null
 
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
             val query = ReferencesSearch.search(psiClass, scope, true)
             val refs: MutableList<PsiReference> = mutableListOf()
-            var count: Int = 0
-            query.forEach { ref ->
-                if (count >= maxResults) return@forEach
+            query.forEach(Processor<PsiReference> { ref ->
                 refs.add(ref)
-                count++
-            }
+                refs.size < maxResults
+            })
 
             buildString {
                 appendLine("=== References to $className ===")
@@ -696,11 +754,11 @@ class SemanticNavigationToolset : McpToolset {
                     appendLine("  ... (truncated at $maxResults results)")
                 }
             }
-        }.inSmartMode(project).executeSynchronously()
+        }
 
         return when {
             result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Class not found: $className")
+            else -> McpToolCallResult.error("Class not found: $className\n${FqcnResolver.CLASS_NOT_FOUND_HINT}")
         }
     }
 
@@ -732,22 +790,22 @@ class SemanticNavigationToolset : McpToolset {
             return McpToolCallResult.error("maxResults must be >= 1 (got $maxResults)")
         }
 
-        val resolution = MethodResolver.resolveDetailed(
-            project, className, methodName,
-            parameterTypes = parameterTypes,
-            methodDescriptor = methodDescriptor,
-        )
-        if (resolution is MethodResolver.Resolution.Error) {
-            return McpToolCallResult.error(resolution.message)
-        }
-        val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
+        return smartReadAction(project) {
+            val resolution = MethodResolver.resolveDetailed(
+                project, className, methodName,
+                parameterTypes = parameterTypes,
+                methodDescriptor = methodDescriptor,
+            )
+            if (resolution is MethodResolver.Resolution.Error) {
+                return@smartReadAction McpToolCallResult.error(resolution.message)
+            }
+            val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
-        val result: String = ReadAction.nonBlocking<String> {
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
             val visited: MutableSet<String> = mutableSetOf(CallHierarchyExpander.cycleKeyOf(psiMethod))
             val budget = CallHierarchyExpander.Budget(maxResults)
 
-            buildString {
+            val result: String = buildString {
                 val targetSig: String = CallHierarchyExpander.presentableSignature(psiMethod)
                 appendLine("=== Call hierarchy ($direction): $targetSig ===")
                 appendLine()
@@ -773,9 +831,8 @@ class SemanticNavigationToolset : McpToolset {
                     )
                 }
             }
-        }.inSmartMode(project).executeSynchronously()
-
-        return McpToolCallResult.text(result)
+            McpToolCallResult.text(result)
+        }
     }
 
     companion object {

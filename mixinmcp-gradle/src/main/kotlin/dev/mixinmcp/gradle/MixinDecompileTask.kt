@@ -9,6 +9,7 @@ import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.options.Option
+import org.gradle.work.DisableCachingByDefault
 import org.jetbrains.java.decompiler.api.Decompiler
 import org.jetbrains.java.decompiler.main.decompiler.DirectoryResultSaver
 import org.jetbrains.java.decompiler.main.extern.IFernflowerLogger
@@ -45,6 +46,7 @@ import java.util.concurrent.TimeUnit
  * Configuration cache: artifactCollection is set at configuration time by the
  * plugin. No Task.project access at execution time.
  */
+@DisableCachingByDefault(because = "writes to a machine-global content-addressed cache with its own incrementality")
 abstract class MixinDecompileTask : DefaultTask() {
 
     @get:Input

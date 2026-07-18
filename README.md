@@ -99,7 +99,7 @@ pluginManagement {
 ```kotlin
 plugins {
     // ... your existing plugins ...
-    id("dev.mixinmcp.decompile") version "1.1.0"
+    id("dev.mixinmcp.decompile") version "1.2.0"
 }
 ```
 **3. Increase Gradle process memory:** (**Strongly** Recommended)

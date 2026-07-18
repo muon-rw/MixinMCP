@@ -1,6 +1,6 @@
 package dev.mixinmcp.cache
 
-import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.edtWriteAction
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.AdditionalLibraryRootsListener
@@ -23,12 +23,10 @@ class MixinDecompileCacheStartupActivity : ProjectActivity {
 
         if (existingRoots.isNotEmpty()) {
             LOG.info("MixinMCP: attaching ${existingRoots.size} decompiled source roots")
-            ApplicationManager.getApplication().invokeAndWait {
-                ApplicationManager.getApplication().runWriteAction {
-                    AdditionalLibraryRootsListener.fireAdditionalLibraryChanged(
-                        project, null, emptyList(), existingRoots, "mixinmcp-decompiled",
-                    )
-                }
+            edtWriteAction {
+                AdditionalLibraryRootsListener.fireAdditionalLibraryChanged(
+                    project, null, emptyList(), existingRoots, "mixinmcp-decompiled",
+                )
             }
             LOG.info("MixinMCP: fireAdditionalLibraryChanged completed")
         } else {

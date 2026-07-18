@@ -1,6 +1,5 @@
 package dev.mixinmcp.resolve
 
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleUtilCore
@@ -10,7 +9,9 @@ import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiClass
 import com.intellij.psi.impl.compiled.ClsFileImpl
+import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.ClassUtil
+import com.intellij.util.concurrency.annotations.RequiresReadLock
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
@@ -39,19 +40,32 @@ object ClassFileLocator {
         data object NotBuilt : LocateResult()
     }
 
-    fun locate(project: Project, fqcn: String): ByteArray? =
-        (locateDetailed(project, fqcn) as? LocateResult.Found)?.bytes
+    @RequiresReadLock
+    fun locate(
+        project: Project,
+        fqcn: String,
+        scope: GlobalSearchScope = GlobalSearchScope.allScope(project),
+    ): ByteArray? =
+        (locateDetailed(project, fqcn, scope) as? LocateResult.Found)?.bytes
 
-    fun locateDetailed(project: Project, fqcn: String): LocateResult {
-        return ApplicationManager.getApplication().runReadAction<LocateResult> {
-            val psiClass: PsiClass = FqcnResolver.resolveNested(project, fqcn)
-                ?: return@runReadAction LocateResult.NotFound
+    @RequiresReadLock
+    fun locateDetailed(
+        project: Project,
+        fqcn: String,
+        scope: GlobalSearchScope = GlobalSearchScope.allScope(project),
+    ): LocateResult {
+        val psiClass: PsiClass = FqcnResolver.resolveNested(project, fqcn, scope)
+            ?: return LocateResult.NotFound
 
-            locateFromPsiClass(psiClass)
-        }
+        return locateForClass(psiClass)
     }
 
-    private fun locateFromPsiClass(psiClass: PsiClass): LocateResult {
+    /**
+     * Locates bytes for an already-resolved PsiClass variant, reading from that
+     * variant's own origin (its jar entry or its module's compiler output).
+     */
+    @RequiresReadLock
+    fun locateForClass(psiClass: PsiClass): LocateResult {
         val containingFile = psiClass.containingFile ?: return LocateResult.NotFound
 
         if (containingFile is ClsFileImpl) {

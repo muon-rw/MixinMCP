@@ -5,6 +5,7 @@ import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.options.Option
+import org.gradle.work.DisableCachingByDefault
 import java.io.File
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -15,6 +16,7 @@ import java.nio.file.Paths
  * Default: deletes the project manifest and the global cache entries it references.
  * --global: deletes the entire global cache directory (~/.cache/mixinmcp/decompiled/).
  */
+@DisableCachingByDefault(because = "deletes external cache state; there is nothing to cache")
 abstract class CleanCacheTask : DefaultTask() {
 
     @get:Input

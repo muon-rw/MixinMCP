@@ -45,6 +45,8 @@ class SourceAutoAttacher(
         val reason: String,
         val attached: List<String>,
         val warnings: List<String>,
+        // Intentionally false on Loom-style projects: their game jars attach via the maven
+        // -sources.jar convention, not this attacher.
         val hadMdgMergedCandidates: Boolean,
     )
 

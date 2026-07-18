@@ -631,7 +631,8 @@ IntelliJ sync populates the cache (the same technique MDG and Loom use).
    sources. Group `net.minecraft` is excluded from mirroring: the toolchain's own sources
    jar is attached directly when it exists, and plain decompilation remains the fallback
    for a genSources-free Loom workflow; the manifest prune drops the decompiled entry
-   once a real sources jar appears.
+   once a real sources jar appears. This covers all Loom-family forks; neo-loom
+   publishes every game artifact (fml, merged, neoforgeuniversal) under this group.
 3. Remaining artifacts are decompiled with Vineflower
    (`Decompiler.builder().inputs(jar).output(DirectoryResultSaver(cacheDir))`, thread
    count from `--threads`, `REMOVE_SYNTHETIC = "0"` to keep mixin targets visible).
@@ -723,6 +724,11 @@ roots, warnings) surfaced by `mixin_list_source_roots`; the tool prints it only 
 merged game jars (MDG and similar toolchains) are detected in the project. Libraries are
 enumerated from both the project library table
 and module order entries, because Gradle game jars often appear only on the latter.
+
+Loom-family toolchains (Fabric Loom, Architectury Loom, neo-loom) are intentionally
+out of scope: their game jars are proper GAV libraries whose sources attach via the
+maven `-sources.jar` convention after genSources, and their artifact names never match
+the predicates below.
 
 ### 11.1 MDG merged game jars
 

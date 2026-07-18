@@ -7,3 +7,6 @@
 bin
 build
 .claude
+
+# MixinMCP auto-injected rules
+.cursor/skills/mixinmcp-tools/SKILL.md

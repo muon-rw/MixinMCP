@@ -1,7 +1,8 @@
 package dev.mixinmcp.tools.semantic
 
-import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiAnnotationMemberValue
@@ -11,8 +12,10 @@ import com.intellij.psi.PsiClassObjectAccessExpression
 import com.intellij.psi.PsiClassType
 import com.intellij.psi.PsiLiteralExpression
 import com.intellij.psi.PsiType
+import com.intellij.util.concurrency.annotations.RequiresReadLock
 import dev.mixinmcp.tools.source.collectAllSourceRoots
 import dev.mixinmcp.tools.source.getPathForMask
+import dev.mixinmcp.tools.source.isGradleToolchainMergedOrBinaryInBuild
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
 
@@ -41,7 +44,31 @@ internal val INJECTOR_ANNOTATION_SHORT_NAMES: Set<String> = setOf(
 )
 
 internal fun normalizeForMatch(name: String): String =
-    name.replace('/', '.').trim()
+    name.replace('/', '.').replace('$', '.').trim()
+
+@RequiresReadLock
+internal fun projectContentRootPaths(project: Project): List<String> {
+    val paths: MutableList<String> = mutableListOf()
+    project.basePath?.let { paths.add(it) }
+    ProjectRootManager.getInstance(project).contentRoots.mapTo(paths) { it.path }
+    return paths
+}
+
+/**
+ * True when [file] (a source file, class dir entry, or `jar!/` entry) lives under
+ * one of the project's own `build/` outputs, judged root-relative like the
+ * DepSearchHelpers path predicates. Toolchain merged game jars under `build/`
+ * (MDG `build/moddev/`, NeoGradle-style merged/neoforge/minecraft jars) are
+ * third-party code and are never treated as own output.
+ */
+internal fun isOwnBuildOutput(file: VirtualFile?, projectRootPaths: List<String>): Boolean {
+    val jarPath: String = file?.path?.substringBefore("!/") ?: return false
+    return projectRootPaths.any { root ->
+        jarPath.startsWith("$root/") &&
+            jarPath.removePrefix(root).trimStart('/').lowercase().startsWith("build/") &&
+            !isGradleToolchainMergedOrBinaryInBuild(jarPath, root)
+    }
+}
 
 internal fun extractMixinTargets(psiClass: PsiClass): List<String> {
     val mixinAnnotation: PsiAnnotation = psiClass.modifierList?.annotations?.find {
@@ -79,7 +106,7 @@ internal fun extractMixinTargets(psiClass: PsiClass): List<String> {
 internal fun extractAllInjections(psiClass: PsiClass): List<String> {
     val result = mutableListOf<String>()
     for (method in psiClass.methods) {
-        for (ann in method.modifierList?.annotations ?: emptyArray()) {
+        for (ann in method.modifierList.annotations) {
             val shortName: String? = ann.qualifiedName?.substringAfterLast('.')
             if (shortName != null && shortName in INJECTOR_ANNOTATION_SHORT_NAMES) {
                 result.add(ann.text.trim())
@@ -92,7 +119,7 @@ internal fun extractAllInjections(psiClass: PsiClass): List<String> {
 internal fun extractInjectionsForMethod(psiClass: PsiClass, methodName: String): List<String> {
     val result = mutableListOf<String>()
     for (method in psiClass.methods) {
-        for (ann in method.modifierList?.annotations ?: emptyArray()) {
+        for (ann in method.modifierList.annotations) {
             val shortName: String? = ann.qualifiedName?.substringAfterLast('.')
             if (shortName != null && shortName in INJECTOR_ANNOTATION_SHORT_NAMES) {
                 val methodValues: List<String> = extractMethodAttributeValues(ann.findAttributeValue("method"))
@@ -121,6 +148,7 @@ private fun methodTargets(methodStr: String, methodName: String): Boolean {
         methodStr.endsWith(";$methodName")
 }
 
+@RequiresReadLock
 internal fun findTargetingMixinsByRegex(
     project: Project,
     className: String,
@@ -139,11 +167,9 @@ internal fun findTargetingMixinsByRegex(
     }
     val results: MutableList<Pair<String, String>> = mutableListOf()
     val classPattern: Pattern = Pattern.compile("(?:class|interface)\\s+(\\S+)\\s+")
-    ReadAction.compute<Unit, Throwable> {
-        for (root in collectAllSourceRoots(project)) {
-            if (results.size >= maxResults) break
-            collectMixinRegexMatches(root, root, pattern, classPattern, results, maxResults)
-        }
+    for (root in collectAllSourceRoots(project)) {
+        if (results.size >= maxResults) break
+        collectMixinRegexMatches(root, root, pattern, classPattern, results, maxResults)
     }
     return results
 }
@@ -156,6 +182,7 @@ private fun collectMixinRegexMatches(
     results: MutableList<Pair<String, String>>,
     maxResults: Int,
 ) {
+    ProgressManager.checkCanceled()
     if (results.size >= maxResults) return
     if (vf.isDirectory) {
         for (child in vf.children) {

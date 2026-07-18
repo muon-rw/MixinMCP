@@ -1,5 +1,6 @@
 package dev.mixinmcp.tools.semantic
 
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.JavaRecursiveElementVisitor
 import com.intellij.psi.PsiClass
@@ -119,6 +120,7 @@ internal object CallHierarchyExpander {
         budget: Budget,
         out: StringBuilder,
     ) {
+        ProgressManager.checkCanceled()
         if (depth >= maxDepth) return
         if (budget.used >= budget.maxResults) {
             // Budget hit before we could explore this branch. Mark truncated so
@@ -218,6 +220,7 @@ internal object CallHierarchyExpander {
         budget: Budget,
         out: StringBuilder,
     ) {
+        ProgressManager.checkCanceled()
         if (depth >= maxDepth) return
         if (budget.used >= budget.maxResults) {
             // Budget hit before we could explore this branch. Mark truncated so
@@ -264,6 +267,7 @@ internal object CallHierarchyExpander {
         // Dedupe by (owner, name, descriptor), preserving first-seen order.
         val seenInBody: HashSet<String> = HashSet()
         for (c: BytecodeAnalyzer.CalleeRef in callees) {
+            ProgressManager.checkCanceled()
             val localKey: String = cycleKey(c.owner, c.name, c.descriptor)
             if (!seenInBody.add(localKey)) continue
             if (!budget.tryConsume()) break
