@@ -2,6 +2,7 @@ package dev.mixinmcp.tools.refactor
 
 import com.intellij.codeInsight.CodeInsightUtil
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
@@ -10,10 +11,16 @@ import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiComment
 import com.intellij.psi.PsiCompiledElement
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiEnumConstant
+import com.intellij.psi.PsiField
+import com.intellij.psi.PsiWhiteSpace
+import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.PsiExpression
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiJavaFile
@@ -21,6 +28,12 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiMember
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.PsiModifier
+import com.intellij.psi.PsiParenthesizedExpression
+import com.intellij.psi.PsiSuperExpression
+import com.intellij.psi.PsiTypes
+import com.intellij.psi.SyntaxTraverser
+import com.intellij.util.CommonJavaRefactoringUtil
+import com.intellij.util.IncorrectOperationException
 import com.intellij.refactoring.util.classMembers.MemberInfo
 import com.intellij.util.concurrency.annotations.RequiresReadLock
 import com.intellij.util.containers.MultiMap
@@ -58,7 +71,74 @@ internal object RefactorSupport {
     sealed class RangeResult {
         class Statements(val file: PsiJavaFile, val statements: Array<PsiElement>) : RangeResult()
         class Expression(val file: PsiJavaFile, val expression: PsiExpression) : RangeResult()
+
+        /** A field declaration, which is neither a statement nor an expression but has an introducible initializer. */
+        class Field(val file: PsiJavaFile, val field: PsiField) : RangeResult()
         data class Failure(val message: String) : RangeResult()
+    }
+
+    class FileRange(
+        val file: PsiJavaFile,
+        val document: Document,
+        val startOffset: Int,
+        val endOffset: Int,
+    )
+
+    @RequiresReadLock
+    fun resolveFileRange(
+        project: Project,
+        filePath: String,
+        startLine: Int,
+        endLine: Int,
+    ): Result<FileRange> {
+        if (startLine < 1 || endLine < startLine) {
+            return Result.failure(
+                IllegalArgumentException(
+                    "Invalid range: lines are 1-based and startLine ($startLine) must not exceed endLine ($endLine).",
+                ),
+            )
+        }
+        val virtualFile: VirtualFile = findVirtualFile(project, filePath)
+            ?: return Result.failure(
+                IllegalArgumentException(
+                    "File not found: $filePath. Pass a path absolute or relative to the project root.",
+                ),
+            )
+        if (ProjectFileIndex.getInstance(project).isInLibrary(virtualFile)) {
+            return Result.failure(
+                IllegalArgumentException(
+                    "$filePath is inside library ${VfsUtilCore.getRootFile(virtualFile).name}; " +
+                        "this tool only operates on project source.",
+                ),
+            )
+        }
+        val psiFile: PsiFile = PsiManager.getInstance(project).findFile(virtualFile)
+            ?: return Result.failure(IllegalArgumentException("Could not get PSI for $filePath."))
+        if (psiFile !is PsiJavaFile) {
+            val message = if (isKotlinFile(psiFile)) {
+                KOTLIN_REFUSAL
+            } else {
+                "$filePath is not a Java source file (language: ${psiFile.language.displayName})."
+            }
+            return Result.failure(IllegalArgumentException(message))
+        }
+        val document = PsiDocumentManager.getInstance(project).getDocument(psiFile)
+            ?: return Result.failure(IllegalArgumentException("No document available for $filePath."))
+        if (endLine > document.lineCount) {
+            return Result.failure(
+                IllegalArgumentException(
+                    "endLine $endLine is past the end of $filePath (${document.lineCount} lines).",
+                ),
+            )
+        }
+        return Result.success(
+            FileRange(
+                file = psiFile,
+                document = document,
+                startOffset = document.getLineStartOffset(startLine - 1),
+                endOffset = document.getLineEndOffset(endLine - 1),
+            ),
+        )
     }
 
     @RequiresReadLock
@@ -68,41 +148,11 @@ internal object RefactorSupport {
         startLine: Int,
         endLine: Int,
     ): RangeResult {
-        if (startLine < 1 || endLine < startLine) {
-            return RangeResult.Failure(
-                "Invalid range: lines are 1-based and startLine ($startLine) must not exceed endLine ($endLine).",
-            )
-        }
-        val virtualFile: VirtualFile = findVirtualFile(project, filePath)
-            ?: return RangeResult.Failure(
-                "File not found: $filePath. Pass a path absolute or relative to the project root.",
-            )
-        if (ProjectFileIndex.getInstance(project).isInLibrary(virtualFile)) {
-            return RangeResult.Failure(
-                "$filePath is inside library ${VfsUtilCore.getRootFile(virtualFile).name}; " +
-                    "this tool only operates on project source.",
-            )
-        }
-        val psiFile: PsiFile = PsiManager.getInstance(project).findFile(virtualFile)
-            ?: return RangeResult.Failure("Could not get PSI for $filePath.")
-        if (psiFile !is PsiJavaFile) {
-            return if (isKotlinFile(psiFile)) {
-                RangeResult.Failure(KOTLIN_REFUSAL)
-            } else {
-                RangeResult.Failure(
-                    "$filePath is not a Java source file (language: ${psiFile.language.displayName}).",
-                )
-            }
-        }
-        val document = PsiDocumentManager.getInstance(project).getDocument(psiFile)
-            ?: return RangeResult.Failure("No document available for $filePath.")
-        if (endLine > document.lineCount) {
-            return RangeResult.Failure(
-                "endLine $endLine is past the end of $filePath (${document.lineCount} lines).",
-            )
-        }
-        val startOffset: Int = document.getLineStartOffset(startLine - 1)
-        val endOffset: Int = document.getLineEndOffset(endLine - 1)
+        val fileRange: FileRange = resolveFileRange(project, filePath, startLine, endLine)
+            .getOrElse { return RangeResult.Failure(it.message ?: "Could not resolve $filePath.") }
+        val psiFile: PsiJavaFile = fileRange.file
+        val startOffset: Int = fileRange.startOffset
+        val endOffset: Int = fileRange.endOffset
 
         val statements: Array<PsiElement> = CodeInsightUtil.findStatementsInRange(psiFile, startOffset, endOffset)
         if (statements.isNotEmpty()) return RangeResult.Statements(psiFile, statements)
@@ -110,10 +160,177 @@ internal object RefactorSupport {
         val expression: PsiExpression? = CodeInsightUtil.findExpressionInRange(psiFile, startOffset, endOffset)
         if (expression != null) return RangeResult.Expression(psiFile, expression)
 
+        fieldInRange(psiFile, startOffset, endOffset)?.let { return RangeResult.Field(psiFile, it) }
+
         return RangeResult.Failure(
             "Lines $startLine-$endLine of $filePath cover neither whole statements nor a single expression. " +
                 "Align the range with full statement boundaries (lines are taken whole).",
         )
+    }
+
+    // ──────────────────────────────── Sub-expression addressing ────────────────────────────────
+
+    class ExpressionCandidate(
+        val expression: PsiExpression,
+        val line: Int,
+        val column: Int,
+        val text: String,
+    )
+
+    sealed class ExpressionPick {
+        class Ok(val expression: PsiExpression) : ExpressionPick()
+        data class Failure(val message: String) : ExpressionPick()
+    }
+
+    /**
+     * Every selectable sub-expression fully inside the range, in document order, outermost first at each
+     * position. Mirrors the filtering of CommonJavaRefactoringUtil.collectExpressions, which backs the IDE's
+     * "select expression" chooser, so the offered set matches what a user sees in IntelliJ.
+     */
+    @RequiresReadLock
+    fun collectExpressionCandidates(
+        fileRange: FileRange,
+        acceptVoid: Boolean,
+    ): List<ExpressionCandidate> {
+        val start: PsiElement = fileRange.file.findElementAt(fileRange.startOffset) ?: return emptyList()
+        val last: PsiElement = fileRange.file.findElementAt((fileRange.endOffset - 1).coerceAtLeast(0))
+            ?: return emptyList()
+        val root: PsiElement = PsiTreeUtil.findCommonParent(start, last) ?: return emptyList()
+        return SyntaxTraverser.psiTraverser().withRoot(root).traverse()
+            .filter(PsiExpression::class.java)
+            .filter { expression ->
+                expression.textRange.startOffset >= fileRange.startOffset &&
+                    expression.textRange.endOffset <= fileRange.endOffset &&
+                    expression !is PsiParenthesizedExpression &&
+                    expression !is PsiSuperExpression &&
+                    (acceptVoid || PsiTypes.voidType() != expression.type) &&
+                    CommonJavaRefactoringUtil.isExtractable(expression)
+            }
+            .map { expression ->
+                val offset: Int = expression.textRange.startOffset
+                val line: Int = fileRange.document.getLineNumber(offset)
+                ExpressionCandidate(
+                    expression = expression,
+                    line = line + 1,
+                    column = offset - fileRange.document.getLineStartOffset(line) + 1,
+                    text = expression.text,
+                )
+            }
+            .toList()
+    }
+
+    /** Collapses newlines and runs of whitespace for display. */
+    private fun normalizeExpressionText(text: String): String = text.replace(Regex("\\s+"), " ").trim()
+
+    fun abbreviate(text: String, max: Int = 80): String {
+        val collapsed: String = normalizeExpressionText(text)
+        return if (collapsed.length > max) collapsed.take(max - 3) + "..." else collapsed
+    }
+
+    /**
+     * Comparison key that drops whitespace *between* tokens but preserves it inside them, so a caller need
+     * not match the source's spacing (`compute(3)+1` finds `compute(3) + 1`) while string, char, and text
+     * block literals still compare by their real content (`"a b"` never matches `"ab"`).
+     */
+    private fun expressionKey(expression: PsiElement): String =
+        SyntaxTraverser.psiTraverser().withRoot(expression).traverse()
+            .filter { it.firstChild == null && it !is PsiWhiteSpace && it !is PsiComment }
+            .toList()
+            .joinToString("") { it.text }
+
+    @RequiresReadLock
+    fun pickExpression(
+        project: Project,
+        context: PsiElement,
+        candidates: List<ExpressionCandidate>,
+        requestedText: String,
+        occurrenceIndex: Int?,
+        rangeDescription: String,
+    ): ExpressionPick {
+        if (requestedText.isBlank()) {
+            return ExpressionPick.Failure("expression must not be blank.")
+        }
+        // Parsing the request gives it the same token stream treatment as the candidates, so spacing differs
+        // freely while literal contents still have to match exactly.
+        // createExpressionFromText reports malformed input either by throwing or by returning a tree with
+        // error elements, so both have to be checked to name the real problem instead of "no match".
+        val parsed: PsiExpression? = try {
+            JavaPsiFacade.getElementFactory(project).createExpressionFromText(requestedText, context)
+        } catch (_: IncorrectOperationException) {
+            null
+        }
+        if (parsed == null || PsiTreeUtil.hasErrorElements(parsed)) {
+            return ExpressionPick.Failure(
+                "expression '$requestedText' is not a parseable Java expression.\n" +
+                    describeCandidates(candidates),
+            )
+        }
+        val wanted: String = expressionKey(parsed)
+        val matches: List<ExpressionCandidate> =
+            candidates.filter { expressionKey(it.expression) == wanted }
+        if (matches.isEmpty()) {
+            return ExpressionPick.Failure(
+                "No selectable expression matching '$requestedText' in $rangeDescription.\n" +
+                    describeCandidates(candidates),
+            )
+        }
+        if (matches.size == 1) {
+            return if (occurrenceIndex == null || occurrenceIndex == 0) {
+                ExpressionPick.Ok(matches[0].expression)
+            } else {
+                ExpressionPick.Failure(
+                    "occurrenceIndex $occurrenceIndex is out of range: '$requestedText' occurs once in " +
+                        "$rangeDescription (valid index: 0).",
+                )
+            }
+        }
+        if (occurrenceIndex == null) {
+            return ExpressionPick.Failure(
+                "'$requestedText' matches ${matches.size} expressions in $rangeDescription; " +
+                    "pass occurrenceIndex to choose one (0-based, document order):\n" +
+                    matches.withIndex().joinToString("\n") { (index, candidate) ->
+                        "  [$index] line ${candidate.line}, column ${candidate.column}"
+                    },
+            )
+        }
+        return matches.getOrNull(occurrenceIndex)?.let { ExpressionPick.Ok(it.expression) }
+            ?: ExpressionPick.Failure(
+                "occurrenceIndex $occurrenceIndex is out of range: '$requestedText' occurs ${matches.size} " +
+                    "times in $rangeDescription (valid indices: 0..${matches.size - 1}).",
+            )
+    }
+
+    private fun describeCandidates(candidates: List<ExpressionCandidate>): String {
+        if (candidates.isEmpty()) return "No selectable expressions in that range."
+        val shown: List<ExpressionCandidate> = candidates.take(MAX_LISTED_CANDIDATES)
+        return buildString {
+            appendLine("Selectable expressions:")
+            shown.forEach { candidate ->
+                val text: String = normalizeExpressionText(candidate.text).let {
+                    if (it.length > 100) it.take(97) + "..." else it
+                }
+                appendLine("  line ${candidate.line}, column ${candidate.column}: $text")
+            }
+            if (candidates.size > shown.size) {
+                append("  ... and ${candidates.size - shown.size} more")
+            }
+        }.trimEnd()
+    }
+
+    private const val MAX_LISTED_CANDIDATES = 20
+
+    private fun fieldInRange(file: PsiJavaFile, startOffset: Int, endOffset: Int): PsiField? {
+        var element: PsiElement? = file.findElementAt(startOffset)
+        while (element is PsiWhiteSpace) element = element.nextSibling
+        val field: PsiField = PsiTreeUtil.getParentOfType(element, PsiField::class.java, false) ?: return null
+        if (field is PsiEnumConstant || field.initializer == null) return null
+        if (field.textRange.startOffset < startOffset || field.textRange.endOffset > endOffset) return null
+        // A range covering more than this one declaration stays a failure rather than silently refactoring
+        // whichever field happened to come first.
+        var next: PsiElement? = field.nextSibling
+        while (next is PsiWhiteSpace || next is PsiComment) next = next.nextSibling
+        if (next != null && next.textRange.startOffset < endOffset) return null
+        return field
     }
 
     // ───────────────────────────────────── Target guards ─────────────────────────────────────

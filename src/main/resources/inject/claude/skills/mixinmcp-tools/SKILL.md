@@ -130,7 +130,7 @@ obvious there.
 - `mixin_safe_delete` — usage-checked across project and dependencies; handles Kotlin (a Kotlin class delete removes the declaration but leaves the file).
 - `mixin_move_file` — moves a class to a new package, updating the package declaration and every reference (including mixin config JSON).
 - `mixin_change_signature` — `parametersJson` is a JSON-array string: `{"oldIndex":N}` keeps a parameter, `{"oldIndex":-1,"name":…,"type":…,"defaultValue":…}` adds one (inserted at every call site), omitted parameters are removed.
-- `mixin_extract_method` / `mixin_introduce_variable` — address a `filePath` plus `startLine..endLine` range.
+- `mixin_extract_method` / `mixin_introduce_variable` — address a `filePath` plus `startLine..endLine` range, taken as whole lines; `expression=<its source text>` targets a sub-expression within it, `occurrenceIndex` picks among repeats. A non-matching `expression` lists the selectable expressions with their positions, so let a miss tell you the exact text instead of guessing.
 - `mixin_inline` — `kind="method"|"field"|"local"`; refuses recursive methods, enum constants, and non-final fields with write usages.
 - `mixin_move_members` — `direction="up"|"down"|"toClass"`; `members` are `name` or `name#descriptor`. Moving members *into* a `@Mixin` class flags external references to them as blocking `[mixin]` conflicts, since mixin members can't be referenced from ordinary classes at runtime.
 

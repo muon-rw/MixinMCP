@@ -1,11 +1,10 @@
 package dev.mixinmcp.rules
 
-import com.intellij.ide.plugins.PluginManagerCore
+import com.intellij.ide.plugins.PluginManager
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
 import com.intellij.openapi.vfs.LocalFileSystem
@@ -512,7 +511,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
     }
 
     private fun pluginVersion(): String? =
-        PluginManagerCore.getPlugin(PluginId.getId(PLUGIN_ID))?.version
+        PluginManager.getPluginByClass(javaClass)?.version
 
     private fun refreshDirectoryRecursively(dir: Path) {
         if (!Files.isDirectory(dir)) return
@@ -534,7 +533,6 @@ class RuleInjectionStartupActivity : ProjectActivity {
         private const val BUNDLE_CURSOR = "inject/cursor"
         private const val BUNDLE_CLAUDE = "inject/claude"
 
-        private const val PLUGIN_ID = "dev.mixinmcp"
         private const val SKILL_FILE_NAME = "SKILL.md"
         private const val STAMP_PREFIX = "<!-- mixinmcp-skill-version:"
         private const val STAMP_SUFFIX = "-->"

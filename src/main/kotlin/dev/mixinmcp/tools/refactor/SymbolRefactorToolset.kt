@@ -38,6 +38,7 @@ import com.intellij.refactoring.rename.RenamePsiElementProcessor
 import com.intellij.refactoring.rename.RenameUtil
 import com.intellij.refactoring.rename.naming.AutomaticRenamer
 import com.intellij.usageView.UsageInfo
+import com.intellij.usageView.UsageViewUtil
 import com.intellij.util.containers.MultiMap
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.MethodResolver
@@ -937,7 +938,7 @@ class SymbolRefactorToolset : McpToolset {
                     if (overrider !is PsiCompiledElement) processor.addElement(overrider, newName)
                 }
             }
-            val usages: Array<UsageInfo> = processor.findUsages()
+            val usages: Array<UsageInfo> = processor.computeUsages()
             val conflicts: List<RefactorSupport.ConflictRef> = RefactorSupport.renderConflicts(project, processor.collectConflicts(usages))
             val usagesByFile: Map<String, Int> = usages
                 .mapNotNull { usage -> usage.virtualFile?.let { RefactorSupport.projectRelative(project, it) } }
@@ -1117,6 +1118,27 @@ class SymbolRefactorToolset : McpToolset {
 
         var capturedConflicts: MultiMap<PsiElement, String>? = null
             private set
+
+        /**
+         * Dry-run usage search. Mirrors RenameProcessor.findUsages via the public
+         * RenameUtil entry point it delegates to, minus the AutomaticRenamerFactory
+         * pass, which only feeds the automatic-renaming dialog this processor suppresses.
+         * Search-in-comments and text-occurrence search are off by construction.
+         */
+        fun computeUsages(): Array<UsageInfo> {
+            val result: MutableList<UsageInfo> = mutableListOf()
+            for ((element: PsiElement, newName: String) in LinkedHashMap(myAllRenames)) {
+                result += RenameUtil.findUsages(
+                    element,
+                    newName,
+                    myRefactoringScope,
+                    /* searchInStringsAndComments = */ false,
+                    /* searchForTextOccurrences = */ false,
+                    myAllRenames,
+                )
+            }
+            return UsageViewUtil.removeDuplicatedUsages(result.toTypedArray())
+        }
 
         fun collectConflicts(usages: Array<UsageInfo>): MultiMap<PsiElement, String> {
             val conflicts: MultiMap<PsiElement, String> = MultiMap()
