@@ -157,8 +157,49 @@ tasks {
     }
 }
 
+// Dev sandbox: a throwaway IDE instance for dogfooding against a real mod project, so the production
+// IDE never has to run a prerelease platform. Everything the tasks below reference is declared as a
+// local, because a script-level val would be captured as a Gradle script object reference and the
+// configuration cache cannot serialize those.
 intellijPlatformTesting {
     runIde {
+        register("runIdeDev") {
+            task {
+                val projectDir = layout.projectDirectory.dir(".sandbox/Chronicles-Leveling").asFile
+                // IntelliJ opens the project passed as its first program argument; without one it stops
+                // at the welcome screen and no MCP project tools resolve.
+                if (projectDir.isDirectory) {
+                    args(projectDir.absolutePath)
+                }
+                // The sandbox inherits this shell's JAVA_HOME, which is pinned to 17 for the plugin
+                // build. Minecraft mod Gradle imports need 21+, so point the IDE at one.
+                val gradleJvm = File("/Library/Java/JavaVirtualMachines/zulu-21.jdk/Contents/Home")
+                if (gradleJvm.isDirectory) {
+                    environment("JAVA_HOME", gradleJvm.absolutePath)
+                }
+            }
+
+            prepareSandboxTask {
+                // Both IDEs are IDEA, so both derive the same default MCP port (64342) and would
+                // collide; pin the sandbox to its own.
+                val optionsDir = sandboxConfigDirectory.map { it.asFile.resolve("options") }
+                val settingsXml = """
+                    <application>
+                      <component name="McpServerSettings">
+                        <option name="enableMcpServer" value="true" />
+                        <option name="mcpServerPort" value="64352" />
+                        <option name="enableBraveMode" value="true" />
+                      </component>
+                    </application>
+                """.trimIndent() + "\n"
+                doLast {
+                    val dir = optionsDir.get()
+                    dir.mkdirs()
+                    dir.resolve("mcpServer.xml").writeText(settingsXml)
+                }
+            }
+        }
+
         register("runIdeForUiTests") {
             task {
                 jvmArgumentProviders += CommandLineArgumentProvider {

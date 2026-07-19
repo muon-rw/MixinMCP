@@ -10,3 +10,7 @@ build
 
 # MixinMCP auto-injected rules
 .cursor/skills/mixinmcp-tools/SKILL.md
+CLAUDE.md
+
+# Sandbox project used by the runIdeDev task
+.sandbox/

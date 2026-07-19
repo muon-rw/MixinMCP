@@ -25,6 +25,8 @@ import java.nio.file.Path
 import java.util.Collections
 import java.util.IdentityHashMap
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * After Gradle sync (and on project open), attaches missing Library **SOURCES** roots:
@@ -55,6 +57,8 @@ class SourceAutoAttacher(
         private set
 
     private var pendingAttach: Job? = null
+
+    private var platformSourcesWatch: Job? = null
 
     /**
      * Debounced; safe to call from any thread. The pending run is cancelled with the
@@ -135,6 +139,34 @@ class SourceAutoAttacher(
             warnings = warnings,
             hadMdgMergedCandidates = candidates.isNotEmpty(),
         )
+
+        if (platformResolved.platformSourcesPending) awaitPlatformSources(reason)
+    }
+
+    /**
+     * A platform version bump leaves the new sources jar undownloaded, and it is large enough that the
+     * download usually outlives the sync that triggered this attach. Without this the jar sits in the
+     * Gradle cache unattached until the next sync or an IDE restart, and dependency search silently
+     * returns nothing for platform classes. Poll until it lands, then attach it.
+     */
+    private fun awaitPlatformSources(reason: String) {
+        synchronized(this) {
+            if (platformSourcesWatch?.isActive == true) return
+            platformSourcesWatch = scope.launch {
+                for (wait in PLATFORM_SOURCES_RETRIES) {
+                    delay(wait)
+                    if (project.isDisposed) return@launch
+                    val ready: Boolean = readAction { collectIjPlatformCandidates(project) }
+                        ?.let { resolveIjPlatformOps(it).operations.isNotEmpty() } == true
+                    if (ready) {
+                        LOG.info("MixinMCP: platform sources appeared; re-running attach")
+                        performAttach("$reason + platform sources download")
+                        return@launch
+                    }
+                }
+                LOG.info("MixinMCP: platform sources did not appear; giving up until the next sync")
+            }
+        }
     }
 
     private data class MergedRootCandidate(
@@ -150,6 +182,8 @@ class SourceAutoAttacher(
     private data class ResolvedAttach(
         val operations: List<AttachOp>,
         val warnings: List<String>,
+        /** The platform sources jar is simply not downloaded yet, so a later run may succeed. */
+        val platformSourcesPending: Boolean = false,
     )
 
     private data class AttachOp(
@@ -305,10 +339,10 @@ class SourceAutoAttacher(
         val sourcesJar: Path? = findIjPlatformSourcesJar(artifactId, version)
         if (sourcesJar == null) {
             val msg = "IntelliJ Platform sources for $artifactId:$version are not in the " +
-                "Gradle cache. Run DevKit's 'Download IntelliJ Platform sources' editor action once; " +
-                "MixinMCP re-attaches the jar after every sync."
+                "Gradle cache yet. If no download is in flight, run DevKit's 'Download IntelliJ " +
+                "Platform sources' editor action once; MixinMCP re-attaches the jar after every sync."
             LOG.info("MixinMCP: $msg")
-            return ResolvedAttach(emptyList(), listOf(msg))
+            return ResolvedAttach(emptyList(), listOf(msg), platformSourcesPending = true)
         }
         val url: String = VfsUtil.getUrlForLibraryRoot(sourcesJar)
         val operations: List<AttachOp> = candidates.targets.map {
@@ -412,6 +446,11 @@ class SourceAutoAttacher(
     companion object {
         private val LOG = Logger.getInstance(SourceAutoAttacher::class.java)
         private val DEBOUNCE = 1500.milliseconds
+
+        // Cumulative ~18 minutes, which covers a cold multi-hundred-megabyte sources download.
+        private val PLATFORM_SOURCES_RETRIES = listOf(
+            15.seconds, 30.seconds, 60.seconds, 2.minutes, 5.minutes, 10.minutes,
+        )
         private val IJ_DIST_ARTIFACT_IDS = setOf("idea", "ideaIC", "ideaIU")
 
         fun getInstance(project: Project): SourceAutoAttacher = project.service()
