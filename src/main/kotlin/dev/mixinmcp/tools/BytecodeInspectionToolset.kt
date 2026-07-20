@@ -4,6 +4,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.psi.search.GlobalSearchScope
@@ -102,6 +105,9 @@ private fun methodVariantNote(
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class BytecodeInspectionToolset : McpToolset {
 
+    override fun isExperimental(): Boolean = false
+
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Returns bytecode-level class overview including synthetic methods, lambda targets, method descriptors, and access flags. Use this tool when decompiled source hides the real method names you need for mixin targets. filter: all (default), synthetic (only compiler-generated: lambdas, bridges, access methods), methods, fields. includeInstructions: javap -c style bytecode per method (large output). Use filter=synthetic to discover lambda mixin target names (e.g. lambda\$tick\$0). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). For method-level bytecode use mixin_method_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
@@ -205,6 +211,7 @@ class BytecodeInspectionToolset : McpToolset {
         return McpToolCallResult.text(result)
     }
 
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor — use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor in JVM format to disambiguate overloads (e.g. (Lnet/minecraft/world/entity/Entity;)V, or ()V for no-arg methods). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). For class-level bytecode overview use mixin_class_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")

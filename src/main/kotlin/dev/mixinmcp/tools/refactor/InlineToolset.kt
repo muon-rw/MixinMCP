@@ -4,6 +4,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.modcommand.ActionContext
 import com.intellij.modcommand.ModCommandExecutor
 import com.intellij.openapi.application.ApplicationManager
@@ -41,6 +44,9 @@ import kotlin.coroutines.coroutineContext
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class InlineToolset : McpToolset {
 
+    override fun isExperimental(): Boolean = false
+
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Inline a method, a constant field, or a local variable into all its usages, updating every reference " +

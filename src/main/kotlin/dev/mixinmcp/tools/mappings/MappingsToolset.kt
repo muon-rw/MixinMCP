@@ -4,6 +4,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import dev.mixinmcp.mappings.MappingNamespace
 import dev.mixinmcp.mappings.MappingsResolver
 import dev.mixinmcp.mappings.MappingsService
@@ -16,6 +19,10 @@ import kotlin.coroutines.coroutineContext
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class MappingsToolset : McpToolset {
 
+    override fun isExperimental(): Boolean = false
+
+    // openWorld: mappings are fetched over HTTP on first use and cached under ~/.cache/mixinmcp.
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = TRUE)
     @McpTool
     @McpDescription(
         "Convert a Minecraft class/method/field name between mapping namespaces " +

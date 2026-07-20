@@ -4,6 +4,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiClass
@@ -33,6 +36,9 @@ import kotlin.coroutines.coroutineContext
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class SemanticNavigationToolset : McpToolset {
 
+    override fun isExperimental(): Boolean = false
+
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Retrieves the type hierarchy of a class. Use this tool to understand inheritance before writing mixins. direction: supers (superclass chain + all interfaces, direct and transitively inherited), subs (inheritors), both (default). maxDepth limits superclass traversal (default 10, must be >= 1); also bounds how far up the superclass chain inherited interfaces are collected from. includeInterfaces: default true. Inherited interfaces are collected from the full superclass chain (within maxDepth) and from super-interface extension, deduplicated by qualified name, and each tagged with origin (from X = introduced by superclass X; via X = inherited by extending interface X). maxResults caps subclasses/implementors (default 50, must be >= 1) — raise for heavily-inherited classes like LivingEntity or Block. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
@@ -197,6 +203,7 @@ class SemanticNavigationToolset : McpToolset {
         }
     }
 
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Finds all implementations of an interface or abstract class across project and dependencies. maxResults: 50 default.")
     @Suppress("unused")
@@ -252,6 +259,7 @@ class SemanticNavigationToolset : McpToolset {
         }
     }
 
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Finds all @Mixin classes that target a given class (and optionally a specific method). Use this for cross-mod conflict analysis — discover which other mods inject into the same target. Returns mixin FQCN, injection points (@Inject, @Redirect, @Overwrite, etc.), and source location. methodName: optionally narrow to mixins targeting that method. maxResults: 50 default. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
@@ -362,6 +370,7 @@ class SemanticNavigationToolset : McpToolset {
         }
     }
 
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Walks the full super-method chain for a method through all superclasses and super-interfaces to the original declaration(s). Use this to confirm where a method is originally declared before targeting it in a mixin — root declarations (those with no further super) are usually the best mixin targets for base behavior. Output indents by depth (2 spaces per level), tags each entry as [root declaration] and/or [interface] where applicable, and emits a Source: path:line line for each method when source is available. If the queried class inherits the method from an ancestor (rather than declaring it itself), the response calls this out explicitly so you can mixin into the actual declaring class — when this happens with no further supers, the chain is empty because the resolved declaration is already the root. When multiple roots exist (e.g. a class root and an interface default), they are summarized at the end. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z) — same as in @Inject(method = \"...\"). For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\".")
     @Suppress("unused")
@@ -493,6 +502,7 @@ class SemanticNavigationToolset : McpToolset {
         return entries
     }
 
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Finds all overriders of a method across project and dependencies (mods, loader, libraries). Use this tool to see how a method is extended before writing a mixin — complements mixin_super_methods (which walks upward to the original declaration). Returns each overriding class with source location (line numbers when source is available). Abstract overrides (e.g. interface re-declarations) are tagged [abstract]. Interface methods return every implementation. Non-overridable methods (static, private, final, constructors, or methods in final classes) return an explanation instead of an empty list. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\". maxResults: 50 default (must be >= 1) — raise for heavily-inherited methods like Entity#tick or Object#toString.")
     @Suppress("unused")
@@ -599,6 +609,7 @@ class SemanticNavigationToolset : McpToolset {
         }
     }
 
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Find all references to a class or member across project and dependencies. Without memberName: references to the class. With memberName: references to that method or field. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\". maxResults: 100 default. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
@@ -762,6 +773,7 @@ class SemanticNavigationToolset : McpToolset {
         }
     }
 
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Finds callers or callees of a method, recursively up to maxDepth levels. Use this tool to trace execution flow when writing mixins. direction: callers (default) — expands each caller into its own callers; callees — walks the method body for outgoing calls, recursing into each callee's body. Callees cover direct method calls, constructor invocations (new Foo(...)), and method references (Foo::bar, Foo::new); synthetic lambda targets are resolved through INVOKEDYNAMIC bootstrap handles so the real lambda\$X\$N target is reported (tagged [lambda]), with constructors tagged [ctor]. Output is owner#name(descriptor) in JVM format (ready to paste into @At(target=\"...\")), indented per depth with [L1], [L2] tags; cycles and already-expanded nodes are marked inline with [cycle]. Callees falls back to bytecode INVOKE analysis when a method body is not available (binary merged JAR classes). maxDepth: default 3 (1 = direct callers/callees only, matching legacy behavior); must be between 1 and 10. maxResults: default 50, shared global budget across all depths and branches; raise for wide hierarchies. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\".")
     @Suppress("unused")

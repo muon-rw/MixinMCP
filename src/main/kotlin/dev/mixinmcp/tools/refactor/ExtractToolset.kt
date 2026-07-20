@@ -5,6 +5,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.command.CommandProcessor
 import com.intellij.openapi.editor.RangeMarker
@@ -76,6 +79,9 @@ import kotlin.coroutines.coroutineContext
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class ExtractToolset : McpToolset {
 
+    override fun isExperimental(): Boolean = false
+
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Extract a range of Java statements or a single expression into a new method, replacing the fragment " +
@@ -188,6 +194,7 @@ class ExtractToolset : McpToolset {
         })
     }
 
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Introduce a local variable for a Java expression, replacing the expression with a reference to it. " +

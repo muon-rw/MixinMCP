@@ -4,6 +4,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.project.Project
@@ -36,6 +39,8 @@ import kotlin.coroutines.coroutineContext
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class ChangeSignatureToolset : McpToolset {
 
+    override fun isExperimental(): Boolean = false
+
     private companion object {
         val JSON: Json = Json { ignoreUnknownKeys = false }
     }
@@ -48,6 +53,7 @@ class ChangeSignatureToolset : McpToolset {
         val defaultValue: String? = null,
     )
 
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Change a Java method's signature with every call site and override updated: rename, change return " +

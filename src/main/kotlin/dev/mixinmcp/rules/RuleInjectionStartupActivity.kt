@@ -1,7 +1,8 @@
 package dev.mixinmcp.rules
 
-import com.intellij.ide.plugins.PluginManager
+import com.intellij.ide.plugins.PluginDetailsService
 import com.intellij.ide.util.PropertiesComponent
+import com.intellij.openapi.extensions.PluginId
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.diagnostic.Logger
@@ -510,8 +511,10 @@ class RuleInjectionStartupActivity : ProjectActivity {
             .setValue(MANIFEST_KEY, entries.distinct().sorted().joinToString("\n"))
     }
 
+    // PluginManagerCore.getPlugin, PluginManager.findEnabledPlugin, and PluginManager.getPluginByClass
+    // are all @ApiStatus.Internal as of 2026.2; their javadoc points plugins here instead.
     private fun pluginVersion(): String? =
-        PluginManager.getPluginByClass(javaClass)?.version
+        PluginDetailsService.getInstance().findDetails(PluginId.getId(PLUGIN_ID))?.version
 
     private fun refreshDirectoryRecursively(dir: Path) {
         if (!Files.isDirectory(dir)) return
@@ -533,6 +536,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
         private const val BUNDLE_CURSOR = "inject/cursor"
         private const val BUNDLE_CLAUDE = "inject/claude"
 
+        private const val PLUGIN_ID = "dev.mixinmcp"
         private const val SKILL_FILE_NAME = "SKILL.md"
         private const val STAMP_PREFIX = "<!-- mixinmcp-skill-version:"
         private const val STAMP_SUFFIX = "-->"

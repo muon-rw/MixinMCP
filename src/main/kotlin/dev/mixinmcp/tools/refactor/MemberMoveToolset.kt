@@ -4,6 +4,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.lang.Language
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.smartReadAction
@@ -19,14 +22,12 @@ import com.intellij.psi.PsiModifier
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.search.GlobalSearchScope
-import com.intellij.psi.search.searches.DirectClassInheritorsSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.refactoring.BaseRefactoringProcessor
 import com.intellij.refactoring.memberPullUp.PullUpConflictsUtil
 import com.intellij.refactoring.memberPullUp.PullUpHelper
 import com.intellij.refactoring.memberPullUp.PullUpProcessor
-import com.intellij.refactoring.memberPushDown.PushDownProcessor
 import com.intellij.refactoring.move.moveMembers.MoveMembersOptions
 import com.intellij.refactoring.move.moveMembers.MoveMembersProcessor
 import com.intellij.refactoring.util.DocCommentPolicy
@@ -42,17 +43,21 @@ import kotlin.coroutines.coroutineContext
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class MemberMoveToolset : McpToolset {
 
+    override fun isExperimental(): Boolean = false
+
     data class MemberRef(
         val name: String,
         val descriptor: String? = null,
     )
 
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Move Java members between classes with every reference updated. direction='up' pulls the members " +
-            "into a superclass or implemented interface (targetClassName required); direction='down' pushes " +
-            "them into every direct subclass; direction='toClass' moves static members to any other class " +
-            "(targetClassName required). Members are declarations of className, each given as a simple " +
+            "into a superclass or implemented interface (targetClassName required); direction='toClass' " +
+            "moves static members to any other class (targetClassName required). Push-down " +
+            "(direction='down') is unavailable: the platform sealed its refactoring engine in 2026.2 and " +
+            "exposes no headless replacement. Members are declarations of className, each given as a simple " +
             "name, or name#descriptor for overloaded methods (JVM descriptor, e.g. compute#(II)I). " +
             "Java sources only. On conflicts, each is reported " +
             "with its file and tagged [library] or [source]; ignoreConflicts=true proceeds anyway, same as " +
@@ -87,12 +92,8 @@ class MemberMoveToolset : McpToolset {
             "up", "toClass" -> if (targetClassName == null) {
                 return McpToolCallResult.error("direction='$direction' requires targetClassName.")
             }
-            "down" -> if (targetClassName != null) {
-                return McpToolCallResult.error(
-                    "direction='down' pushes into every direct subclass; targetClassName does not apply.",
-                )
-            }
-            else -> return McpToolCallResult.error("direction must be 'up', 'down', or 'toClass'.")
+            "down" -> return McpToolCallResult.error(PUSH_DOWN_UNAVAILABLE)
+            else -> return McpToolCallResult.error("direction must be 'up' or 'toClass'.")
         }
         if (makeAbstract && direction != "up") {
             return McpToolCallResult.error("makeAbstract only applies with direction='up'.")
@@ -108,9 +109,6 @@ class MemberMoveToolset : McpToolset {
 
         return when (direction) {
             "up" -> pullUp(project, prep, ignoreConflicts, dryRun)
-            "down" -> runConflictProcessor(project, prep, ignoreConflicts, dryRun) { onConflicts ->
-                HeadlessPushDownProcessor(prep.sourceClass, prep.memberInfos, onConflicts)
-            }
             else -> runConflictProcessor(project, prep, ignoreConflicts, dryRun) { onConflicts ->
                 HeadlessMoveMembersProcessor(project, moveOptions(prep), onConflicts)
             }
@@ -156,40 +154,6 @@ class MemberMoveToolset : McpToolset {
         val membersLabel: String = resolved.members.joinToString(", ") { memberLabel(it) }
         val sourceFile: String = sourceClass.containingFile?.virtualFile
             ?.let { RefactorSupport.projectRelative(project, it) } ?: "(no file)"
-
-        if (direction == "down") {
-            val inheritors: MutableList<String> = mutableListOf()
-            val mixinInheritors: MutableList<PsiClass> = mutableListOf()
-            for (inheritor in DirectClassInheritorsSearch.search(sourceClass).findAll()) {
-                ProgressManager.checkCanceled()
-                val inheritorDisplay: String = inheritor.qualifiedName ?: inheritor.name ?: "(anonymous)"
-                if (isMixinClass(inheritor)) mixinInheritors.add(inheritor)
-                inheritors.add(inheritorDisplay)
-            }
-            if (inheritors.isEmpty()) {
-                return Prep.Failure(
-                    "$sourceDisplay has no direct subclasses; pushing down would only delete the member(s) " +
-                        "after an interactive confirmation. Nothing to push down into.",
-                )
-            }
-            return Prep.Ok(
-                sourceClass = sourceClass,
-                members = resolved.members,
-                memberInfos = resolved.memberInfos,
-                targetClass = null,
-                targetName = null,
-                description = "push down of [$membersLabel] from $sourceDisplay",
-                sourceFile = sourceFile,
-                affectedNote = "into ${inheritors.size} direct subclass(es): ${inheritors.joinToString(", ")}",
-                prepConflicts = mixinInheritors.map { mixinDestinationConflict(project, it) },
-                notes = buildList {
-                    addAll(uniqueInertNotes(sourceIsMixin, destinationIsMixin = false, resolved.members))
-                    if (mixinInheritors.isNotEmpty()) {
-                        add(mixinDestinationNote(mixinInheritors))
-                    }
-                },
-            )
-        }
 
         val target: PsiClass = FqcnResolver.resolveNested(project, targetClassName!!)
             ?: return Prep.Failure("Class not found: $targetClassName. ${FqcnResolver.CLASS_NOT_FOUND_HINT}")
@@ -241,7 +205,7 @@ class MemberMoveToolset : McpToolset {
             return Prep.Failure(
                 "Only static members can move to an unrelated class; not static: " +
                     nonStatic.joinToString(", ") { memberLabel(it) } +
-                    ". Use direction='up' or 'down' for instance members.",
+                    ". Use direction='up' for instance members.",
             )
         }
         JavaPsiFacade.getInstance(project).findClass(targetDisplay, GlobalSearchScope.projectScope(project))
@@ -287,18 +251,6 @@ class MemberMoveToolset : McpToolset {
         psiClass.modifierList?.annotations?.any {
             it.qualifiedName == "org.spongepowered.asm.mixin.Mixin"
         } == true
-
-    private fun mixinDestinationConflict(project: Project, mixinClass: PsiClass): RefactorSupport.ConflictRef {
-        val display: String = mixinClass.qualifiedName ?: mixinClass.name ?: "(anonymous)"
-        val file: String = mixinClass.containingFile?.virtualFile
-            ?.let { RefactorSupport.projectRelative(project, it) } ?: "(unknown file)"
-        val targets: String = extractMixinTargets(mixinClass).joinToString(", ").ifEmpty { "(unresolved)" }
-        return RefactorSupport.ConflictRef(
-            "$display is a @Mixin class (targets: $targets); members placed in it are merged into the " +
-                "target class at runtime, not kept on $display itself",
-            file, "mixin",
-        )
-    }
 
     private fun mixinDestinationNote(mixinClasses: List<PsiClass>): String {
         val destinations: String = mixinClasses.joinToString(", ") { mixin ->
@@ -550,18 +502,6 @@ class MemberMoveToolset : McpToolset {
         }
     }
 
-    private class HeadlessPushDownProcessor(
-        sourceClass: PsiClass,
-        members: List<MemberInfo>,
-        private val onConflictsFound: (MultiMap<PsiElement, String>, Array<out UsageInfo>?) -> Boolean,
-    ) : PushDownProcessor<MemberInfo, PsiMember, PsiClass>(
-        sourceClass, members, DocCommentPolicy(DocCommentPolicy.ASIS),
-    ) {
-        override fun isPreviewUsages(usages: Array<UsageInfo>): Boolean = false
-        override fun showConflicts(conflicts: MultiMap<PsiElement, String>, usages: Array<out UsageInfo>?): Boolean =
-            onConflictsFound(conflicts, usages)
-    }
-
     private class HeadlessMoveMembersProcessor(
         project: Project,
         options: MoveMembersOptions,
@@ -597,5 +537,17 @@ class MemberMoveToolset : McpToolset {
                 helper.updateUsage(element)
             }
         }
+    }
+
+    private companion object {
+        // com.intellij.refactoring.memberPushDown became @ApiStatus.Internal across the whole package in
+        // 2026.2 (commit 45db644, a blanket intellij.platform.lang.impl sweep). The only public entry
+        // point left, JavaRefactoringActionHandlerFactory.createPushDownHandler(), always shows a modal
+        // dialog, and JavaPushDownDelegate is uncallable because PushDownData's constructors are
+        // package-private. Tracking: https://youtrack.jetbrains.com/issue/IJPL-201953
+        const val PUSH_DOWN_UNAVAILABLE: String =
+            "direction='down' (push members into subclasses) is unavailable on IntelliJ 2026.2 and later: " +
+                "the platform's push-down engine is internal API with no headless replacement. Move the " +
+                "members by hand, or use direction='up' or 'toClass'."
     }
 }

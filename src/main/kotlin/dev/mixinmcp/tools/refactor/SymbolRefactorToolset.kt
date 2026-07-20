@@ -4,6 +4,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.command.WriteCommandAction
@@ -52,6 +55,9 @@ import dev.mixinmcp.tools.requireProject
  */
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class SymbolRefactorToolset : McpToolset {
+    override fun isExperimental(): Boolean = false
+
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Safely delete a class, method, or field after checking for usages across project AND dependencies. " +
@@ -101,6 +107,7 @@ class SymbolRefactorToolset : McpToolset {
         return performDelete(project, prep, force)
     }
 
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Move a class to a new package, updating its package declaration and every import/reference across " +
@@ -135,6 +142,7 @@ class SymbolRefactorToolset : McpToolset {
         return performMove(project, prep)
     }
 
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Rename a class, method, field, parameter, or local variable and update every reference project-wide, " +

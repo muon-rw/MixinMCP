@@ -4,6 +4,9 @@ import com.intellij.mcpserver.McpToolCallResult
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
 import com.intellij.mcpserver.annotations.McpTool
+import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
+import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
+import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.externalSystem.importing.ImportSpecBuilder
 import com.intellij.openapi.externalSystem.model.ProjectSystemId
@@ -19,6 +22,9 @@ import kotlin.coroutines.coroutineContext
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class ProjectManagementToolset : McpToolset {
 
+    override fun isExperimental(): Boolean = false
+
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = FALSE, idempotentHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription("Trigger Gradle/Maven project sync to refresh dependencies and decompilation cache. Call after changing build.gradle or pom.xml. Runs in background.")
     @Suppress("unused")
@@ -59,6 +65,7 @@ class ProjectManagementToolset : McpToolset {
         )
     }
 
+    @McpToolHints(readOnlyHint = FALSE, destructiveHint = FALSE, idempotentHint = TRUE, openWorldHint = FALSE)
     @McpTool
     @McpDescription(
         "Force-refresh IntelliJ's Virtual File System (VFS) so on-disk changes made by external tools " +
