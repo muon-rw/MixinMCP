@@ -30,11 +30,16 @@ While other tools might be able to read individual files in Minecraft sources, l
 - Get the actual compiled bytecode for a given class or method
 - Useful to find a precise target when writing mixins, especially for ordinals or synthetic lambdas
 
-### 3. Built-in Agent Skills for enhanced Mixin Writing:
+### 3. Reference-aware refactoring:
+- Rename, safe-delete, move, inline, extract, change signatures, and move members, with every reference updated project-wide in one atomic operation
+- Update non-compiled references: mixin config JSON entries, `mods.toml`, ServiceLoader files, and javadoc links
+- Conflicts are reported per file instead of just discarded. Most tools support a dry-run preview
+
+### 4. Built-in Agent Skills for enhanced Mixin Writing:
 - Improve compatibility of written mixins by favoring MixinExtras injectors which LLMs often hallucinate or fail to use in the first place
 - Favor precise modification for the exact target for the task without workarounds, slices, or shift by's, thanks to MixinExtras' robust `@Expression` annotation
 
-### 4. Automatic Mappings lookup:
+### 5. Automatic Mappings lookup:
 - Easily convert any class, method, or field name between SRG, Intermediary, Yarn, Mojmap, and obf
 - Mappings are downloaded on demand (Mojang launcher meta, Fabric Maven, Forge/NeoForge Maven) and cached under `~/.cache/mixinmcp/mappings/` 
 - This allows you to retrieve mapping data for (almost) any version or loader, even those not present in the current project
@@ -63,7 +68,7 @@ MixinMCP has two parts. You need **both** for full-classpath search to work:
 Use IntelliJ's **Auto-Configure** option for your client (or configure manually using the ip address), then restart the client. The auto-configured server name is usually **`user-jetbrains`**
 
 > [!CAUTION]
-> MixinMCP exposes full project and dependency source, classpath metadata, and most importantly, *file editing and directory refactoring tools*, to whatever connects to the MCP server. These tools aren't hardened for remote access. 
+> MixinMCP exposes full project and dependency source, classpath metadata, and most importantly, *file editing and refactoring tools*, to whatever connects to the MCP server. These tools aren't hardened for remote access. 
 > 
 > IntelliJ binds the server to localhost only by default, and you should leave it that way unless you have a specific reason and you know the risks. 
 
@@ -155,7 +160,7 @@ You can edit these manually, but if you use the same name and do not change the 
 ## Tool reference
 
 <details>
-<summary>All 19 tools (click to expand)</summary>
+<summary>All 25 tools (click to expand)</summary>
 
 ### Source Navigation
 
@@ -198,8 +203,21 @@ You can edit these manually, but if you use the same name and do not change the 
 |------|-------------|
 | `mixin_sync_project` | Trigger Gradle sync. The decompilation cache is re-read automatically after sync. |
 | `mixin_refresh_vfs` | Force-refresh IntelliJ's VFS so on-disk changes from external tools become visible. Optional `path` scopes the refresh; file paths refresh the parent directory (catching edits, creates, and deletes), deleted paths walk up to the nearest existing ancestor, and directory paths refresh recursively. Defaults to the project root. |
-| `mixin_safe_delete` | Delete a class, method, or field after checking for usages across project and dependencies. Resolves by FQCN; pass `methodName` (with `parameterTypes`/`methodDescriptor` for overloads) or `fieldName` to narrow to a member. Method overrides count as blocking usages and are tagged `[override]`. References inside mixin configs, `mods.toml`, ServiceLoader files etc. are picked up automatically when the relevant language plugins contribute PSI references. `force=true` deletes despite usages; `dryRun=true` only reports. |
+
+### Refactoring
+
+Reference-aware: each tool checks or updates every reference project-wide, including string references in mixin config JSON, `mods.toml`, and ServiceLoader files where language plugins contribute PSI references. Shared contract: `dryRun=true` reports the resolved target, usages, and conflicts without changing anything; conflicts are tagged `[library]` (usually a stale build jar) or `[source]`, and `ignoreConflicts=true` proceeds anyway. Two exceptions: `mixin_safe_delete` uses `force=true` instead, and `mixin_move_file` takes neither flag, running all its checks up front. The signature, extract, introduce, inline, and move-members tools operate on Java sources only.
+
+| Tool | Description |
+|------|-------------|
+| `mixin_rename` | Rename a class, method, field, parameter, or local variable, updating every reference project-wide. Renaming an override renames the source super method and all overriders together. Reports conflicts instead of silently discarding them. Local-variable renames are Java sources only. |
+| `mixin_safe_delete` | Delete a class, method, or field after checking for usages across project and dependencies. Resolves by FQCN; pass `methodName` (with `parameterTypes`/`methodDescriptor` for overloads) or `fieldName` to narrow to a member. Method overrides count as blocking usages and are tagged `[override]`. `force=true` deletes despite usages; `dryRun=true` only reports. |
 | `mixin_move_file` | Move a class to a new package, updating its package declaration and every import/reference across the project. Resolves the source by FQCN; Kotlin files with multiple top-level declarations move together. Non-Java string references are also rewritten, so mixin configs and ServiceLoader entries follow along. Errors if a file with the same name already exists in the target package. |
+| `mixin_change_signature` | Change a method's signature atomically: rename, return type, visibility, and add/remove/reorder/retype parameters, with every call site and override updated. New parameters take a `defaultValue` expression inserted at existing call sites. |
+| `mixin_extract_method` | Extract a statement range or sub-expression into a new method; IntelliJ's control-flow analysis derives parameters, return value, and thrown exceptions. |
+| `mixin_introduce_variable` | Introduce a local variable for an expression, optionally replacing all other occurrences in scope. |
+| `mixin_inline` | Inline a method into every call site, a constant field into every read, or a local variable into its usages. Refuses recursive methods and non-final fields with writes. |
+| `mixin_move_members` | Move members between classes: pull up into a superclass or interface, push down into every direct subclass, or move static members to any class. Moving members into a `@Mixin` class flags external references as blocking `[mixin]` conflicts. |
 
 </details>
 

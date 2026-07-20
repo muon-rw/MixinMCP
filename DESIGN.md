@@ -28,7 +28,7 @@
 ## 1. What This Plugin Does
 
 MixinMCP is an IntelliJ Platform plugin that extends the IDE's built-in MCP Server with
-19 tools for Minecraft mod development: mixin authoring, dependency navigation, bytecode
+25 tools for Minecraft mod development: mixin authoring, dependency navigation, bytecode
 inspection, mappings lookup, and reference-aware refactoring. A companion Gradle plugin
 (`dev.mixinmcp.decompile`) decompiles dependencies without published sources into a cache
 the IntelliJ plugin indexes, so the tools see the full compiled classpath.
@@ -60,8 +60,10 @@ decompiled source.
 │  ├── SourceNavigationToolset    (5 tools)                        │
 │  ├── SemanticNavigationToolset  (7 tools)                        │
 │  ├── BytecodeInspectionToolset  (2 tools)                        │
-│  ├── ProjectManagementToolset   (4 tools)                        │
+│  ├── ProjectManagementToolset   (2 tools)                        │
 │  ├── MappingsToolset            (1 tool)                         │
+│  ├── refactor/: SymbolRefactor (3), ChangeSignature (1),         │
+│  │       Extract (2), Inline (1), MemberMove (1) Toolsets        │
 │  │                                                               │
 │  ├── resolve/   shared PSI/bytecode resolution (Section 7)       │
 │  ├── mappings/  mappings download + query      (Section 9)       │
@@ -101,9 +103,9 @@ class SourceNavigationToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val text = ReadAction.nonBlocking<String> {
+        val text = smartReadAction(project) {
             // PSI access
-        }.inSmartMode(project).executeSynchronously()
+        }
 
         return McpToolCallResult.text(text)
     }
@@ -126,10 +128,10 @@ class SourceNavigationToolset : McpToolset {
 - **Return type** is always `McpToolCallResult`: `.text()` for success, `.error()` for
   errors.
 - **Threading.** Tool functions run on background threads without a read lock. PSI reads
-  go through `ReadAction.nonBlocking { }.inSmartMode(project).executeSynchronously()`,
-  which yields to pending writers and waits out indexing instead of failing in dumb mode.
-  Write operations dispatch to the EDT: `WriteCommandAction` for PSI mutation
-  (safe-delete, move), `invokeLater` for sync.
+  go through `smartReadAction(project) { }`, which yields to pending writers and waits
+  out indexing instead of failing in dumb mode. Write operations dispatch to the EDT:
+  `WriteCommandAction` for PSI mutation, `RefactorSupport.runRefactoringOnEdt` for the
+  refactor processors, `invokeLater` for sync.
 - **`@McpDescription`** is what the LLM sees. Dollar signs must be escaped (`\$`) or
   Kotlin treats them as string templates.
 
@@ -156,6 +158,7 @@ MixinMCP/
 ├── src/main/kotlin/dev/mixinmcp/
 │   ├── tools/
 │   │   ├── ProjectResolution.kt       # requireProject / softProject
+│   │   ├── ClassContentDeduper.kt     # classpath-variant dedup + diff
 │   │   ├── BytecodeInspectionToolset.kt
 │   │   ├── ProjectManagementToolset.kt
 │   │   ├── source/
@@ -165,15 +168,23 @@ MixinMCP/
 │   │   │   ├── SemanticNavigationToolset.kt
 │   │   │   ├── CallHierarchyExpander.kt
 │   │   │   └── MixinAnnotationHelpers.kt
-│   │   └── mappings/
-│   │       └── MappingsToolset.kt
+│   │   ├── mappings/
+│   │   │   └── MappingsToolset.kt
+│   │   └── refactor/
+│   │       ├── RefactorSupport.kt     # shared: conflicts, ranges, EDT execution
+│   │       ├── SymbolRefactorToolset.kt   # rename, safe delete, move file
+│   │       ├── ChangeSignatureToolset.kt
+│   │       ├── ExtractToolset.kt      # extract method, introduce variable
+│   │       ├── InlineToolset.kt
+│   │       └── MemberMoveToolset.kt
 │   ├── resolve/                       # shared utilities (Section 7)
 │   │   ├── FqcnResolver.kt
 │   │   ├── MethodResolver.kt
 │   │   ├── ClassFileLocator.kt
 │   │   ├── BytecodeAnalyzer.kt
 │   │   ├── DescriptorParser.kt
-│   │   └── PsiDescriptors.kt
+│   │   ├── PsiDescriptors.kt
+│   │   └── ClassVariants.kt           # classpath-variant provenance
 │   ├── mappings/                      # mappings subsystem (Section 9)
 │   ├── cache/                         # cache reader + auto-attach (10, 11)
 │   │   ├── DecompilationCacheService.kt
@@ -186,6 +197,7 @@ MixinMCP/
 │   │   └── RuleInjectionStartupActivity.kt
 │   └── settings/
 │       ├── MixinMcpSettings.kt
+│       ├── MixinMcpAppSettings.kt
 │       └── MixinMcpSettingsConfigurable.kt
 ├── src/main/resources/
 │   ├── META-INF/plugin.xml
@@ -247,6 +259,11 @@ consumer of the cache the Gradle plugin populates.
         <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
         <mcpToolset implementation="dev.mixinmcp.tools.mappings.MappingsToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.ChangeSignatureToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.ExtractToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.InlineToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.MemberMoveToolset"/>
+        <mcpToolset implementation="dev.mixinmcp.tools.refactor.SymbolRefactorToolset"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.intellij">
@@ -281,8 +298,8 @@ by progressively converting dots to dollars from the right, and accepts `$` inpu
 Resolves a method by name plus optional `parameterTypes` (simple or canonical names) or
 `methodDescriptor` (JVM format; takes precedence when both are given). `resolveDetailed`
 returns a sealed `Resolution`: `Found(PsiMethod)` or `Error(message)`, where errors list
-the available overloads with ready-to-paste `parameterTypes` values. Runs inside
-`ReadAction.nonBlocking` with smart mode.
+the available overloads with ready-to-paste `parameterTypes` values. `@RequiresReadLock`;
+callers wrap it in `smartReadAction`.
 
 - `findMethodsByName(name, checkBases = true)` with a `psiClass.methods` fallback for JDK
   classes where the index returns nothing.
@@ -348,11 +365,11 @@ paste-ready for `@At(target = "...")`.
 
 | Tool | Parameters |
 |------|-----------|
-| `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false`, `methodName?`, `fieldName?` |
+| `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false`, `methodName?`, `fieldName?`, `module?` |
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` |
 | `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000`, `pathPrefix?`, `roots=all`, `contextLines=0` |
-| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70` |
-| `mixin_list_source_roots` | `maxSamplesPerRoot=5` |
+| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70`, `module?` |
+| `mixin_list_source_roots` | `maxSamplesPerRoot=5`, `verbose=false` |
 
 `mixin_search_in_deps` and `mixin_get_dep_source` cover two root sets: library SOURCES
 roots (published `-sources.jar` files plus anything else attached as SOURCES, such as
@@ -368,6 +385,11 @@ cache keep the decompiled label, so the `roots` contract holds.
 overload counts, inherited-member tags, and similar-name suggestions on a miss; binary
 members get a pointer to the bytecode tools. `includeMembers` lists methods, fields, and
 nested classes with ready-to-copy follow-up calls; `includeSource` appends the full file.
+`module` (exact name or dot-boundary suffix) pins resolution to one module's classpath;
+without it, a class with several classpath copies gets a Variants block in which
+byte-identical copies are merged and patched copies get a provenance-tagged structural
+diff (`ClassContentDeduper`). The same parameter and Variants handling apply to
+`mixin_get_dep_source` and the bytecode tools.
 
 **`mixin_search_symbols`** is a short-name substring search over `PsiShortNamesCache`.
 Queries that look like FQCNs are simplified to the trailing simple name with an
@@ -473,8 +495,8 @@ only when the annotation search finds nothing, returning FQCN and path only.
 
 | Tool | Parameters |
 |------|-----------|
-| `mixin_class_bytecode` | `className`, `filter=all`, `includeInstructions=false` |
-| `mixin_method_bytecode` | `className`, `methodName`, `methodDescriptor?` |
+| `mixin_class_bytecode` | `className`, `filter=all`, `includeInstructions=false`, `module?` |
+| `mixin_method_bytecode` | `className`, `methodName`, `methodDescriptor?`, `module?` |
 
 `filter` accepts `all`, `synthetic`, `methods`, `fields`; `synthetic` restricts both
 methods and fields to synthetic members (including fields like `this$0` and `$VALUES`).
@@ -493,8 +515,6 @@ similar and available method names; a name with no descriptor match lists every 
 |------|-----------|
 | `mixin_sync_project` | `projectPath?` |
 | `mixin_refresh_vfs` | `path?` |
-| `mixin_safe_delete` | `className`, `methodName?`, `fieldName?`, `parameterTypes?`, `methodDescriptor?`, `force=false`, `dryRun=false` |
-| `mixin_move_file` | `className`, `targetPackage` |
 
 **`mixin_sync_project`** saves all documents, then triggers
 `ExternalSystemUtil.refreshProject` with `ProgressExecutionMode.START_IN_FOREGROUND_ASYNC`
@@ -513,13 +533,75 @@ noticed without fanning out. Explicit dirty-marking forces a re-read even when V
 believes the entry is fresh. Synchronous: returns after IntelliJ has re-scanned. Use
 after external tools mutate files that later MCP calls will query.
 
+### Mappings
+
+| Tool | Parameters |
+|------|-----------|
+| `mixin_mappings_lookup` | `symbol`, `kind`, `from`, `to`, `mcVersion?` |
+
+Converts a class/method/field name between mapping namespaces. See Section 9.
+
+### Refactoring
+
+Five toolsets under `tools/refactor/` (SymbolRefactorToolset, ChangeSignatureToolset,
+ExtractToolset, InlineToolset, MemberMoveToolset) share `RefactorSupport.kt` and one
+contract. `dryRun=true` reports the resolved target, usages, and conflicts without
+modifying anything. Conflicts are rendered one per line with a project-relative path and
+a `[library]` or `[source]` tag (`[library]` usually means a stale build jar; member
+moves into a `@Mixin` class add `[mixin]`) and block execution unless
+`ignoreConflicts=true`, the headless equivalent of the IDE conflict dialog's Continue.
+Two exceptions: `mixin_safe_delete` uses `force` instead, and `mixin_move_file` takes
+neither flag, refusing everything it can detect at validation time. Mutations run on the
+EDT; most tools go through `runRefactoringOnEdt`, which commits and saves all documents,
+while SymbolRefactorToolset inlines the same invokeAndWait-plus-commit pattern and
+extract mutates through `DuplicatesMethodExtractor` first, using `runRefactoringOnEdt`
+only to save. The processor-driven tools replace the conflict dialog with a stub that
+captures the conflict MultiMap instead of opening a modal that would deadlock the MCP
+call (pull-up conflicts are precomputed via `PullUpConflictsUtil`; `mixin_move_file`
+instead proceeds past late processor conflicts after its own validation). Because
+`BaseRefactoringProcessor.doRun` can bail out silently (preview escalation, dumb mode,
+canceled progress), post-run read actions verify the change actually applied and return
+an explicit error otherwise; `mixin_move_file` is again the exception. The signature,
+extract, introduce, inline, and move-members tools are Java sources only:
+`guardJavaSourceTarget` (for the range-addressed tools, `resolveFileRange`) refuses
+compiled, library, Kotlin, and non-writable targets.
+`RefactorSupport` also carries the shared identifier and visibility validation,
+whole-line range resolution (`resolveRange`), and sub-expression picking
+(`pickExpression`, matching by a whitespace-insensitive token stream with
+`occurrenceIndex` disambiguation and a candidate listing on a miss).
+
+| Tool | Parameters |
+|------|-----------|
+| `mixin_rename` | `className`, `newName`, `memberName?`, `memberKind?`, `variableName?`, `parameterTypes?`, `methodDescriptor?`, `ignoreConflicts=false`, `dryRun=false` |
+| `mixin_safe_delete` | `className`, `methodName?`, `fieldName?`, `parameterTypes?`, `methodDescriptor?`, `force=false`, `dryRun=false` |
+| `mixin_move_file` | `className`, `targetPackage` |
+| `mixin_change_signature` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?`, `newName?`, `newVisibility?`, `newReturnType?`, `parametersJson?`, `ignoreConflicts=false`, `dryRun=false` |
+| `mixin_extract_method` | `filePath`, `startLine`, `endLine`, `methodName`, `expression?`, `occurrenceIndex?`, `visibility="private"`, `makeStatic?`, `ignoreConflicts=false`, `dryRun=false` |
+| `mixin_introduce_variable` | `filePath`, `startLine`, `endLine`, `name?`, `expression?`, `occurrenceIndex?`, `replaceAllOccurrences=false`, `ignoreConflicts=false`, `dryRun=false` |
+| `mixin_inline` | `kind`, `className`, `memberName?`, `parameterTypes?`, `methodDescriptor?`, `methodName?`, `localName?`, `deleteDeclaration=true`, `ignoreConflicts=false`, `dryRun=false` |
+| `mixin_move_members` | `direction`, `className`, `members`, `targetClassName?`, `makeAbstract=false`, `ignoreConflicts=false`, `dryRun=false` |
+
+**`mixin_rename`** renames a class, method, field, parameter, or local variable and
+updates every reference project-wide, including string references in mixin configs and
+javadoc where language plugins contribute PSI references; it exists because the built-in
+`rename_refactoring` discards conflict details on failure. `memberKind` disambiguates
+method vs field (inferred when omitted) or selects `parameter`/`local`, which rename the
+variable named by `variableName` inside the method `memberName`. Method renames
+substitute the deepest super declaration so `RenameProcessor` expands every overrider;
+multiple unrelated supers and library supers are refused, as are compiled, non-writable,
+and mismatched Kotlin light targets, and local renames support Java bodies only.
+Success is verified by re-reading the element name
+before committing, so a silent processor bail-out returns an error instead of a false
+success.
+
 **`mixin_safe_delete`** deletes a class, method, or field after a usage check.
-Preparation resolves the target (member resolution per Section 7.2), then collects
-`ReferencesSearch` usages plus, for methods, `OverridingMethodsSearch` results tagged
-`[override]`; a top-level class's own-file references are excluded, and deleting the sole
-top-level declaration removes the file. `dryRun` reports what would happen; existing
-usages block deletion unless `force`. The delete runs in a named `WriteCommandAction` on
-the EDT, then commits and saves all documents.
+Preparation resolves the target (member resolution per Section 7.2, Kotlin light elements
+unwrapped to their source declaration), then collects `ReferencesSearch` usages plus, for
+methods, `OverridingMethodsSearch` results tagged `[override]`; a top-level class's
+own-file references are excluded, and deleting the sole top-level declaration removes the
+file. `dryRun` reports what would happen; existing usages block deletion unless `force`.
+The delete is a direct `PsiElement.delete()` in a named `WriteCommandAction` on the EDT
+(not `SafeDeleteProcessor`), then commits and saves all documents.
 
 **`mixin_move_file`** moves a top-level class to another package under the same source
 root (inner classes are rejected; target directories are created; same-name collisions
@@ -529,13 +611,55 @@ suppresses the modal conflict dialog (which would deadlock an MCP call) with
 mixin configs and service files update where language plugins contribute PSI references.
 Files with several top-level classes move as a unit.
 
-### Mappings
+**`mixin_change_signature`** applies a rename, visibility change, return-type change, and
+parameter add/remove/reorder/retype as one atomic refactoring, updating every call site
+and override. `parametersJson` describes the complete new parameter list in order:
+`{"oldIndex":N}` keeps a parameter (name/type override the old ones when given),
+`{"oldIndex":-1,"name":...,"type":...,"defaultValue":...}` adds one with `defaultValue`
+inserted at every existing call site, and omitted parameters are removed everywhere.
+Types must parse and resolve in the method's context. Weakening visibility while
+overriders exist is refused up front (the platform would open an interactive propagation
+dialog), and covariant-overrider processing is off. `dryRun` runs `findUsages` plus every
+`ChangeSignatureUsageProcessor` extension's `findConflicts` and prints the new signature
+and per-file usage counts; a post-run read action verifies name, parameters, visibility,
+and return type all match the request.
 
-| Tool | Parameters |
-|------|-----------|
-| `mixin_mappings_lookup` | `symbol`, `kind`, `from`, `to`, `mcVersion?` |
+**`mixin_extract_method`** and **`mixin_introduce_variable`** address code by `filePath`
+plus a 1-based, inclusive, whole-line `startLine`/`endLine` range; `expression` (matched
+whitespace-insensitively against its source text) selects a sub-expression inside the
+range, `occurrenceIndex` picks among repeats, and a non-matching `expression` lists the
+selectable candidates. Extract runs the modern extract-method pipeline (`ExtractSelector`
+then `ExtractMethodPipeline`, with `withForcedStatic` backing `makeStatic`), checks name
+clashes via `ConflictsUtil.checkMethodConflicts` on a preview method, pins the fragment
+with a `RangeMarker` across the read/write gap, and mutates through
+`DuplicatesMethodExtractor`; `dryRun` prints the derived signature, target class, and
+output kind. Introduce-variable reuses the platform's introduce checks (assignments, void
+and non-denotable types, enum constants in switch labels, and escaping pattern variables
+are refused), gathers occurrences with `ExpressionOccurrenceManager`, and drives
+`VariableExtractor` with a dialog-free settings object; `replaceAllOccurrences` is
+refused when occurrences mix reads with writes or a replacement would leave a bare
+expression statement.
 
-Converts a class/method/field name between mapping namespaces. See Section 9.
+**`mixin_inline`** dispatches on `kind`. Methods run a headless `InlineMethodProcessor`
+into every call site; constructors, bodiless and recursive methods, and zero-usage
+targets are refused (the last pointing at `mixin_safe_delete`). Fields run
+`InlineConstantFieldProcessor`; enum constants, initializer-less fields, and non-final
+fields with write usages are refused. Locals run `InlineLocalHandler` as a batch
+ModCommand inside the method named by `methodName`. `deleteDeclaration=false` keeps the
+declaration; a deleting run re-checks that the element became invalid so a silent
+processor bail-out surfaces as an error.
+
+**`mixin_move_members`** drives the real IntelliJ processors headlessly per `direction`:
+`up` a `PullUpProcessor` whose duplicate-replacement dialog is skipped (the target must
+be in the source's inheritance chain; `makeAbstract` pulls methods up as abstract
+declarations and keeps the implementations), `down` a `PushDownProcessor` into every
+direct subclass, `toClass` a `MoveMembersProcessor` for static members. `members` entries
+are a simple `name` or `name#descriptor` for overloads, resolved against members declared
+directly on `className`. Moves into a `@Mixin` class report external references to the
+moved members as blocking `[mixin]` conflicts, since mixin members are unreachable from
+ordinary classes at runtime; other mixin-involved moves proceed with advisory notes on
+`@Unique` conventions. A post-run read action verifies the members actually left the
+source class.
 
 ---
 
@@ -789,6 +913,10 @@ an existing `.gitignore` under a marker comment, skipping paths `git check-ignor
 already covers; no `.gitignore` is created. An info notification lists what was written,
 with an opt-out action.
 
+On non-Minecraft projects the activity injects only the `mixinmcp-tools` skill, and only
+when the application-level `injectToolsSkillIntoJvmProjects` setting is on and the
+project looks like a JVM project.
+
 The same activity warns (balloon, with opt-out) when a Minecraft project does not apply
 the Gradle plugin, detected via `.gradle/mixinmcp/manifest.json` or the plugin id in the
 build file, since dependency search is source-blind without the cache.
@@ -799,8 +927,10 @@ build file, since dependency search is source-blind without the cache.
 
 `MixinMcpSettings` is a project-level `PersistentStateComponent` (storage
 `mixinmcp.xml`) with three booleans, all defaulting to true: `autoInjectCursorRules`,
-`overwriteExistingRules`, `warnMissingGradlePlugin`. `MixinMcpSettingsConfigurable`
-(Kotlin UI DSL `BoundConfigurable`) exposes them at Settings > Tools > MixinMCP; the
+`overwriteExistingRules`, `warnMissingGradlePlugin`. `MixinMcpAppSettings` is its
+application-level twin holding `injectToolsSkillIntoJvmProjects` (default false), the
+Section 12 non-Minecraft injection toggle. `MixinMcpSettingsConfigurable`
+(Kotlin UI DSL `BoundConfigurable`) exposes all four at Settings > Tools > MixinMCP; the
 overwrite checkbox is enabled only while injection is on.
 
 ---
@@ -814,6 +944,11 @@ Automated tests are JUnit unit tests of static helpers (the auto-attacher's matc
 - `IjPlatformCoordinateTest`: IPGP dist coordinate parsing and bundled-library detection.
 - `SymbolParserTest`: mappings symbol parsing for all three kinds plus namespace and kind
   parsing.
+- `GameJarProvenanceTest`: game-jar provenance classification behind the Variants tags
+  (loom-remapped vanilla, MDG/NeoForm-recompiled vanilla, loader-patched, decompile
+  cache).
+- `ToolchainPathClassificationTest`: toolchain classification of dependency-search paths
+  for the empty-result hints.
 
 The MCP tools have no automated coverage; end-to-end verification is manual against real
 Fabric and Forge/NeoForge projects. The canonical smoke test for the bytecode workflow:
@@ -846,8 +981,8 @@ the `lambda$` convention. `mixin_mappings_lookup` translates between namespaces.
 
 ### Threading
 Tool functions are called on background threads without a read lock. PSI reads go through
-`ReadAction.nonBlocking { }.inSmartMode(project).executeSynchronously()`; PSI writes go
-through `WriteCommandAction` on the EDT.
+`smartReadAction(project) { }`; PSI writes go through `WriteCommandAction` or a headless
+refactoring processor on the EDT.
 
 ### Multi-Window Sessions
 With several projects open and no `projectPath` argument, the framework throws
