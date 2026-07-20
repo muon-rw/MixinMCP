@@ -22,6 +22,7 @@ import com.intellij.psi.search.searches.OverridingMethodsSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.util.Processor
 import com.intellij.util.concurrency.annotations.RequiresReadLock
+import dev.mixinmcp.tools.projectRelativePath
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.MethodResolver
 import dev.mixinmcp.tools.ClassContentDeduper
@@ -346,7 +347,8 @@ class SemanticNavigationToolset : McpToolset {
                         val fqcn: String = psiClass.qualifiedName ?: psiClass.name ?: "?"
                         val annotation: String? = deduper.annotationFor(psiClass.qualifiedName)
                         if (annotation != null) annotated = true
-                        val source: String = psiClass.containingFile?.virtualFile?.path ?: "(unknown)"
+                        val source: String = psiClass.containingFile?.virtualFile
+                            ?.let { projectRelativePath(project, it) } ?: "(unknown)"
                         appendLine("${i + 1}. $fqcn${annotation ?: ""}")
                         for (inj in injections.take(10)) {
                             appendLine("   $inj")
@@ -465,7 +467,7 @@ class SemanticNavigationToolset : McpToolset {
     @RequiresReadLock
     private fun sourceLocation(project: Project, method: PsiMethod): String? {
         val file = method.containingFile ?: return null
-        val path: String = file.virtualFile?.path ?: return null
+        val path: String = file.virtualFile?.let { projectRelativePath(project, it) } ?: return null
         val doc = PsiDocumentManager.getInstance(project).getDocument(file) ?: return path
         val offset: Int = method.textOffset
         if (offset < 0 || offset >= doc.textLength) return path
@@ -586,7 +588,7 @@ class SemanticNavigationToolset : McpToolset {
                     val isAbstract: Boolean = overriding.hasModifierProperty(PsiModifier.ABSTRACT)
                     val abstractTag: String = if (isAbstract) " [abstract]" else ""
                     val vf = overriding.containingFile?.virtualFile
-                    val path: String = vf?.path ?: "(unknown)"
+                    val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
                     val line: Int = overriding.containingFile?.let { f ->
                         val doc = PsiDocumentManager.getInstance(project).getDocument(f) ?: return@let 0
                         val offset: Int = overriding.textOffset
@@ -648,7 +650,7 @@ class SemanticNavigationToolset : McpToolset {
                             val element = ref.element
                             val file = element.containingFile
                             val vf = file?.virtualFile
-                            val path: String = vf?.path ?: "(unknown)"
+                            val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
                             val line: Int = element.containingFile?.let { f ->
                                 val doc = PsiDocumentManager.getInstance(project).getDocument(f)
                                 doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
@@ -687,7 +689,7 @@ class SemanticNavigationToolset : McpToolset {
                                 val element = ref.element
                                 val file = element.containingFile
                                 val vf = file?.virtualFile
-                                val path: String = vf?.path ?: "(unknown)"
+                                val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
                                 val line: Int = element.containingFile?.let { f ->
                                     val doc = PsiDocumentManager.getInstance(project).getDocument(f)
                                     doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
@@ -719,7 +721,7 @@ class SemanticNavigationToolset : McpToolset {
                         val element = ref.element
                         val file = element.containingFile
                         val vf = file?.virtualFile
-                        val path: String = vf?.path ?: "(unknown)"
+                        val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
                         val line: Int = element.containingFile?.let { f ->
                             val doc = PsiDocumentManager.getInstance(project).getDocument(f)
                             doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
@@ -754,7 +756,7 @@ class SemanticNavigationToolset : McpToolset {
                     val element = ref.element
                     val file = element.containingFile
                     val vf = file?.virtualFile
-                    val path: String = vf?.path ?: "(unknown)"
+                    val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
                     val line: Int = element.containingFile?.let { f ->
                         val doc = PsiDocumentManager.getInstance(project).getDocument(f)
                         doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0

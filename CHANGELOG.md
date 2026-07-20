@@ -2,7 +2,16 @@
 
 # MixinMCP Changelog
 
-## [Unreleased]
+## [1.2.1]
+- Now requires IntelliJ IDEA 2026.2 or later. 2026.1 is no longer supported.
+### Improved
+- In `mixin_call_hierarchy`, clarify when a non-method call is an initializer.  
+- For reference and hierarchy results, return project-root-relative paths instead of absolute.
+- A few optimizations related to VFS and coroutines
+### Fixed
+- Refactor tools now flush the pending VFS write to disk before returning, to accommodate for IntelliJ 2026.2 changes to VFS. 
+### Removed
+- `mixin_move_members` no longer supports `direction="down"` (push members into subclasses) due to API changes in IntelliJ 2026.2. Pull-up and move-to-class are unaffected.
 
 ## [1.2.0]
 

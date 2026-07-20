@@ -39,7 +39,9 @@ class ProjectManagementToolset : McpToolset {
 
         val externalPath: String = projectPath ?: basePath
 
-        // External System refresh must run on EDT; use invokeLater to avoid blocking
+        // External System refresh must run on EDT; use invokeLater to avoid blocking. No explicit VFS
+        // flush here: the async write completes in milliseconds, well within the delay before this
+        // START_IN_FOREGROUND_ASYNC import actually spawns Gradle and reads the build scripts off disk.
         ApplicationManager.getApplication().invokeLater {
             FileDocumentManager.getInstance().saveAllDocuments()
             val gradleId: ProjectSystemId = ProjectSystemId("GRADLE")

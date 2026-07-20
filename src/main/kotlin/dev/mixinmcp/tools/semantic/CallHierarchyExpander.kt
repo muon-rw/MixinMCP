@@ -4,9 +4,12 @@ import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.JavaRecursiveElementVisitor
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiClassInitializer
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiField
 import com.intellij.psi.PsiMethod
+import com.intellij.psi.PsiModifier
 import com.intellij.psi.PsiMethodCallExpression
 import com.intellij.psi.PsiMethodReferenceExpression
 import com.intellij.psi.PsiNewExpression
@@ -15,6 +18,7 @@ import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.MethodReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.util.Processor
+import dev.mixinmcp.tools.projectRelativePath
 import dev.mixinmcp.resolve.BytecodeAnalyzer
 import dev.mixinmcp.resolve.ClassFileLocator
 import dev.mixinmcp.resolve.FqcnResolver
@@ -22,6 +26,7 @@ import dev.mixinmcp.resolve.PsiDescriptors
 import org.jetbrains.uast.UCallExpression
 import org.jetbrains.uast.UCallableReferenceExpression
 import org.jetbrains.uast.UElement
+import org.jetbrains.uast.UField
 import org.jetbrains.uast.UMethod
 import org.jetbrains.uast.UastCallKind
 import org.jetbrains.uast.getUastParentOfType
@@ -95,6 +100,28 @@ internal object CallHierarchyExpander {
         return "$declClass#$name($params)"
     }
 
+    /**
+     * A call outside any method is nearly always a field initializer, which is how registry-style mod
+     * code is written, so naming the field is what makes the entry actionable.
+     */
+    private fun nonMethodContextOf(element: PsiElement): String {
+        val field: PsiField? = PsiTreeUtil.getParentOfType(element, PsiField::class.java)
+            ?: element.getUastParentOfType<UField>()?.javaPsi as? PsiField
+        if (field != null) {
+            val owner: String? = field.containingClass?.name
+            return if (owner != null) "field $owner.${field.name}" else "field ${field.name}"
+        }
+        val initializer: PsiClassInitializer? =
+            PsiTreeUtil.getParentOfType(element, PsiClassInitializer::class.java)
+        if (initializer != null) {
+            val kind: String =
+                if (initializer.hasModifierProperty(PsiModifier.STATIC)) "static initializer" else "initializer"
+            return "$kind in ${initializer.containingClass?.name ?: "(anonymous)"}"
+        }
+        val owner: String? = PsiTreeUtil.getParentOfType(element, PsiClass::class.java)?.name
+        return if (owner != null) "(non-method context in $owner)" else "(non-method context)"
+    }
+
     private fun lineOf(project: Project, element: PsiElement): Int {
         val file = element.containingFile ?: return 0
         val doc = PsiDocumentManager.getInstance(project).getDocument(file) ?: return 0
@@ -136,7 +163,8 @@ internal object CallHierarchyExpander {
             if (!budget.tryConsume()) return@Processor false
 
             val element: PsiElement = ref.element
-            val filePath: String = element.containingFile?.virtualFile?.path ?: "(unknown)"
+            val filePath: String = element.containingFile?.virtualFile
+                ?.let { projectRelativePath(project, it) } ?: "(unknown)"
             val line: Int = lineOf(project, element)
             val raw: String = element.text
             val snippet: String = raw.take(80).let { s -> if (raw.length > 80) "$s..." else s }
@@ -149,7 +177,7 @@ internal object CallHierarchyExpander {
                 ?: element.getUastParentOfType<UMethod>()?.javaPsi
             if (enclosing == null) {
                 out.append(indent)
-                    .append("[L").append(childLevel).append("] (non-method context)")
+                    .append("[L").append(childLevel).append("] ").append(nonMethodContextOf(element))
                     .append("  at ").append(filePath).append(":").append(line)
                     .append("  : ").append(snippet)
                     .appendLine()

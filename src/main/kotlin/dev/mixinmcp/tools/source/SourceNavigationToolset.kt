@@ -21,6 +21,9 @@ import com.intellij.psi.PsiMethod
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.ProjectScope
 import com.intellij.psi.search.PsiShortNamesCache
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import dev.mixinmcp.tools.projectRelativePath
 import dev.mixinmcp.cache.SourceAutoAttacher
 import dev.mixinmcp.resolve.ClassVariants
 import dev.mixinmcp.resolve.FqcnResolver
@@ -99,7 +102,7 @@ class SourceNavigationToolset : McpToolset {
                 val navigationFile: PsiFile? = psiClass.navigationElement.containingFile ?: psiClass.containingFile
                 navigationFile?.virtualFile?.let { vf ->
                     val sourceKind = classifySourceFile(project, vf)
-                    appendLine("Source: ${vf.path}")
+                    appendLine("Source: ${projectRelativePath(project, vf)}")
                     appendLine("SourceKind: $sourceKind")
                 }
                 appendLine()
@@ -868,7 +871,7 @@ class SourceNavigationToolset : McpToolset {
         }
 
         val content: String = try {
-            String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+            withContext(Dispatchers.IO) { String(vf.contentsToByteArray(), StandardCharsets.UTF_8) }
         } catch (e: Exception) {
             return McpToolCallResult.error("Failed to read file: ${e.message}")
         }

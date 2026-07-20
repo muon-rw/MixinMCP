@@ -46,6 +46,7 @@ import com.intellij.util.containers.MultiMap
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.MethodResolver
 import kotlin.coroutines.coroutineContext
+import dev.mixinmcp.tools.flushVfsToDisk
 import dev.mixinmcp.tools.requireProject
 
 /**
@@ -453,6 +454,7 @@ class SymbolRefactorToolset : McpToolset {
         if (error != null) {
             return McpToolCallResult.error("Delete failed: $error")
         }
+        flushVfsToDisk()
 
         return McpToolCallResult.text(buildString {
             appendLine("Deleted ${prep.elementKind} ${prep.displayName}")
@@ -633,6 +635,7 @@ class SymbolRefactorToolset : McpToolset {
         if (error != null) {
             return McpToolCallResult.error("Move failed: $error")
         }
+        flushVfsToDisk()
 
         return McpToolCallResult.text(buildString {
             appendLine("Moved ${prep.sourceFqn}")
@@ -1031,6 +1034,7 @@ class SymbolRefactorToolset : McpToolset {
                 append(RefactorSupport.formatConflicts(it))
             })
         }
+        flushVfsToDisk()
 
         return McpToolCallResult.text(buildString {
             appendLine("Renamed ${prep.elementKind} ${prep.displayName} to '$newName'")

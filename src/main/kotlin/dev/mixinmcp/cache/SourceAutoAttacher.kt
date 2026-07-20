@@ -16,10 +16,13 @@ import com.intellij.openapi.roots.libraries.LibraryTablesRegistrar
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VfsUtilCore
+import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Collections
@@ -68,7 +71,7 @@ class SourceAutoAttacher(
         if (project.isDisposed) return
         synchronized(this) {
             pendingAttach?.cancel()
-            pendingAttach = scope.launch {
+            pendingAttach = scope.launch(CoroutineName("SourceAutoAttacher.debouncedAttach")) {
                 delay(DEBOUNCE)
                 performAttach(reason)
             }
@@ -93,8 +96,11 @@ class SourceAutoAttacher(
             return
         }
 
-        val resolved = resolveSourceUrls(candidates)
-        val platformResolved = resolveIjPlatformOps(platformCandidates)
+        // Both probe the filesystem (Files.isRegularFile / Files.list); keep that blocking IO off the
+        // service scope's Dispatchers.Default pool thread.
+        val (resolved, platformResolved) = withContext(Dispatchers.IO) {
+            resolveSourceUrls(candidates) to resolveIjPlatformOps(platformCandidates)
+        }
         val operations: List<AttachOp> = resolved.operations + platformResolved.operations
         val attached = mutableListOf<String>()
         val warnings = (resolved.warnings + platformResolved.warnings).toMutableList()
@@ -152,12 +158,14 @@ class SourceAutoAttacher(
     private fun awaitPlatformSources(reason: String) {
         synchronized(this) {
             if (platformSourcesWatch?.isActive == true) return
-            platformSourcesWatch = scope.launch {
+            platformSourcesWatch = scope.launch(CoroutineName("SourceAutoAttacher.awaitPlatformSources")) {
                 for (wait in PLATFORM_SOURCES_RETRIES) {
                     delay(wait)
                     if (project.isDisposed) return@launch
-                    val ready: Boolean = readAction { collectIjPlatformCandidates(project) }
-                        ?.let { resolveIjPlatformOps(it).operations.isNotEmpty() } == true
+                    val candidates = readAction { collectIjPlatformCandidates(project) }
+                    // resolveIjPlatformOps probes the Gradle cache (Files.list / getLastModifiedTime).
+                    val ready: Boolean = candidates
+                        ?.let { withContext(Dispatchers.IO) { resolveIjPlatformOps(it) }.operations.isNotEmpty() } == true
                     if (ready) {
                         LOG.info("MixinMCP: platform sources appeared; re-running attach")
                         performAttach("$reason + platform sources download")

@@ -9,6 +9,8 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
 import com.intellij.openapi.vfs.LocalFileSystem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import dev.mixinmcp.settings.MixinMcpAppSettings
 import dev.mixinmcp.settings.MixinMcpSettings
 import java.io.IOException
@@ -27,23 +29,27 @@ class RuleInjectionStartupActivity : ProjectActivity {
         val basePath = project.basePath ?: return
         val projectRoot = Path.of(basePath)
 
-        if (!isMinecraftProject(projectRoot)) {
-            if (MixinMcpAppSettings.getInstance().injectToolsSkillIntoJvmProjects && isJvmProject(projectRoot)) {
-                injectToolsSkillOnly(projectRoot, project)
-            } else {
-                LOG.info("MixinMCP: project '${project.name}' is not a Minecraft mod project, skipping")
+        // The whole body is blocking filesystem IO (project-type probes, bundled-file copies) plus a git
+        // subprocess; keep it off the Default pool. Notifications and PropertiesComponent are thread-safe.
+        withContext(Dispatchers.IO) {
+            if (!isMinecraftProject(projectRoot)) {
+                if (MixinMcpAppSettings.getInstance().injectToolsSkillIntoJvmProjects && isJvmProject(projectRoot)) {
+                    injectToolsSkillOnly(projectRoot, project)
+                } else {
+                    LOG.info("MixinMCP: project '${project.name}' is not a Minecraft mod project, skipping")
+                }
+                return@withContext
             }
-            return
-        }
 
-        if (settings.autoInjectCursorRules) {
-            injectAssistantFiles(projectRoot, settings, project)
-        } else {
-            notifyStaleSkillsOnce(project, projectRoot)
-        }
+            if (settings.autoInjectCursorRules) {
+                injectAssistantFiles(projectRoot, settings, project)
+            } else {
+                notifyStaleSkillsOnce(project, projectRoot)
+            }
 
-        if (settings.warnMissingGradlePlugin && !hasGradlePlugin(projectRoot)) {
-            showGradlePluginWarning(project, settings)
+            if (settings.warnMissingGradlePlugin && !hasGradlePlugin(projectRoot)) {
+                showGradlePluginWarning(project, settings)
+            }
         }
     }
 

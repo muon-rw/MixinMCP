@@ -13,6 +13,7 @@ import com.intellij.psi.PsiClassType
 import com.intellij.psi.PsiLiteralExpression
 import com.intellij.psi.PsiType
 import com.intellij.util.concurrency.annotations.RequiresReadLock
+import dev.mixinmcp.tools.projectRelativePath
 import dev.mixinmcp.tools.source.collectAllSourceRoots
 import dev.mixinmcp.tools.source.getPathForMask
 import dev.mixinmcp.tools.source.isGradleToolchainMergedOrBinaryInBuild
@@ -169,12 +170,13 @@ internal fun findTargetingMixinsByRegex(
     val classPattern: Pattern = Pattern.compile("(?:class|interface)\\s+(\\S+)\\s+")
     for (root in collectAllSourceRoots(project)) {
         if (results.size >= maxResults) break
-        collectMixinRegexMatches(root, root, pattern, classPattern, results, maxResults)
+        collectMixinRegexMatches(project, root, root, pattern, classPattern, results, maxResults)
     }
     return results
 }
 
 private fun collectMixinRegexMatches(
+    project: Project,
     vf: VirtualFile,
     root: VirtualFile,
     pattern: Pattern,
@@ -186,7 +188,7 @@ private fun collectMixinRegexMatches(
     if (results.size >= maxResults) return
     if (vf.isDirectory) {
         for (child in vf.children) {
-            collectMixinRegexMatches(child, root, pattern, classPattern, results, maxResults)
+            collectMixinRegexMatches(project, child, root, pattern, classPattern, results, maxResults)
         }
     } else if (vf.name.endsWith(".java")) {
         val content: String = try {
@@ -204,7 +206,7 @@ private fun collectMixinRegexMatches(
             val path: String = getPathForMask(root, vf)
             val fqcn: String = path.removeSuffix(".java").replace("/", ".")
             if (results.none { it.first == fqcn }) {
-                results.add(fqcn to vf.path)
+                results.add(fqcn to projectRelativePath(project, vf))
             }
         }
     }

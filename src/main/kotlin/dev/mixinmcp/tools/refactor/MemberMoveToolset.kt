@@ -546,7 +546,7 @@ class MemberMoveToolset : McpToolset {
         // dialog, and JavaPushDownDelegate is uncallable because PushDownData's constructors are
         // package-private. Tracking: https://youtrack.jetbrains.com/issue/IJPL-201953
         const val PUSH_DOWN_UNAVAILABLE: String =
-            "direction='down' (push members into subclasses) is unavailable on IntelliJ 2026.2 and later: " +
+            "direction='down' (push members into subclasses) is unavailable on IntelliJ 2026.2: " +
                 "the platform's push-down engine is internal API with no headless replacement. Move the " +
                 "members by hand, or use direction='up' or 'toClass'."
     }

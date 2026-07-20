@@ -39,6 +39,8 @@ import com.intellij.util.concurrency.annotations.RequiresReadLock
 import com.intellij.util.containers.MultiMap
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.MethodResolver
+import dev.mixinmcp.tools.flushVfsToDisk
+import dev.mixinmcp.tools.projectRelativePath
 import java.io.File
 
 internal object RefactorSupport {
@@ -435,6 +437,8 @@ internal object RefactorSupport {
                 error = t.message ?: t.javaClass.simpleName
             }
         }
+        // The MCP caller reads the mutated file back off disk, so the async VFS write must land first.
+        if (error == null) flushVfsToDisk()
         return error
     }
 
@@ -548,14 +552,8 @@ internal object RefactorSupport {
         return "$owner#${method.name}($params)"
     }
 
-    fun projectRelative(project: Project, file: VirtualFile): String {
-        val basePath: String? = project.basePath
-        val absolute: String = file.path
-        if (basePath != null && absolute.startsWith("$basePath/")) {
-            return absolute.removePrefix("$basePath/")
-        }
-        return absolute
-    }
+    fun projectRelative(project: Project, file: VirtualFile): String =
+        projectRelativePath(project, file)
 
     private fun findVirtualFile(project: Project, filePath: String): VirtualFile? {
         val normalized: String = filePath.replace('\\', '/')

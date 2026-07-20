@@ -38,6 +38,15 @@ configurations.runtimeClasspath {
     exclude(group = "org.jetbrains", module = "annotations")
 }
 
+// Same reasoning for tests, and here it is load-bearing rather than tidiness: fixture tests run under
+// the platform's coroutines debug javaagent, and our own stdlib's debug metadata is a version ahead of
+// what that agent accepts ("Debug metadata version mismatch. Expected: 1, got 2"), which kills the
+// fixture during plugin-descriptor loading.
+configurations.testRuntimeClasspath {
+    exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib")
+    exclude(group = "org.jetbrains", module = "annotations")
+}
+
 // Dependencies are managed with Gradle version catalog - read more: https://docs.gradle.org/current/userguide/version_catalogs.html
 dependencies {
     // ASM for bytecode analysis (IntelliJ bundles ASM but we need explicit access to asm-util for Textifier)
@@ -67,6 +76,9 @@ dependencies {
         bundledModules(providers.gradleProperty("platformBundledModules").map { it.split(',') })
 
         testFramework(TestFrameworkType.Platform)
+        // Java PSI fixtures: extractMethod.newImpl carries no @ApiStatus annotation, so the plugin
+        // verifier cannot see it drift. Only running it against real PSI catches a behaviour change.
+        testFramework(TestFrameworkType.Plugin.Java)
     }
 }
 
