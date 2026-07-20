@@ -9,9 +9,9 @@ description: >
   bytecode tools that beat text search on accuracy and context cost. Use for
   class/method/field lookup, finding usages/implementations/overrides, inheritance
   and call graphs, reading dependency source, bytecode inspection, and
-  reference-aware refactors (rename, extract, inline, change-signature, move). On
-  Minecraft projects also use for mixin work: @At(target) owners, synthetic/lambda
-  names, mapping-namespace conversion, and cross-mod conflicts.
+  reference-aware refactors (rename, safe-delete, extract, inline, change-signature,
+  move). On Minecraft projects also use for mixin work: @At(target) owners,
+  synthetic/lambda names, mapping-namespace conversion, and cross-mod conflicts.
 ---
 
 # MixinMCP Tools
@@ -52,6 +52,8 @@ guessing.
 | Bytecode of a class or method | `mixin_class_bytecode` / `mixin_method_bytecode` |
 | Pin a lookup to one module's classpath | `module=` (e.g. `common.main`) on `mixin_find_class`, `mixin_get_dep_source`, bytecode tools |
 | Rename / delete / move / change-sig / extract / inline / move-members | see **Refactoring** |
+| Re-sync Gradle/Maven after build-file or dependency changes | `mixin_sync_project` |
+| Make on-disk edits by external tools visible to the IDE | `mixin_refresh_vfs` |
 | Diagnose missing or empty source roots | `mixin_list_source_roots` |
 | **Minecraft:** synthetic/lambda names, `@At(target)` owner | `mixin_class_bytecode(filter="synthetic")`, `mixin_method_bytecode` |
 | **Minecraft:** cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins` |
@@ -92,7 +94,7 @@ Only what isn't obvious from the tool descriptions.
 - Methods/Fields list only members declared **directly** on the class. Utility classes often hide their real API in **nested classes** (e.g. `Tags.Blocks`, `Tags.Items`), so the outer class looks empty; always read the Nested classes section, which gives ready-to-paste follow-up calls. Inherited members show `(inherited from X)` — follow up on `X` or via `mixin_super_methods`.
 
 **Usages, hierarchy, call graph**
-- Disambiguate overloaded methods (for `mixin_find_references` / `_call_hierarchy` / `_super_methods` / `_find_overrides` / `_rename`) with `parameterTypes=["Entity","DamageSource"]` or `methodDescriptor="(L…;)Z"` (parameterless: `parameterTypes=[]`). On failure the error lists overloads with ready-to-copy values.
+- Disambiguate overloaded methods (for `mixin_find_references` / `_call_hierarchy` / `_super_methods` / `_find_overrides` / `_rename` / `_safe_delete` / `_change_signature` / `_inline`) with `parameterTypes=["Entity","DamageSource"]` or `methodDescriptor="(L…;)Z"` (parameterless: `parameterTypes=[]`). On failure the error lists overloads with ready-to-copy values.
 - `mixin_find_references` returns runtime call sites plus string refs in annotations. `mixin_call_hierarchy` output is `owner#name(descriptor)` (paste-ready for `@At`), tags `[lambda]`/`[ctor]`/`[cycle]`, resolves lambdas through the INVOKEDYNAMIC handle, and walks Java/Kotlin/Groovy/Scala via UAST; `maxResults` is a global budget, so raise it for wide graphs or start at `maxDepth=1`.
 - `mixin_super_methods` marks `[root declaration]` entries — usually the best mixin target; `mixin_find_overrides` is its downward mirror. `mixin_type_hierarchy`: check both **Direct** and **Inherited** interface sections (inherited tagged `(from X)`/`(via X)`) before concluding a class doesn't implement something; `direction="supers"` skips the subtype list.
 
@@ -122,17 +124,18 @@ and leaves the rest dangling. Shared contract: `dryRun=true` reports the resolve
 per-file usage counts, and conflicts without changing anything; conflicts are listed one
 per line tagged `[library]`/`[source]` (`[library]` usually means a stale build-output
 jar, not a real clash); `ignoreConflicts=true` proceeds anyway, the headless equivalent
-of the IDE's "Continue". The signature/extract/introduce/inline/move-members tools are
-Java-source only. Read each tool's description for parameters; below is only what isn't
-obvious there.
+of the IDE's "Continue". Exceptions: `mixin_safe_delete` takes `force=true` instead, and
+`mixin_move_file` takes neither flag (all its checks run up front; there is no preview).
+The signature/extract/introduce/inline/move-members tools are Java-source only. Read
+each tool's description for parameters; below is only what isn't obvious there.
 
 - `mixin_rename` — class/method/field, plus `memberKind="parameter"`/`"local"` (with `variableName` naming the variable inside the method). Unlike the built-in `rename_refactoring`, it reports conflicts instead of silently discarding them.
-- `mixin_safe_delete` — usage-checked across project and dependencies; handles Kotlin (a Kotlin class delete removes the declaration but leaves the file).
+- `mixin_safe_delete` — usage-checked across project and dependencies; overrides count as blocking usages tagged `[override]`; handles Kotlin (a Kotlin class delete removes the declaration but leaves the file).
 - `mixin_move_file` — moves a class to a new package, updating the package declaration and every reference (including mixin config JSON).
 - `mixin_change_signature` — `parametersJson` is a JSON-array string: `{"oldIndex":N}` keeps a parameter, `{"oldIndex":-1,"name":…,"type":…,"defaultValue":…}` adds one (inserted at every call site), omitted parameters are removed.
 - `mixin_extract_method` / `mixin_introduce_variable` — address a `filePath` plus `startLine..endLine` range, taken as whole lines; `expression=<its source text>` targets a sub-expression within it, `occurrenceIndex` picks among repeats. A non-matching `expression` lists the selectable expressions with their positions, so let a miss tell you the exact text instead of guessing.
 - `mixin_inline` — `kind="method"|"field"|"local"`; refuses recursive methods, enum constants, and non-final fields with write usages.
-- `mixin_move_members` — `direction="up"|"down"|"toClass"`; `members` are `name` or `name#descriptor`. Moving members *into* a `@Mixin` class flags external references to them as blocking `[mixin]` conflicts, since mixin members can't be referenced from ordinary classes at runtime.
+- `mixin_move_members` — `direction="up"|"toClass"`; `members` are `name` or `name#descriptor`. Moving members *into* a `@Mixin` class flags external references to them as blocking `[mixin]` conflicts, since mixin members can't be referenced from ordinary classes at runtime. `direction="down"` is refused: the platform sealed its push-down engine and exposes no headless replacement.
 
 ## Mixin workflow
 
