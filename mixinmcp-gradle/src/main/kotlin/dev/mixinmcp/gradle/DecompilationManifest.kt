@@ -34,17 +34,21 @@ class DecompilationManifest(
     }
 
     /**
-     * Save manifest to cacheRoot/manifest.json.
+     * Save manifest to cacheRoot/manifest.json. [pluginVersion] lets the IDE warn when
+     * the applied Gradle plugin is older than the IDE plugin requires.
      */
-    fun save(cacheRoot: Path) {
+    fun save(cacheRoot: Path, pluginVersion: String? = null) {
         Files.createDirectories(cacheRoot)
         val manifestPath = cacheRoot.resolve(MANIFEST_FILE)
-        val wrapper = ManifestJson(entries)
+        val wrapper = ManifestJson(entries, pluginVersion)
         val content = gson.toJson(wrapper)
         Files.writeString(manifestPath, content)
     }
 
-    private data class ManifestJson(val entries: Map<String, CacheEntry> = emptyMap())
+    private data class ManifestJson(
+        val entries: Map<String, CacheEntry> = emptyMap(),
+        val pluginVersion: String? = null,
+    )
 
     companion object {
         private const val MANIFEST_FILE = "manifest.json"

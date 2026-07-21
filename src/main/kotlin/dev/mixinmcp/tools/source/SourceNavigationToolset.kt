@@ -47,7 +47,7 @@ class SourceNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Loom toolchain artifact (binary under .gradle/loom-cache; genSources provides real sources), Project source (hand-written project code), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures, all fields with types, and any nested classes/interfaces/enums/records (with FQCN follow-up calls suggested). For utility classes that organise constants in nested classes (e.g. net.minecraftforge.common.Tags) the Methods/Fields sections may look empty even though the API lives in nested classes — always check the Nested classes section before concluding a class is empty. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration. module: pins ALL resolution to one module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); unknown names list available modules. Without module, when multiple classpath copies of the class differ, a Variants block (bytecode-structural diff per jar) is appended; with module it is suppressed and the pinned module is noted in the header. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
+    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Loom toolchain artifact (binary under .gradle/loom-cache; genSources provides real sources), Project source (hand-written project code), Buildscript classpath (Gradle plugin or other buildscript dependency), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures, all fields with types, and any nested classes/interfaces/enums/records (with FQCN follow-up calls suggested). For utility classes that organise constants in nested classes (e.g. net.minecraftforge.common.Tags) the Methods/Fields sections may look empty even though the API lives in nested classes — always check the Nested classes section before concluding a class is empty. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration. module: pins ALL resolution to one module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); unknown names list available modules. Without module, when multiple classpath copies of the class differ, a Variants block (bytecode-structural diff per jar) is appended; with module it is suppressed and the pinned module is noted in the header. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
@@ -70,7 +70,7 @@ class SourceNavigationToolset : McpToolset {
                     is ModuleScopeResult.Error -> return@smartReadAction McpToolCallResult.error(r.message)
                 }
             }
-            val scope: GlobalSearchScope = pinned?.scope ?: GlobalSearchScope.allScope(project)
+            val scope: GlobalSearchScope = pinned?.scope ?: GlobalSearchScope.everythingScope(project)
             val pinnedModule: String? = pinned?.module?.name
 
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className, scope)
@@ -458,7 +458,7 @@ class SourceNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar) and MixinMCP decompiled cache. Detects MDG merged JARs under build/moddev/; MixinMCP auto-attaches them as Library SOURCES after Gradle sync so vanilla/Forge/NeoForge .java files are usually searchable. Loom toolchains (Fabric Loom, Architectury Loom, neo-loom) instead get sources from their genSources jar or the decompiled cache; no MDG section appears for them. Diagnoses vanilla (net/minecraft/*), Forge game API (net/minecraftforge/event/*), and NeoForge game API (net/neoforged/neoforge/event/*) plus last auto-attach run. Default output is condensed: Minecraft/game roots, roots with warnings, and decompiled-cache roots show full URL plus sample file paths; other library sources roots collapse to a grouped jar-name list. verbose: true restores full per-root URL and sample paths for every root. maxSamplesPerRoot: 5 default.")
+    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar, JDK src.zip, other plugins' synthetic library sources) and MixinMCP decompiled cache. Detects MDG merged JARs under build/moddev/; MixinMCP auto-attaches them as Library SOURCES after Gradle sync so vanilla/Forge/NeoForge .java files are usually searchable. Loom toolchains (Fabric Loom, Architectury Loom, neo-loom) instead get sources from their genSources jar or the decompiled cache; no MDG section appears for them. Diagnoses vanilla (net/minecraft/*), Forge game API (net/minecraftforge/event/*), and NeoForge game API (net/neoforged/neoforge/event/*) plus last auto-attach run. Default output is condensed: Minecraft/game roots, roots with warnings, and decompiled-cache roots show full URL plus sample file paths; other library sources roots collapse to a grouped jar-name list. A Buildscript classpath section lists Gradle plugin / buildSrc / Gradle API sources roots (searched last by mixin_search_in_deps, or alone via roots=buildscript); an empty section usually means the indexBuildscriptClasspath setting is off or the project has not synced, not a failure. verbose: true restores full per-root URL and sample paths for every root. maxSamplesPerRoot: 5 default.")
     @Suppress("unused")
     suspend fun mixin_list_source_roots(
         maxSamplesPerRoot: Int = 5,
@@ -489,6 +489,7 @@ class SourceNavigationToolset : McpToolset {
 
                 val libRoots = roots.filter { it.typeLabel.startsWith("Library SOURCES") }
                 val cacheRoots = roots.filter { it.typeLabel == "Decompiled cache (MixinMCP)" }
+                val buildscriptRoots = roots.filter { it.typeLabel.startsWith(BUILDSCRIPT_LABEL_PREFIX) }
 
                 val mergedJars = detectMergedJars(project)
                 val hasVanillaInLibSources = libRoots.any { info: SourceRootInfo ->
@@ -643,6 +644,30 @@ class SourceNavigationToolset : McpToolset {
                 for ((i, info: SourceRootInfo) in cacheRoots.withIndex()) {
                     appendRootDetail(i + 1, info, "  (empty — dependency may not have classes or decompilation pending)")
                 }
+                if (cacheRoots.isEmpty()) {
+                    appendLine("  (none: dependencies without published sources are not searchable; apply the")
+                    appendLine("   dev.mixinmcp.decompile Gradle plugin and run ./gradlew genDependencySources)")
+                    appendLine()
+                }
+
+                appendLine("=== Buildscript classpath source roots (${buildscriptRoots.size}) ===")
+                appendLine("  (Gradle plugins, buildSrc, Gradle API; searched last by mixin_search_in_deps, or alone via roots=buildscript)")
+                val buildscriptNames: List<String> = buildscriptRoots
+                    .groupingBy { sourceRootDisplayName(it.root) }
+                    .eachCount()
+                    .entries
+                    .sortedBy { it.key.lowercase() }
+                    .map { (n, c) -> if (c > 1) "$n (x$c)" else n }
+                for (chunk: List<String> in buildscriptNames.take(50).chunked(3)) {
+                    appendLine("  ${chunk.joinToString(", ")}")
+                }
+                if (buildscriptNames.size > 50) {
+                    appendLine("  and ${buildscriptNames.size - 50} more")
+                }
+                if (buildscriptRoots.isEmpty()) {
+                    appendLine("  (none: Gradle plugin absent, indexing setting off, or project not yet synced)")
+                }
+                appendLine()
 
                 if (roots.isEmpty()) {
                     appendLine("No source roots found. Add dependencies and run ./gradlew genDependencySources for compiled-only jars.")
@@ -655,7 +680,7 @@ class SourceNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync — try this tool first for vanilla/Forge/NeoForge; on Loom toolchains vanilla comes from the genSources jar or the decompiled cache; empty results append hints (check mixin_list_source_roots auto-attach section). roots: all (default) — search Gradle library -sources.jar then MixinMCP cache; when all, cache files are skipped if the same path already matched in library sources (no duplicate FML/vanilla hits). library — only published -sources.jar roots. decompiled — only MixinMCP decompiled cache. timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default. contextLines: include N lines of context around each match (default 0). Use small values (3–10) to capture short method bodies inline so you don't need a follow-up mixin_get_dep_source call; max 200. Match lines are prefixed with `>`, context lines with two spaces; overlapping windows are merged per file. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
+    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath, including JDK src.zip (project SDK) and synthetic library sources contributed by other plugins. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync — try this tool first for vanilla/Forge/NeoForge; on Loom toolchains vanilla comes from the genSources jar or the decompiled cache; empty results append hints (check mixin_list_source_roots auto-attach section). roots: all (default) — search Gradle library -sources.jar, then MixinMCP cache, then buildscript classpath last; later tiers skip paths already matched (no duplicate hits). library — only published -sources.jar roots (incl. JDK src.zip). decompiled — only MixinMCP decompiled cache. buildscript — only Gradle buildscript classpath sources (Loom, ModDevGradle, mod-publish-plugin and other build plugins). timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default. contextLines: include N lines of context around each match (default 0). Use small values (3–10) to capture short method bodies inline so you don't need a follow-up mixin_get_dep_source call; max 200. Match lines are prefixed with `>`, context lines with two spaces; overlapping windows are merged per file. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
@@ -699,9 +724,9 @@ class SourceNavigationToolset : McpToolset {
         }
 
         val rootsMode: String = roots.trim().lowercase()
-        if (rootsMode !in setOf("all", "library", "decompiled")) {
+        if (rootsMode !in setOf("all", "library", "decompiled", "buildscript")) {
             return McpToolCallResult.error(
-                "Invalid roots: \"$roots\". Use all, library, or decompiled.",
+                "Invalid roots: \"$roots\". Use all, library, decompiled, or buildscript.",
             )
         }
 
@@ -724,6 +749,8 @@ class SourceNavigationToolset : McpToolset {
                 allRoots.filter { it.typeLabel.startsWith("Library SOURCES") }
             val cacheRoots: List<SourceRootInfo> =
                 allRoots.filter { it.typeLabel == "Decompiled cache (MixinMCP)" }
+            val buildscriptRoots: List<SourceRootInfo> =
+                allRoots.filter { it.typeLabel.startsWith(BUILDSCRIPT_LABEL_PREFIX) }
 
             fun scanRoots(rootsToScan: List<SourceRootInfo>, skipPath: (String) -> Boolean) {
                 for (info in rootsToScan) {
@@ -752,11 +779,18 @@ class SourceNavigationToolset : McpToolset {
             when (rootsMode) {
                 "library" -> scanRoots(libraryRoots, skipPath = { false })
                 "decompiled" -> scanRoots(cacheRoots, skipPath = { false })
+                "buildscript" -> scanRoots(buildscriptRoots, skipPath = { false })
                 else -> {
                     scanRoots(libraryRoots, skipPath = { false })
                     val pathsHitInLibrary: Set<String> = hits.map { it.filePath }.toSet()
                     if (hits.size < maxResults && !timedOut) {
                         scanRoots(cacheRoots, skipPath = { it in pathsHitInLibrary })
+                    }
+                    // Buildscript roots scan last: game and mod classpath hits stay first
+                    // and duplicate paths already found are not repeated.
+                    val pathsHit: Set<String> = hits.map { it.filePath }.toSet()
+                    if (hits.size < maxResults && !timedOut) {
+                        scanRoots(buildscriptRoots, skipPath = { it in pathsHit })
                     }
                 }
             }
@@ -764,11 +798,20 @@ class SourceNavigationToolset : McpToolset {
 
             val noMatchHints: List<String> =
                 if (hits.isEmpty() && !timedOut) {
-                    buildNoMatchHintsForDepSearch(
+                    val base: List<String> = buildNoMatchHintsForDepSearch(
                         project,
                         normalizedPathPrefix,
                         sawAnyFileUnderPathPrefix = pathPrefixFilesSeen?.get(0) == true,
                     )
+                    if (rootsMode == "buildscript" && buildscriptRoots.isEmpty()) {
+                        base + ("No buildscript classpath roots are available. Possible causes: buildscript " +
+                            "indexing is disabled in Settings | Tools | MixinMCP, the IDE's Gradle support is " +
+                            "disabled, or the project has not synced. Build plugins without published sources " +
+                            "also need the MixinMCP Gradle plugin: apply dev.mixinmcp.decompile and run " +
+                            "./gradlew genDependencySources.")
+                    } else {
+                        base
+                    }
                 } else {
                     emptyList()
                 }
@@ -861,7 +904,7 @@ class SourceNavigationToolset : McpToolset {
                 } else {
                     val pinHint: String = pinned?.let {
                         " Module pin '${it.module.name}' restricts the lookup to that module's classpath; drop module= to search all roots." +
-                            " Module pinning always excludes decompiled-cache roots (synthetic roots with no module order entries), so drop module= for cache-resolved paths."
+                            " Module pinning always excludes decompiled-cache and buildscript-classpath roots (synthetic roots with no module order entries), so drop module= for those paths."
                     } ?: ""
                     "Path not found in dependency sources. " +
                         "Use mixin_search_in_deps to find the file, then pass its `url` to this tool.$pinHint"

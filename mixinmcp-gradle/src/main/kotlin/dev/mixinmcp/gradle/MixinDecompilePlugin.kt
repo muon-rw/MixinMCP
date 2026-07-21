@@ -48,6 +48,21 @@ class MixinDecompilePlugin : Plugin<Project> {
                     findPublishedSourcesJars(project, configs)
                 }
             }
+
+            // Walk parents too: a subproject applying a plugin declared at the root
+            // (plugins { id ... } with the version in the root's block) has an empty own
+            // buildscript classpath; the jars live on an ancestor's configuration.
+            val buildscriptConfigs = generateSequence(project) { it.parent }
+                .mapNotNull { p -> p.buildscript.configurations.findByName("classpath") }
+                .toList()
+            if (buildscriptConfigs.isNotEmpty()) {
+                it.buildscriptArtifactCollections = buildscriptConfigs.map { config ->
+                    config.incoming.artifactView { view -> view.lenient(true) }.artifacts
+                }
+                it.buildscriptPublishedSourcesJarsProvider = project.provider {
+                    findPublishedSourcesJars(project, buildscriptConfigs)
+                }
+            }
         }
 
         project.tasks.register("cleanSourcesCache", CleanCacheTask::class.java) {

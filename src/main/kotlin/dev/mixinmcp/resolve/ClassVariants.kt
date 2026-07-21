@@ -10,6 +10,7 @@ import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiClass
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.util.concurrency.annotations.RequiresReadLock
+import dev.mixinmcp.tools.source.isBuildscriptClasspathFile
 import dev.mixinmcp.tools.source.isGradleToolchainMergedOrBinaryInBuild
 import dev.mixinmcp.tools.source.isLoomCacheArtifactPath
 import java.util.zip.CRC32
@@ -274,7 +275,7 @@ object ClassVariants {
         val topFqcn: String = top.qualifiedName ?: return listOf(defaultClass)
 
         val tops: Array<PsiClass> = JavaPsiFacade.getInstance(project)
-            .findClasses(topFqcn, GlobalSearchScope.allScope(project))
+            .findClasses(topFqcn, GlobalSearchScope.everythingScope(project))
         val variants = mutableListOf<PsiClass>()
         for (topVariant in tops) {
             ProgressManager.checkCanceled()
@@ -345,10 +346,12 @@ object ClassVariants {
 
     private fun ownerModules(project: Project, vf: VirtualFile?): List<String> {
         if (vf == null) return emptyList()
-        return ProjectFileIndex.getInstance(project)
+        val fromIndex: List<String> = ProjectFileIndex.getInstance(project)
             .getOrderEntriesForFile(vf)
             .map { it.ownerModule.name }
             .distinct()
             .sorted()
+        if (fromIndex.isNotEmpty()) return fromIndex
+        return if (isBuildscriptClasspathFile(project, vf)) listOf("(buildscript classpath)") else emptyList()
     }
 }

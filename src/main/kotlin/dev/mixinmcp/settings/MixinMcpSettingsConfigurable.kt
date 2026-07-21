@@ -27,8 +27,22 @@ class MixinMcpSettingsConfigurable(private val project: Project) : BoundConfigur
         }
         group("Gradle Plugin") {
             row {
-                checkBox("Warn when MixinMCP Gradle plugin is not detected")
+                checkBox("Warn when the MixinMCP Gradle plugin is missing or outdated")
                     .bindSelected(settings::warnMissingGradlePlugin)
+            }
+        }
+        group("Buildscript Classpath") {
+            row {
+                checkBox("Index the Gradle buildscript classpath (plugins, buildSrc, Gradle API)")
+                    .bindSelected(settings::indexBuildscriptClasspath)
+            }
+            row {
+                comment(
+                    "Makes Gradle plugin classes (Loom, ModDevGradle, etc.) searchable by every MixinMCP " +
+                        "tool and visible in goto-class. Costs a one-time index of roughly one extra " +
+                        "Minecraft jar. When off, exact-FQCN lookup still works through a non-indexed " +
+                        "fallback; broad search and text grep do not cover buildscript classes.",
+                )
             }
         }
         group("Non-Minecraft JVM Projects") {

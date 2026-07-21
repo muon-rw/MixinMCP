@@ -52,7 +52,7 @@ private fun locateScoped(project: Project, className: String, module: String?): 
             is ModuleScopeResult.Error -> return ScopedLocate.Failure(resolved.message)
         }
     } else {
-        scope = GlobalSearchScope.allScope(project)
+        scope = GlobalSearchScope.everythingScope(project)
         pinnedModule = null
     }
     return when (val result = ClassFileLocator.locateDetailed(project, className, scope)) {

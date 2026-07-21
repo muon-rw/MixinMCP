@@ -11,6 +11,9 @@ import com.intellij.openapi.startup.ProjectActivity
 import com.intellij.openapi.vfs.LocalFileSystem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import dev.mixinmcp.cache.DecompilationCacheService
+import dev.mixinmcp.cache.compareGradlePluginVersions
+import dev.mixinmcp.cache.isGradlePluginVersionAtLeast
 import dev.mixinmcp.settings.MixinMcpAppSettings
 import dev.mixinmcp.settings.MixinMcpSettings
 import java.io.IOException
@@ -47,8 +50,18 @@ class RuleInjectionStartupActivity : ProjectActivity {
                 notifyStaleSkillsOnce(project, projectRoot)
             }
 
-            if (settings.warnMissingGradlePlugin && !hasGradlePlugin(projectRoot)) {
-                showGradlePluginWarning(project, settings)
+            if (settings.warnMissingGradlePlugin) {
+                if (!hasGradlePlugin(projectRoot)) {
+                    showGradlePluginWarning(project, settings)
+                } else {
+                    val installed: String? = listOfNotNull(
+                        DecompilationCacheService.getInstance(project).installedGradlePluginVersion(),
+                        declaredGradlePluginVersion(projectRoot),
+                    ).maxWithOrNull(::compareGradlePluginVersions)
+                    if (!isGradlePluginVersionAtLeast(installed, DecompilationCacheService.REQUIRED_GRADLE_PLUGIN_VERSION)) {
+                        showGradlePluginOutdatedWarning(project, settings, installed)
+                    }
+                }
             }
         }
     }
@@ -206,6 +219,33 @@ class RuleInjectionStartupActivity : ProjectActivity {
                     "Add <code>id(\"dev.mixinmcp.decompile\")</code> to your build.gradle.kts plugins block " +
                     "and run <code>./gradlew genDependencySources</code>. " +
                     "<a href=\"https://github.com/muon-rw/MixinMCP#decompilation-cache\">Setup guide</a>",
+                NotificationType.WARNING,
+            )
+            .addAction(object : com.intellij.notification.NotificationAction("Don't warn again") {
+                override fun actionPerformed(
+                    e: com.intellij.openapi.actionSystem.AnActionEvent,
+                    notification: com.intellij.notification.Notification,
+                ) {
+                    settings.warnMissingGradlePlugin = false
+                    notification.expire()
+                }
+            })
+            .notify(project)
+    }
+
+    private fun showGradlePluginOutdatedWarning(project: Project, settings: MixinMcpSettings, installed: String?) {
+        val required: String = DecompilationCacheService.REQUIRED_GRADLE_PLUGIN_VERSION
+        val props = PropertiesComponent.getInstance(project)
+        val comboKey = "${installed ?: "unknown"}<$required"
+        if (props.getValue(OUTDATED_GRADLE_PLUGIN_NOTIFIED_KEY) == comboKey) return
+        props.setValue(OUTDATED_GRADLE_PLUGIN_NOTIFIED_KEY, comboKey)
+        NotificationGroupManager.getInstance()
+            .getNotificationGroup("MixinMCP")
+            .createNotification(
+                "MixinMCP",
+                "The MixinMCP Gradle plugin is outdated (detected ${installed ?: "a pre-$required version"}); " +
+                    "$required or newer is needed for full dependency coverage. Bump the " +
+                    "<code>dev.mixinmcp.decompile</code> version and run <code>./gradlew genDependencySources</code>.",
                 NotificationType.WARNING,
             )
             .addAction(object : com.intellij.notification.NotificationAction("Don't warn again") {
@@ -547,6 +587,7 @@ class RuleInjectionStartupActivity : ProjectActivity {
         private const val STAMP_PREFIX = "<!-- mixinmcp-skill-version:"
         private const val STAMP_SUFFIX = "-->"
         private const val STALE_SKILL_NOTIFIED_KEY = "mixinmcp.staleSkillNotifiedVersion"
+        private const val OUTDATED_GRADLE_PLUGIN_NOTIFIED_KEY = "mixinmcp.outdatedGradlePluginNotified"
         private const val TOOLS_SKILL_NOTIFIED_KEY = "mixinmcp.toolsSkillNotified"
         private const val MANIFEST_KEY = "mixinmcp.injectedFileManifest"
     }
@@ -580,6 +621,29 @@ internal fun hasGradlePlugin(root: Path): Boolean {
     return buildFileContainsPlugin(root.resolve("build.gradle")) ||
         buildFileContainsPlugin(root.resolve("build.gradle.kts"))
 }
+
+/**
+ * Version declared next to the plugin id in a root build file. Catches a just-bumped
+ * version before any sync has stamped a manifest; misses version-catalog declarations,
+ * which the manifest stamp covers after the next genDependencySources run.
+ */
+internal fun declaredGradlePluginVersion(root: Path): String? {
+    for (name in listOf("build.gradle", "build.gradle.kts")) {
+        val file = root.resolve(name)
+        if (!Files.exists(file)) continue
+        val version: String? = try {
+            parseDeclaredDecompileVersion(Files.readString(file))
+        } catch (_: IOException) {
+            null
+        }
+        if (version != null) return version
+    }
+    return null
+}
+
+internal fun parseDeclaredDecompileVersion(buildFileContent: String): String? =
+    Regex("""dev\.mixinmcp\.decompile['"]\s*\)?\s*version\s*\(?\s*['"]([^'"]+)['"]""")
+        .find(buildFileContent)?.groupValues?.get(1)
 
 internal fun isJvmProject(root: Path): Boolean =
     Files.exists(root.resolve("build.gradle")) ||

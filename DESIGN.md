@@ -1030,6 +1030,41 @@ Tool descriptions guide LLMs toward targeted queries.
 
 ---
 
-## 16. License
+## 16. Buildscript Classpath Coverage
+
+All search tools cover the Gradle buildscript classpath (plugins applied via `plugins {}` or
+`buildscript {}`, their transitives, buildSrc runtime, Gradle distribution) on both script DSLs.
+Everything Gradle-API-touching lives in `dev.mixinmcp.buildscript`, registered only through
+`META-INF/mixinmcp-buildscript.xml` behind an optional plugin dependency on
+`org.jetbrains.plugins.gradle`; always-loaded code reaches it exclusively through the base-module
+`LabeledSyntheticRootsProvider` interface on the EP-registered provider. A bytecode-scan test
+(`OptionalGradleModuleIsolationTest`) enforces that isolation.
+
+`BuildscriptClasspathRoots` enumerates roots from `GradleBuildClasspathManager`, keyed per linked
+build via `ExternalSystemApiUtil` module paths. Two non-obvious platform constraints shape it:
+`getModuleClasspathEntries` never triggers the classpath map's lazy initial load (only
+`getAllClasspathEntries()` does; without priming, the startup scan sees an empty provider and never
+rescans), and `AdditionalLibraryRootsProvider` binary roots are stub-indexed only when contributed
+as `JavaSyntheticLibrary` (plain `SyntheticLibrary` binary roots are watched but never indexed).
+Kotlin-DSL builds are excluded from indexing (the K2 Kotlin plugin already indexes their script
+classpath through the workspace file index) but still feed text search via `textSearchOnlyRoots`.
+FQCN resolution defaults to `everythingScope` so `GradleClassFinder` resolves buildscript classes
+even with indexing opted out; index-backed searches keep `allScope` since unindexed content has no
+stub entries under any scope.
+
+Sources resolve in three tiers: sources jars already in the flat classpath (paired by name within
+a module-cache version dir), per-dependency paths from `BuildScriptClasspathData` DataNodes, then
+a sibling `-sources.jar` probe in the Gradle module cache. Build plugins without sources anywhere
+are decompiled by the Gradle plugin (1.3.0+), which resolves `buildscript.configurations.classpath`
+of the applying project and its ancestors and tags manifest entries `classpathKind=buildscript`;
+the roots provider dedups those cache mirrors against live sources jars, and the indexing opt-out
+setting governs them. Each manifest also stamps the writing plugin's version; the IDE compares the
+newest stamp (or the version declared in root build files) against
+`DecompilationCacheService.REQUIRED_GRADLE_PLUGIN_VERSION` and warns when outdated.
+
+Out of scope by design: annotationProcessor paths, Maven build plugins, Groovy settings-only
+plugins, and text search over the Gradle API (the `-bin` distribution ships no sources).
+
+## 17. License
 
 GPL-3.0 (see `LICENSE`).

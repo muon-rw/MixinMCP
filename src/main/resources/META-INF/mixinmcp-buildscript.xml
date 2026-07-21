@@ -1,0 +1,10 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <additionalLibraryRootsProvider
+            implementation="dev.mixinmcp.buildscript.BuildscriptClasspathRootsProvider"/>
+        <externalSystemTaskNotificationListener
+            implementation="dev.mixinmcp.buildscript.BuildscriptClasspathSyncListener"/>
+        <postStartupActivity
+            implementation="dev.mixinmcp.buildscript.BuildscriptClasspathStartupActivity"/>
+    </extensions>
+</idea-plugin>

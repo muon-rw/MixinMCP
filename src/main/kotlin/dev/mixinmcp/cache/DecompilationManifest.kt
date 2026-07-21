@@ -18,6 +18,8 @@ import java.security.MessageDigest
 @Serializable
 data class DecompilationManifest(
     val entries: Map<String, CacheEntry> = emptyMap(),
+    /** Version of the Gradle plugin that wrote this manifest; absent before 1.3.0. */
+    val pluginVersion: String? = null,
 ) {
     /**
      * Load manifest from cacheRoot/manifest.json.
@@ -87,6 +89,8 @@ data class DecompilationManifest(
  * @param cachePath Absolute path to the decompiled output directory
  * @param decompilerVersion Decompiler version (e.g. "vineflower-1.11.2") or "published-sources"
  * @param createdAt Timestamp when this entry was created
+ * @param classpathKind "compile" or "buildscript"; kotlinx.serialization applies the default
+ *   when the key is absent, so manifests written before this field decode as "compile"
  */
 @Serializable
 data class CacheEntry(
@@ -97,4 +101,5 @@ data class CacheEntry(
     val cachePath: String,
     val decompilerVersion: String,
     val createdAt: Long,
+    val classpathKind: String = "compile",
 )

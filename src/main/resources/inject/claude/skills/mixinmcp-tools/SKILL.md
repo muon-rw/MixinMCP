@@ -2,8 +2,8 @@
 name: mixinmcp-tools
 description: >
   IntelliJ-backed code search and refactoring across a JVM project's entire
-  classpath: any dependency, library, or JDK source, and on Minecraft projects
-  also vanilla and mod sources. ALWAYS use these tools instead of Grep, Read, or
+  classpath: any dependency, library, JDK source, or Gradle plugin, and on Minecraft
+  projects, vanilla and mod sources. ALWAYS use these tools instead of Grep, Read, or
   jar extraction to look up or search code that lives in a dependency: they index
   inside jars Grep cannot see, and add type-hierarchy, call-graph, reference, and
   bytecode tools that beat text search on accuracy and context cost. Use for
@@ -43,6 +43,7 @@ guessing.
 | Read one method/field, not the whole class | `mixin_find_class(className, methodName=…)` or `fieldName=…` — avoids dumping a 50KB class |
 | Search names across the classpath | `mixin_search_symbols` (short names, one at a time) |
 | Regex-grep dependency source | `mixin_search_in_deps` → `mixin_get_dep_source` with the returned `url`; `contextLines` captures short bodies inline |
+| Search build-plugin code (Loom, ModDevGradle, …) | any lookup tool; `mixin_search_in_deps(roots="buildscript")` greps only buildscript sources |
 | Read a known dependency file | `mixin_get_dep_source` (by `path`, e.g. `com/google/common/collect/Lists.java`) |
 | Inheritance chain / all subtypes | `mixin_type_hierarchy` |
 | All implementors of an interface | `mixin_find_impls` |
@@ -88,6 +89,7 @@ Only what isn't obvious from the tool descriptions.
 - Each hit's `--- path [root] ---` header names the matching root; prefer `Library SOURCES` over decompiled. Copy the `url:` line verbatim into `mixin_get_dep_source`.
 - `contextLines` (3–10) captures a short matched body inline so you can skip the follow-up read; leave it 0 for long methods.
 - `mixin_get_dep_source` takes that `url` verbatim, or a package `path` (`.../Foo.java`, not a filesystem path). If `path` misses, search first and use the returned `url`.
+- Buildscript roots (labeled `Buildscript classpath: …`) scan last in the default `roots="all"` mode, so game and mod hits stay first; use `roots="buildscript"` to search only build plugins.
 
 **Reading a class** (`mixin_find_class`)
 - For big classes prefer `methodName=`/`fieldName=` over `includeSource=true` (which dumps 50KB+ and forces extra grep).

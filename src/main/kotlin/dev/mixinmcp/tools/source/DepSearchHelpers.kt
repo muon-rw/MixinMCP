@@ -4,6 +4,7 @@ import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.AdditionalLibraryRootsProvider
+import com.intellij.openapi.roots.JdkOrderEntry
 import com.intellij.openapi.roots.LibraryOrderEntry
 import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
@@ -12,7 +13,10 @@ import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.util.concurrency.annotations.RequiresReadLock
 import dev.mixinmcp.cache.DecompilationCacheService
-import dev.mixinmcp.cache.MixinDecompiledRootsProvider
+import dev.mixinmcp.cache.compareGradlePluginVersions
+import dev.mixinmcp.cache.isGradlePluginVersionAtLeast
+import dev.mixinmcp.rules.declaredGradlePluginVersion
+import dev.mixinmcp.rules.hasGradlePlugin
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
 
@@ -60,8 +64,9 @@ internal data class DepRegexScanResult(
 )
 
 /**
- * Collects all source roots: SOURCES from library order entries plus
- * source roots from AdditionalLibraryRootsProvider (decompiled cache).
+ * Collects all source roots: SOURCES from library and JDK order entries plus
+ * source roots from every AdditionalLibraryRootsProvider (decompiled cache,
+ * Kotlin script dependencies, other plugins' synthetic libraries).
  */
 @RequiresReadLock
 internal fun collectAllSourceRoots(project: Project): List<VirtualFile> {
@@ -94,23 +99,50 @@ internal fun collectSourceRootsWithMetadata(project: Project): List<SourceRootIn
                         result.add(SourceRootInfo(root, label))
                     }
                 }
+            } else if (entry is JdkOrderEntry) {
+                val jdk = entry.jdk ?: continue
+                for (root in jdk.rootProvider.getFiles(OrderRootType.SOURCES)) {
+                    if (seen.add(root)) {
+                        result.add(SourceRootInfo(root, "Library SOURCES: ${jdk.name} (JDK)"))
+                    }
+                }
             }
         }
     }
 
     for (provider in AdditionalLibraryRootsProvider.EP_NAME.extensionList) {
-        if (provider !is MixinDecompiledRootsProvider) continue
+        val labeled: LabeledSyntheticRootsProvider? = provider as? LabeledSyntheticRootsProvider
         for (synthLib in provider.getAdditionalProjectLibraries(project)) {
             for (root in synthLib.sourceRoots) {
-                if (seen.add(root)) {
-                    result.add(SourceRootInfo(root, "Decompiled cache (MixinMCP)"))
-                }
+                if (!seen.add(root)) continue
+                val label: String = labeled?.labelFor(project, root)
+                    ?: "Library SOURCES (foreign: ${provider.javaClass.simpleName}): ${sourceRootDisplayName(root)}"
+                result.add(SourceRootInfo(root, label))
+            }
+        }
+        labeled?.textSearchOnlyRoots(project)?.forEach { root ->
+            if (seen.add(root)) {
+                result.add(SourceRootInfo(root, labeled.labelFor(project, root)))
             }
         }
     }
 
     return result
 }
+
+/**
+ * True when [vf] lives on the buildscript classpath (classes or sources side).
+ * Delegates through [LabeledSyntheticRootsProvider] so always-loaded callers
+ * (ClassVariants) never reference the optional Gradle module.
+ */
+@RequiresReadLock
+fun isBuildscriptClasspathFile(project: Project, vf: VirtualFile): Boolean {
+    return AdditionalLibraryRootsProvider.EP_NAME.extensionList.any { provider ->
+        (provider as? LabeledSyntheticRootsProvider)?.isBuildscriptClasspathFile(project, vf) == true
+    }
+}
+
+const val BUILDSCRIPT_LABEL_PREFIX: String = "Buildscript classpath"
 
 /**
  * Determines which source root type a VirtualFile belongs to.
@@ -268,8 +300,10 @@ internal fun buildNoMatchHintsForDepSearch(
     normalizedPathPrefix: String?,
     sawAnyFileUnderPathPrefix: Boolean,
 ): List<String> {
+    val allRoots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
     val libRoots: List<SourceRootInfo> =
-        collectSourceRootsWithMetadata(project).filter { it.typeLabel.startsWith("Library SOURCES") }
+        allRoots.filter { it.typeLabel.startsWith("Library SOURCES") }
+    val hasCacheRoots: Boolean = allRoots.any { it.typeLabel == "Decompiled cache (MixinMCP)" }
     val hasForgeGameEvents: Boolean = hasForgeGameEventApiInLibrarySources(libRoots)
     val hasNeoForgeGameEvents: Boolean = hasNeoForgeNeoforgeEventApiInLibrarySources(libRoots)
     val hasVanilla: Boolean = libRoots.any { info: SourceRootInfo ->
@@ -371,6 +405,39 @@ internal fun buildNoMatchHintsForDepSearch(
             hints.add(genDepSourcesMemoryNote)
         } else {
             hints.add("Vanilla (net/minecraft/*) is not in any Library SOURCES root. $loomStyleHint")
+        }
+    }
+
+    val projectRoot: java.nio.file.Path? = project.basePath?.let { java.nio.file.Path.of(it) }
+    if (projectRoot != null) {
+        val pluginPresent: Boolean = hasGradlePlugin(projectRoot)
+        if (!hasCacheRoots) {
+            if (pluginPresent) {
+                hints.add(
+                    "The MixinMCP decompiled cache is empty; dependencies without a published -sources.jar are " +
+                        "not searchable yet. Run ./gradlew genDependencySources, then mixin_sync_project.",
+                )
+            } else {
+                hints.add(
+                    "The MixinMCP decompiled cache is empty and the dev.mixinmcp.decompile Gradle plugin is not " +
+                        "detected. Dependencies without a published -sources.jar stay invisible to this search " +
+                        "until the plugin is applied and ./gradlew genDependencySources runs.",
+                )
+            }
+        }
+        if (pluginPresent) {
+            val required: String = DecompilationCacheService.REQUIRED_GRADLE_PLUGIN_VERSION
+            val installed: String? = listOfNotNull(
+                DecompilationCacheService.getInstance(project).installedGradlePluginVersion(),
+                declaredGradlePluginVersion(projectRoot),
+            ).maxWithOrNull(::compareGradlePluginVersions)
+            if (!isGradlePluginVersionAtLeast(installed, required)) {
+                hints.add(
+                    "The applied MixinMCP Gradle plugin (${installed ?: "pre-$required"}) is older than this " +
+                        "MixinMCP release expects, so some cache entries may be missing. Update " +
+                        "dev.mixinmcp.decompile to $required or newer and rerun ./gradlew genDependencySources.",
+                )
+            }
         }
     }
     return hints
@@ -482,11 +549,18 @@ internal fun buildFileMaskMatcher(fileMask: String?): (String) -> Boolean {
 }
 
 /**
- * Returns the path used for fileMask matching: for JAR entries, the path inside
- * the jar (e.g. net/minecraft/world/entity/LivingEntity.java); for directory
- * roots (decompiled cache), the path relative to root.
+ * Returns the path used for fileMask matching: the path of [vf] relative to
+ * [root] (e.g. net/minecraft/world/entity/LivingEntity.java). Falls back to
+ * the jar-internal path for files outside [root].
  */
 internal fun getPathForMask(root: VirtualFile, vf: VirtualFile): String {
+    // Relative to the root, not the jar: JDK src.zip roots are per-module directories
+    // inside the zip (src.zip!/java.base), and jar-relative paths would prefix every
+    // JDK file with the module name, breaking natural pathPrefix values like java/util/.
+    val rootUrl: String = root.url.trimEnd('/')
+    if (vf.url.startsWith("$rootUrl/")) {
+        return vf.url.removePrefix("$rootUrl/").replace('\\', '/')
+    }
     val pathInJar: String? = vf.url.substringAfter("!/", "").takeIf { it.isNotEmpty() }
     if (pathInJar != null) return pathInJar.replace('\\', '/')
     val rootPath: String = root.path.replace('\\', '/').trimEnd('/')

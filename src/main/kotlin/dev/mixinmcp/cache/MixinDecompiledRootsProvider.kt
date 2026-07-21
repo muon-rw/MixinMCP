@@ -8,12 +8,25 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
 import com.intellij.openapi.roots.SyntheticLibrary
 import com.intellij.openapi.vfs.VirtualFile
+import dev.mixinmcp.settings.MixinMcpSettings
+import dev.mixinmcp.tools.source.BUILDSCRIPT_LABEL_PREFIX
+import dev.mixinmcp.tools.source.LabeledSyntheticRootsProvider
 
 /**
  * Exposes decompiled library sources as SyntheticLibrary roots.
  * See DESIGN.md Section 11.4 and 11.5 Step 4.
  */
-class MixinDecompiledRootsProvider : AdditionalLibraryRootsProvider() {
+class MixinDecompiledRootsProvider : AdditionalLibraryRootsProvider(), LabeledSyntheticRootsProvider {
+
+    override fun labelFor(project: Project, root: VirtualFile): String {
+        val buildscriptName: String? =
+            DecompilationCacheService.getInstance(project).buildscriptCacheLibraryName(root)
+        return if (buildscriptName != null) {
+            "$BUILDSCRIPT_LABEL_PREFIX (decompiled cache): $buildscriptName"
+        } else {
+            "Decompiled cache (MixinMCP)"
+        }
+    }
 
     override fun getAdditionalProjectLibraries(project: Project): Collection<SyntheticLibrary> {
         return activeCachedRoots(project).map { info ->
@@ -34,10 +47,18 @@ class MixinDecompiledRootsProvider : AdditionalLibraryRootsProvider() {
     /**
      * Cache roots whose classes jar already has Library SOURCES attached are skipped; indexing
      * them again would only duplicate every file in Show Usages and Search Everywhere.
+     * Buildscript-origin entries honor the indexBuildscriptClasspath opt-out so the setting
+     * governs the whole buildscript surface, not only the live-classpath provider.
      */
     private fun activeCachedRoots(project: Project): List<DecompilationCacheService.CachedLibraryInfo> {
-        val sourced: Set<String> = classesJarPathsWithAttachedSources(project)
+        val sourced: Set<String> = classesJarPathsWithAttachedSources(project) +
+            AdditionalLibraryRootsProvider.EP_NAME.extensionList
+                .filterIsInstance<LabeledSyntheticRootsProvider>()
+                .filter { it !== this }
+                .flatMap { it.sourcedClassesJarPaths(project) }
+        val includeBuildscript: Boolean = MixinMcpSettings.getInstance(project).indexBuildscriptClasspath
         return DecompilationCacheService.getInstance(project).getCachedRoots()
+            .filterNot { !includeBuildscript && it.classpathKind == "buildscript" }
             .filterNot { DecompilationCacheService.normalizeJarDiskPath(it.classesJarPath) in sourced }
     }
 

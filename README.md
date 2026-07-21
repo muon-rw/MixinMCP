@@ -84,12 +84,14 @@ For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-r
 > 
 > The Gradle plugin ensures most common loader-merged-jars are attached automatically, and decompiles any remaining dependencies without sources via [Vineflower](https://github.com/Vineflower/vineflower) 
 > into a cache that all tools also read, ensuring all dependencies can be indexed fully. 
+> 
+> This includes the Gradle buildscript classpath: build plugins (Loom, ModDevGradle, etc.) without published sources are only source-searchable with the Gradle plugin applied. 
 
 
 **1. Add the MixinMCP maven repository to your mod project's `settings.gradle` or `settings.gradle.kts`:**
 
 ```kotlin
-// .kts format
+// settings.gradle.kts
 pluginManagement {
     repositories {
         maven { url = uri("https://maven.muon.rip/releases") }
@@ -99,12 +101,32 @@ pluginManagement {
 }
 ```
 
+```groovy
+// settings.gradle
+pluginManagement {
+    repositories {
+        maven { url = 'https://maven.muon.rip/releases' }
+        gradlePluginPortal()
+        // ... your existing repos (maven, fabricmc, neoforged, etc.)
+    }
+}
+```
+
 **2. Apply the plugin in your mod project's `build.gradle` or `build.gradle.kts`:**
 
 ```kotlin
+// build.gradle.kts
 plugins {
     // ... your existing plugins ...
-    id("dev.mixinmcp.decompile") version "1.2.0"
+    id("dev.mixinmcp.decompile") version "1.3.0"
+}
+```
+
+```groovy
+// build.gradle
+plugins {
+    // ... your existing plugins ...
+    id 'dev.mixinmcp.decompile' version '1.3.0'
 }
 ```
 **3. Increase Gradle process memory:** (**Strongly** Recommended)
@@ -134,7 +156,7 @@ For more info, see [Decompilation cache details](#decompilation-cache-details)
 
 The IntelliJ plugin reads the dependency sources cache on project open and after every Gradle sync/task run. 
 
-MixinMCP warns on project open when the Gradle plugin is missing. If you don't need full-classpath decompilation or source auto-attach and want to silence this, disable **Warn when Gradle plugin is not detected** in **Settings → Tools → MixinMCP**.
+MixinMCP warns on project open when the Gradle plugin is missing or older than the installed MixinMCP release requires. If you don't need full-classpath decompilation or source auto-attach and want to silence this, disable **Warn when the MixinMCP Gradle plugin is missing or outdated** in **Settings → Tools → MixinMCP**. Buildscript-classpath indexing can also be toggled there.
 
 For local development against an unpublished build, see [Decompilation cache details](#decompilation-cache-details) below.
 
@@ -166,9 +188,9 @@ You can edit these manually, but if you use the same name and do not change the 
 
 | Tool | Description |
 |------|-------------|
-| `mixin_find_class` | Look up any class by FQCN across project, libraries, and JDK. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. |
+| `mixin_find_class` | Look up any class by FQCN across project, libraries, JDK, and the Gradle buildscript classpath. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. |
 | `mixin_search_symbols` | Find classes, methods, or fields by name substring across project and all dependencies. |
-| `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath. Pass `contextLines` to capture short method bodies inline. |
+| `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath, JDK `src.zip` and buildscript classpath included. Pass `contextLines` to capture short method bodies inline; `roots="buildscript"` limits the scan to build-plugin sources. |
 | `mixin_get_dep_source` | Read source from dependency jars or decompiled cache. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java). |
 | `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
 

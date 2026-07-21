@@ -13,6 +13,9 @@ import com.google.gson.annotations.SerializedName
  * @param cachePath Absolute path to the decompiled output directory
  * @param decompilerVersion Decompiler version (e.g. "vineflower-1.11.2") or "published-sources"
  * @param createdAt Timestamp when this entry was created
+ * @param classpathKind "compile" or "buildscript". Nullable rather than defaulted: Gson's Unsafe
+ *   construction bypasses Kotlin defaults when reading a manifest written before this field existed,
+ *   so readers must treat null as "compile".
  */
 data class CacheEntry(
     @SerializedName("libraryName") val libraryName: String,
@@ -22,6 +25,7 @@ data class CacheEntry(
     @SerializedName("cachePath") val cachePath: String,
     @SerializedName("decompilerVersion") val decompilerVersion: String,
     @SerializedName("createdAt") val createdAt: Long,
+    @SerializedName("classpathKind") val classpathKind: String? = null,
 ) {
     /**
      * Check if this entry is still valid for the given JAR file.

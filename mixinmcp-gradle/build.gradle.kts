@@ -32,6 +32,13 @@ gradlePlugin {
     }
 }
 
+// Read back at runtime as the pluginVersion stamped into each manifest.
+tasks.jar {
+    manifest {
+        attributes("Implementation-Version" to project.version)
+    }
+}
+
 publishing {
     repositories {
         maven {

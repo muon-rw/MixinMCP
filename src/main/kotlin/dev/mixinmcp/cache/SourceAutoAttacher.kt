@@ -16,6 +16,7 @@ import com.intellij.openapi.roots.libraries.LibraryTablesRegistrar
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VfsUtilCore
+import dev.mixinmcp.tools.GradleCachePaths
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -389,13 +390,7 @@ class SourceAutoAttacher(
         return visit(root)
     }
 
-    private fun gradleUserHomeDir(): Path {
-        val env: String? = System.getenv("GRADLE_USER_HOME")
-        if (!env.isNullOrBlank()) {
-            return Path.of(env)
-        }
-        return Path.of(System.getProperty("user.home"), ".gradle")
-    }
+    private fun gradleUserHomeDir(): Path = GradleCachePaths.gradleUserHomeDir()
 
     /**
      * Strips jar-root suffix (`!/`) so [Path] parsing and filename regex work on the on-disk `.jar` path.
@@ -434,22 +429,8 @@ class SourceAutoAttacher(
         return null
     }
 
-    // Newest wins: changing versions (EAP snapshots) accumulate one hash dir per downloaded build.
-    private fun findNewestSourcesJarUnderVersionDir(versionDir: Path): Path? {
-        if (!Files.isDirectory(versionDir)) return null
-        return try {
-            Files.list(versionDir).use { hashStream ->
-                hashStream
-                    .filter { Files.isDirectory(it) }
-                    .flatMap { Files.list(it) }
-                    .filter { it.fileName.toString().lowercase().endsWith("-sources.jar") }
-                    .toList()
-                    .maxByOrNull { path -> runCatching { Files.getLastModifiedTime(path).toMillis() }.getOrDefault(0L) }
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
+    private fun findNewestSourcesJarUnderVersionDir(versionDir: Path): Path? =
+        GradleCachePaths.findNewestSourcesJarUnderVersionDir(versionDir)
 
     companion object {
         private val LOG = Logger.getInstance(SourceAutoAttacher::class.java)

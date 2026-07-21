@@ -9,8 +9,12 @@ import com.intellij.util.concurrency.annotations.RequiresReadLock
 
 /**
  * Resolves fully-qualified class names to PsiClass instances, including
- * dependency and library classes. Uses GlobalSearchScope.allScope() — the
- * critical difference from built-in tools which use projectScope().
+ * dependency and library classes. Defaults to GlobalSearchScope.everythingScope():
+ * unlike allScope (ProjectAndLibrariesScope), an EverythingGlobalScope lets
+ * NonClasspathClassFinder extensions answer, which is how Gradle buildscript
+ * classes (GradleClassFinder) resolve on projects where they are not indexed.
+ * Index-backed searches elsewhere (references, inheritors, short names) keep
+ * allScope on purpose; unindexed content has no stub entries for any scope.
  */
 object FqcnResolver {
 
@@ -20,8 +24,8 @@ object FqcnResolver {
 
     /**
      * Resolves a fully-qualified class name to a PsiClass.
-     * Defaults to GlobalSearchScope.allScope() to search BOTH project AND dependency
-     * classes; pass a narrower scope (e.g. from ModuleScopes) to pin resolution.
+     * Defaults to GlobalSearchScope.everythingScope() to search project, dependency,
+     * and buildscript classes; pass a narrower scope (e.g. from ModuleScopes) to pin resolution.
      * When variants exist in both project source and libraries (e.g. a stale copy
      * in a build-output jar), the project-source variant wins.
      */
@@ -29,7 +33,7 @@ object FqcnResolver {
     fun resolve(
         project: Project,
         fqcn: String,
-        scope: GlobalSearchScope = GlobalSearchScope.allScope(project),
+        scope: GlobalSearchScope = GlobalSearchScope.everythingScope(project),
     ): PsiClass? {
         val candidates: Array<PsiClass> = JavaPsiFacade.getInstance(project).findClasses(fqcn, scope)
         if (candidates.size <= 1) return candidates.firstOrNull()
@@ -49,7 +53,7 @@ object FqcnResolver {
     fun resolveNested(
         project: Project,
         fqcn: String,
-        scope: GlobalSearchScope = GlobalSearchScope.allScope(project),
+        scope: GlobalSearchScope = GlobalSearchScope.everythingScope(project),
     ): PsiClass? {
         resolve(project, fqcn, scope)?.let { return it }
 

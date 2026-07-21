@@ -58,11 +58,17 @@ class DecompilationCacheService(private val project: Project) {
 
             val virtualFile = LocalFileSystem.getInstance().findFileByIoFile(cachePath.toFile())
             if (virtualFile != null) {
-                result.add(CachedLibraryInfo(entry.libraryName, hash, entry.classesJarPath, virtualFile))
+                result.add(
+                    CachedLibraryInfo(entry.libraryName, hash, entry.classesJarPath, virtualFile, entry.classpathKind),
+                )
             } else {
                 noVirtualFile++
             }
         }
+
+        buildscriptRootNamesByPath = result
+            .filter { it.classpathKind == "buildscript" }
+            .associate { it.root.path to it.libraryName }
 
         LOG.info("MixinMCP: getCachedRoots() → ${result.size} valid, " +
             "$missingCache missing cache dir, " +
@@ -71,33 +77,26 @@ class DecompilationCacheService(private val project: Project) {
     }
 
     /**
+     * Snapshot from the last getCachedRoots pass. labelFor runs once per root per
+     * enumeration and must not re-read every manifest from disk each time.
+     */
+    @Volatile
+    private var buildscriptRootNamesByPath: Map<String, String> = emptyMap()
+
+    fun buildscriptCacheLibraryName(root: VirtualFile): String? = buildscriptRootNamesByPath[root.path]
+
+    /**
      * Discover per-project manifests from the root project and immediate subdirectories,
      * then merge all entries. Falls back to the legacy global manifest if no per-project
      * manifests are found.
      */
     private fun loadMergedManifestEntries(): Map<String, CacheEntry> {
-        val projectDir = project.basePath?.let { Paths.get(it) } ?: return emptyMap()
         val allEntries = mutableMapOf<String, CacheEntry>()
         var manifestCount = 0
-
-        fun tryLoadManifest(dir: Path) {
-            val manifestDir = dir.resolve(".gradle").resolve("mixinmcp")
-            if (Files.exists(manifestDir.resolve("manifest.json"))) {
-                val manifest = DecompilationManifest().load(manifestDir)
-                allEntries.putAll(manifest.entries)
-                manifestCount++
-            }
+        forEachManifest { manifest ->
+            allEntries.putAll(manifest.entries)
+            manifestCount++
         }
-
-        tryLoadManifest(projectDir)
-
-        try {
-            Files.list(projectDir).use { stream ->
-                stream.filter { Files.isDirectory(it) }
-                    .filter { !it.fileName.toString().startsWith(".") }
-                    .forEach { tryLoadManifest(it) }
-            }
-        } catch (_: Exception) {}
 
         if (manifestCount > 0) {
             LOG.info("MixinMCP: loaded $manifestCount per-project manifest(s) " +
@@ -110,15 +109,52 @@ class DecompilationCacheService(private val project: Project) {
         return globalManifest.entries
     }
 
+    /**
+     * Newest Gradle-plugin version stamped across the project's manifests; null when no
+     * manifest carries one (plugin absent, or every manifest predates version stamping).
+     */
+    fun installedGradlePluginVersion(): String? {
+        var newest: String? = null
+        forEachManifest { manifest ->
+            val v: String = manifest.pluginVersion ?: return@forEachManifest
+            if (newest == null || compareGradlePluginVersions(v, newest!!) > 0) newest = v
+        }
+        return newest
+    }
+
+    private fun forEachManifest(consume: (DecompilationManifest) -> Unit) {
+        val projectDir = project.basePath?.let { Paths.get(it) } ?: return
+
+        fun tryLoadManifest(dir: Path) {
+            val manifestDir = dir.resolve(".gradle").resolve("mixinmcp")
+            if (Files.exists(manifestDir.resolve("manifest.json"))) {
+                consume(DecompilationManifest().load(manifestDir))
+            }
+        }
+
+        tryLoadManifest(projectDir)
+        try {
+            Files.list(projectDir).use { stream ->
+                stream.filter { Files.isDirectory(it) }
+                    .filter { !it.fileName.toString().startsWith(".") }
+                    .forEach { tryLoadManifest(it) }
+            }
+        } catch (_: Exception) {}
+    }
+
     data class CachedLibraryInfo(
         val libraryName: String,
         val artifactHash: String,
         val classesJarPath: String,
         val root: VirtualFile,
+        val classpathKind: String = "compile",
     )
 
     companion object {
         private val LOG = Logger.getInstance(DecompilationCacheService::class.java)
+
+        /** Oldest Gradle plugin whose manifests cover everything this IDE plugin surfaces. */
+        const val REQUIRED_GRADLE_PLUGIN_VERSION: String = "1.3.0"
 
         val globalCacheRoot: Path
             get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
@@ -140,3 +176,20 @@ class DecompilationCacheService(private val project: Project) {
             project.service()
     }
 }
+
+/** Numeric per dot segment, non-digit suffixes ignored; missing segments count as zero. */
+internal fun compareGradlePluginVersions(a: String, b: String): Int {
+    fun segments(v: String): List<Int> = v.split('.').map { seg ->
+        seg.takeWhile { it.isDigit() }.toIntOrNull() ?: 0
+    }
+    val sa: List<Int> = segments(a)
+    val sb: List<Int> = segments(b)
+    for (i in 0 until maxOf(sa.size, sb.size)) {
+        val cmp: Int = (sa.getOrElse(i) { 0 }).compareTo(sb.getOrElse(i) { 0 })
+        if (cmp != 0) return cmp
+    }
+    return 0
+}
+
+internal fun isGradlePluginVersionAtLeast(installed: String?, required: String): Boolean =
+    installed != null && compareGradlePluginVersions(installed, required) >= 0

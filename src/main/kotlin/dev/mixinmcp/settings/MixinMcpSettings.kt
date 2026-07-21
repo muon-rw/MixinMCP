@@ -14,6 +14,7 @@ class MixinMcpSettings : PersistentStateComponent<MixinMcpSettings.State> {
         var autoInjectCursorRules: Boolean = true,
         var overwriteExistingRules: Boolean = true,
         var warnMissingGradlePlugin: Boolean = true,
+        var indexBuildscriptClasspath: Boolean = true,
     )
 
     private var state = State()
@@ -35,6 +36,10 @@ class MixinMcpSettings : PersistentStateComponent<MixinMcpSettings.State> {
     var warnMissingGradlePlugin: Boolean
         get() = state.warnMissingGradlePlugin
         set(value) { state.warnMissingGradlePlugin = value }
+
+    var indexBuildscriptClasspath: Boolean
+        get() = state.indexBuildscriptClasspath
+        set(value) { state.indexBuildscriptClasspath = value }
 
     companion object {
         fun getInstance(project: Project): MixinMcpSettings =

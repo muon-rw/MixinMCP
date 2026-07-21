@@ -2,15 +2,30 @@
 
 # MixinMCP Changelog
 
+## [1.3.0]
+
+### Added
+
+- All search tools now cover Gradle plugins, their transitives, buildSrc, and the Gradle API, on both groovy/kotlin script DSLs. Build plugins without published sources need the MixinMCP Gradle plugin 1.3.0.
+- Dependency text search also covers JDK sources and synthetic library sources contributed by other plugins.
+- The Gradle plugin warning now also fires when the applied plugin is older than this release requires, not only when it is missing.
+
 ## [1.2.1]
+
 - Now requires IntelliJ IDEA 2026.2 or later. 2026.1 is no longer supported.
+
 ### Improved
+
 - In `mixin_call_hierarchy`, clarify when a non-method call is an initializer.  
 - For reference and hierarchy results, return project-root-relative paths instead of absolute.
 - A few optimizations related to VFS and coroutines
+
 ### Fixed
+
 - Refactor tools now flush the pending VFS write to disk before returning, to accommodate for IntelliJ 2026.2 changes to VFS. 
+
 ### Removed
+
 - `mixin_move_members` no longer supports `direction="down"` (push members into subclasses) due to API changes in IntelliJ 2026.2. Pull-up and move-to-class are unaffected.
 
 ## [1.2.0]
@@ -294,7 +309,8 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.2.0...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.2.1...HEAD
+[1.2.1]: https://github.com/muon-rw/MixinMCP/compare/1.2.0...1.2.1
 [1.2.0]: https://github.com/muon-rw/MixinMCP/compare/1.1.1...1.2.0
 [1.1.1]: https://github.com/muon-rw/MixinMCP/compare/1.1.0...1.1.1
 [1.1.0]: https://github.com/muon-rw/MixinMCP/compare/1.0.6...1.1.0

@@ -67,6 +67,10 @@ abstract class MixinDecompileTask : DefaultTask() {
     @get:Internal
     var artifactCollections: List<ArtifactCollection> = emptyList()
 
+    /** Buildscript classpath of this project and its ancestors; entries tag as classpathKind=buildscript. */
+    @get:Internal
+    var buildscriptArtifactCollections: List<ArtifactCollection> = emptyList()
+
     /** Set by MixinDecompilePlugin at configuration time. */
     @get:Internal
     var projectDir: File? = null
@@ -75,12 +79,19 @@ abstract class MixinDecompileTask : DefaultTask() {
     @get:Internal
     var publishedSourcesJarsProvider: Provider<Map<String, File>>? = null
 
+    /** Same map for the buildscript classpath. */
+    @get:Internal
+    var buildscriptPublishedSourcesJarsProvider: Provider<Map<String, File>>? = null
+
     /** Set by MixinDecompilePlugin at configuration time; used to purge corrupt cached downloads. */
     @get:Internal
     var gradleUserHome: File? = null
 
     private val globalCacheRoot: Path
         get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")
+
+    private val ownPluginVersion: String?
+        get() = javaClass.`package`?.implementationVersion
 
     companion object {
         const val UNRESOLVED_MARKER_FILE = "unresolved.txt"
@@ -92,8 +103,8 @@ abstract class MixinDecompileTask : DefaultTask() {
 
     @TaskAction
     fun decompile() {
-        if (artifactCollections.isEmpty()) {
-            logger.lifecycle("No compileClasspath configuration found, skipping decompilation")
+        if (artifactCollections.isEmpty() && buildscriptArtifactCollections.isEmpty()) {
+            logger.lifecycle("No compileClasspath or buildscript classpath configuration found, skipping decompilation")
             return
         }
 
@@ -101,11 +112,22 @@ abstract class MixinDecompileTask : DefaultTask() {
 
         val hashMemo = DecompilationManifest.loadHashMemo(projectManifestRoot)
 
-        val resolvedArtifacts = artifactCollections
+        val compileArtifacts = artifactCollections
             .flatMap { it.resolvedArtifacts.get() }
             .distinctBy { it.file.absolutePath }
-        val resolutionFailures = artifactCollections.flatMap { it.failures }
-        val publishedSourcesJars = publishedSourcesJarsProvider?.get() ?: emptyMap()
+        val compilePaths: Set<String> = compileArtifacts.map { it.file.absolutePath }.toSet()
+        // Compile wins on overlap: a jar on both classpaths keeps its module-dependency identity.
+        val buildscriptArtifacts = buildscriptArtifactCollections
+            .flatMap { it.resolvedArtifacts.get() }
+            .distinctBy { it.file.absolutePath }
+            .filter { it.file.absolutePath !in compilePaths }
+        val buildscriptPaths: Set<String> = buildscriptArtifacts.map { it.file.absolutePath }.toSet()
+        val resolvedArtifacts = compileArtifacts + buildscriptArtifacts
+        fun classpathKindOf(jarFile: File): String =
+            if (jarFile.absolutePath in buildscriptPaths) "buildscript" else "compile"
+        val resolutionFailures = (artifactCollections + buildscriptArtifactCollections).flatMap { it.failures }
+        val publishedSourcesJars = (publishedSourcesJarsProvider?.get() ?: emptyMap()) +
+            (buildscriptPublishedSourcesJarsProvider?.get() ?: emptyMap())
 
         val withoutSources = resolvedArtifacts
             .filter { it.variant.owner is ModuleComponentIdentifier }
@@ -147,7 +169,8 @@ abstract class MixinDecompileTask : DefaultTask() {
         val publishedTotal = withPublishedSources.size
 
         logger.lifecycle(
-            "MixinMCP: $total JAR(s) to decompile, $publishedTotal published source JAR(s) to mirror, threads=$threads",
+            "MixinMCP: $total JAR(s) to decompile, $publishedTotal published source JAR(s) to mirror " +
+                "(${buildscriptPaths.size} buildscript-classpath jar(s) considered), threads=$threads",
         )
 
         for ((index, artifact) in withoutSources.withIndex()) {
@@ -188,6 +211,7 @@ abstract class MixinDecompileTask : DefaultTask() {
                         cachePath = cacheDir.absolutePath + File.separator,
                         decompilerVersion = "vineflower-1.11.2",
                         createdAt = System.currentTimeMillis(),
+                        classpathKind = classpathKindOf(jarFile),
                     )
                     manifest = DecompilationManifest(manifest.entries + (hash to entry))
                 }
@@ -231,9 +255,10 @@ abstract class MixinDecompileTask : DefaultTask() {
                     cachePath = cacheDir.absolutePath + File.separator,
                     decompilerVersion = "vineflower-1.11.2",
                     createdAt = System.currentTimeMillis(),
+                    classpathKind = classpathKindOf(jarFile),
                 )
                 manifest = DecompilationManifest(manifest.entries + (hash to entry))
-                manifest.save(projectManifestRoot)
+                manifest.save(projectManifestRoot, ownPluginVersion)
                 decompiled++
                 logger.lifecycle("$progress Done! $libraryName")
             } catch (e: OutOfMemoryError) {
@@ -283,6 +308,7 @@ abstract class MixinDecompileTask : DefaultTask() {
                         cachePath = cacheDir.absolutePath + File.separator,
                         decompilerVersion = "published-sources",
                         createdAt = System.currentTimeMillis(),
+                        classpathKind = classpathKindOf(jarFile),
                     )
                     manifest = DecompilationManifest(manifest.entries + (hash to entry))
                 }
@@ -305,9 +331,10 @@ abstract class MixinDecompileTask : DefaultTask() {
                     cachePath = cacheDir.absolutePath + File.separator,
                     decompilerVersion = "published-sources",
                     createdAt = System.currentTimeMillis(),
+                    classpathKind = classpathKindOf(jarFile),
                 )
                 manifest = DecompilationManifest(manifest.entries + (hash to entry))
-                manifest.save(projectManifestRoot)
+                manifest.save(projectManifestRoot, ownPluginVersion)
                 publishedMirrored++
                 logger.lifecycle("$progress Done! $libraryName")
             } catch (e: Exception) {
@@ -318,7 +345,7 @@ abstract class MixinDecompileTask : DefaultTask() {
         }
 
         manifest = DecompilationManifest(manifest.entries.filterKeys { it in currentJarHashes })
-        manifest.save(projectManifestRoot)
+        manifest.save(projectManifestRoot, ownPluginVersion)
         DecompilationManifest.saveHashMemo(
             projectManifestRoot,
             hashMemo.filterValues { it in currentJarHashes },

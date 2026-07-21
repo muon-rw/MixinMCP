@@ -44,7 +44,7 @@ object ClassFileLocator {
     fun locate(
         project: Project,
         fqcn: String,
-        scope: GlobalSearchScope = GlobalSearchScope.allScope(project),
+        scope: GlobalSearchScope = GlobalSearchScope.everythingScope(project),
     ): ByteArray? =
         (locateDetailed(project, fqcn, scope) as? LocateResult.Found)?.bytes
 
@@ -52,7 +52,7 @@ object ClassFileLocator {
     fun locateDetailed(
         project: Project,
         fqcn: String,
-        scope: GlobalSearchScope = GlobalSearchScope.allScope(project),
+        scope: GlobalSearchScope = GlobalSearchScope.everythingScope(project),
     ): LocateResult {
         val psiClass: PsiClass = FqcnResolver.resolveNested(project, fqcn, scope)
             ?: return LocateResult.NotFound

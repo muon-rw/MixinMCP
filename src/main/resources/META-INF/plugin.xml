@@ -12,6 +12,7 @@
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
     <depends>com.intellij.mcpServer</depends>
+    <depends optional="true" config-file="mixinmcp-buildscript.xml">org.jetbrains.plugins.gradle</depends>
 
     <extensions defaultExtensionNs="com.intellij.mcpServer">
         <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
