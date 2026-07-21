@@ -262,16 +262,14 @@ internal object CallHierarchyExpander {
 
         val callees: List<BytecodeAnalyzer.CalleeRef>? = loadCallees(project, target)
         if (callees == null) {
-            // No body in source or bytecode: abstract method, native method, or
-            // unresolvable class. Emit at every depth so deeper leaves read
-            // unambiguously as "terminal because abstract" vs. "terminal because
-            // depth cap".
-            val msg: String = if (depth == 0) {
-                "  (abstract or native method — no body available in source or bytecode)"
-            } else {
-                "  (abstract — no body to walk)"
-            }
-            out.append(indent).append(msg).appendLine()
+            // Emitted at every depth so deeper leaves read as terminal rather
+            // than depth-capped.
+            out.append(indent)
+                .append(
+                    "  (no body available in source or bytecode: abstract, native, " +
+                        "or class not locatable on the classpath; these cannot be distinguished here)",
+                )
+                .appendLine()
             return
         }
         if (depth == 0 && target.psiMethod?.body == null) {

@@ -27,6 +27,14 @@ class GradlePluginVersionTest {
     }
 
     @Test
+    fun gatingIgnoresSuffixesAndTreatsNonNumericAsZero() {
+        assertTrue(isGradlePluginVersionAtLeast("1.3.0-SNAPSHOT", "1.3.0"))
+        assertFalse(isGradlePluginVersionAtLeast("1.3.0-rc1", "1.3.1"))
+        assertFalse(isGradlePluginVersionAtLeast("garbage", "1.3.0"))
+        assertEquals(0, compareGradlePluginVersions("garbage", "0.0.0"))
+    }
+
+    @Test
     fun declaredVersionParsing() {
         assertEquals(
             "1.2.0",

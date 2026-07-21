@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [1.3.1]
+
+### Improved
+
+- Empty or filtered results across the toolset now always state what was scanned and why nothing matched
+- Error messages better distinguish causes (filter matched nothing vs. content missed, unresolved vs. unreadable class, stale bytecode, module-pin misses)
+
+### Fixed
+
+- `mixin_find_targeting_mixins` with methodName no longer silently drops `@Overwrite` mixins.
+- Truncation footers now appear only when further results actually exist
+- Refactor tools no longer overstate their results
+- Fixed bad "plugin not detected" hints on multiloader builds when the plugin was only applied to subprojects
+
 ## [1.3.0]
 
 ### Added
@@ -311,7 +325,8 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.3.0...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.3.1...HEAD
+[1.3.1]: https://github.com/muon-rw/MixinMCP/compare/1.3.0...1.3.1
 [1.3.0]: https://github.com/muon-rw/MixinMCP/compare/1.2.1...1.3.0
 [1.2.1]: https://github.com/muon-rw/MixinMCP/compare/1.2.0...1.2.1
 [1.2.0]: https://github.com/muon-rw/MixinMCP/compare/1.1.1...1.2.0

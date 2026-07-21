@@ -11,6 +11,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.externalSystem.importing.ImportSpecBuilder
 import com.intellij.openapi.externalSystem.model.ProjectSystemId
 import com.intellij.openapi.externalSystem.service.execution.ProgressExecutionMode
+import com.intellij.openapi.externalSystem.util.ExternalSystemApiUtil
 import com.intellij.openapi.externalSystem.util.ExternalSystemUtil
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.util.io.FileUtil
@@ -62,8 +63,18 @@ class ProjectManagementToolset : McpToolset {
             }
         }
 
+        val gradleLinked: Boolean = runCatching {
+            ExternalSystemApiUtil.getSettings(project, ProjectSystemId("GRADLE"))
+                .getLinkedProjectSettings(externalPath) != null
+        }.getOrDefault(false)
+        val mavenBuildFilePresent: Boolean = File(externalPath, "pom.xml").isFile
+        val caveat: String = if (gradleLinked || mavenBuildFilePresent) "" else {
+            " No Gradle project is linked at this path and no pom.xml is present; the request may be a no-op."
+        }
+
         return McpToolCallResult.text(
-            "Project sync triggered for $externalPath. Dependencies will refresh in the background.",
+            "Sync requested for $externalPath; it runs in the background and this call does not confirm " +
+                "completion.$caveat Verify afterwards with mixin_list_source_roots.",
         )
     }
 

@@ -61,6 +61,8 @@ internal data class DepRegexScanResult(
     val hits: List<DepSearchHit>,
     val timedOut: Boolean,
     val noMatchHints: List<String>,
+    val scannedFiles: Int,
+    val sawMore: Boolean,
 )
 
 /**
@@ -295,15 +297,45 @@ private fun hasLocalNeoForgeLikeMergedArtifacts(project: Project): Boolean {
     }
 }
 
+internal fun describeEmptyScan(
+    scannedFiles: Int,
+    fileMask: String?,
+    pathPrefix: String?,
+): String {
+    val mask: String? = fileMask?.trim()?.takeUnless { it.isBlank() || it == "*" }
+    val filterDesc: String? = when {
+        mask != null && pathPrefix != null -> "fileMask \"$mask\" under pathPrefix \"$pathPrefix\""
+        mask != null -> "fileMask \"$mask\""
+        pathPrefix != null -> "pathPrefix \"$pathPrefix\""
+        else -> null
+    }
+    val files: String = if (scannedFiles == 1) "file" else "files"
+    return when {
+        scannedFiles == 0 && filterDesc != null -> buildString {
+            append("$filterDesc matched no files in the searched roots; the regex was never tested.")
+            if (mask != null) {
+                append(" Without wildcards, fileMask matches as a case-insensitive path substring; with wildcards, as a glob.")
+            }
+        }
+        scannedFiles == 0 -> "The searched roots contain no source files."
+        filterDesc != null ->
+            "$filterDesc matched $scannedFiles $files; the regex matched no lines in ${if (scannedFiles == 1) "it" else "them"}."
+        else -> "The regex matched no lines in the $scannedFiles $files scanned."
+    }
+}
+
 internal fun buildNoMatchHintsForDepSearch(
     project: Project,
     normalizedPathPrefix: String?,
-    sawAnyFileUnderPathPrefix: Boolean,
+    rootsMode: String,
 ): List<String> {
     val allRoots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
     val libRoots: List<SourceRootInfo> =
         allRoots.filter { it.typeLabel.startsWith("Library SOURCES") }
-    val hasCacheRoots: Boolean = allRoots.any { it.typeLabel == "Decompiled cache (MixinMCP)" }
+    val hasCacheRoots: Boolean = allRoots.any {
+        it.typeLabel == "Decompiled cache (MixinMCP)" ||
+            it.typeLabel.startsWith("$BUILDSCRIPT_LABEL_PREFIX (decompiled cache)")
+    }
     val hasForgeGameEvents: Boolean = hasForgeGameEventApiInLibrarySources(libRoots)
     val hasNeoForgeGameEvents: Boolean = hasNeoForgeNeoforgeEventApiInLibrarySources(libRoots)
     val hasVanilla: Boolean = libRoots.any { info: SourceRootInfo ->
@@ -323,17 +355,6 @@ internal fun buildNoMatchHintsForDepSearch(
     val targetsNeoForgeTree: Boolean = prefix.startsWith("net/neoforged/")
 
     val hints: MutableList<String> = mutableListOf()
-    if (normalizedPathPrefix != null) {
-        if (!sawAnyFileUnderPathPrefix) {
-            hints.add(
-                "No dependency source files under pathPrefix \"$normalizedPathPrefix\" (with the given fileMask, if any) exist in Library SOURCES or the decompiled cache.",
-            )
-        } else {
-            hints.add(
-                "No lines matched the regex under pathPrefix \"$normalizedPathPrefix\" in Library SOURCES or the decompiled cache — try another pattern, fileMask, or drop pathPrefix.",
-            )
-        }
-    }
     val loomStyleHint: String =
         "No MDG merged artifacts detected; on a Loom-style toolchain (Fabric Loom, Architectury Loom, neo-loom) " +
             "run ./gradlew genSources then mixin_sync_project. Until then, ./gradlew genDependencySources makes " +
@@ -408,11 +429,25 @@ internal fun buildNoMatchHintsForDepSearch(
         }
     }
 
+    if (rootsMode == "library") {
+        hints.add(
+            "roots=library searched only published -sources.jar roots; the decompiled cache and buildscript " +
+                "tiers were not searched. Retry with roots=all to include them.",
+        )
+        return hints
+    }
+
     val projectRoot: java.nio.file.Path? = project.basePath?.let { java.nio.file.Path.of(it) }
     if (projectRoot != null) {
         val pluginPresent: Boolean = hasGradlePlugin(projectRoot)
         if (!hasCacheRoots) {
-            if (pluginPresent) {
+            val cacheStats = DecompilationCacheService.getInstance(project).lastScanStats
+            if (cacheStats.noVirtualFile > 0) {
+                hints.add(
+                    "${cacheStats.noVirtualFile} decompiled cache entries exist on disk but are not yet visible " +
+                        "to the IDE; run mixin_sync_project. No re-decompile is needed.",
+                )
+            } else if (pluginPresent) {
                 hints.add(
                     "The MixinMCP decompiled cache is empty; dependencies without a published -sources.jar are " +
                         "not searchable yet. Run ./gradlew genDependencySources, then mixin_sync_project.",
@@ -422,6 +457,12 @@ internal fun buildNoMatchHintsForDepSearch(
                     "The MixinMCP decompiled cache is empty and the dev.mixinmcp.decompile Gradle plugin is not " +
                         "detected. Dependencies without a published -sources.jar stay invisible to this search " +
                         "until the plugin is applied and ./gradlew genDependencySources runs.",
+                )
+            }
+            if (cacheStats.missingCacheDir > 0) {
+                hints.add(
+                    "The cache manifest lists ${cacheStats.missingCacheDir} entries whose cache directories " +
+                        "are gone; rerun ./gradlew genDependencySources to restore them.",
                 )
             }
         }
@@ -434,8 +475,10 @@ internal fun buildNoMatchHintsForDepSearch(
             if (!isGradlePluginVersionAtLeast(installed, required)) {
                 hints.add(
                     "The applied MixinMCP Gradle plugin (${installed ?: "pre-$required"}) is older than this " +
-                        "MixinMCP release expects, so some cache entries may be missing. Update " +
-                        "dev.mixinmcp.decompile to $required or newer and rerun ./gradlew genDependencySources.",
+                        "MixinMCP release expects, so some cache entries may be missing. This affects only " +
+                        "dependencies without a published -sources.jar; results from -sources.jar roots are " +
+                        "complete. Update dev.mixinmcp.decompile to $required or newer and rerun " +
+                        "./gradlew genDependencySources.",
                 )
             }
         }
@@ -585,7 +628,7 @@ internal fun collectRegexHits(
     rootLabel: String = "",
     pathPrefix: String? = null,
     skipPath: (String) -> Boolean = { false },
-    pathPrefixFilesSeen: BooleanArray? = null,
+    scannedFiles: IntArray? = null,
 ) {
     ProgressManager.checkCanceled()
     if (hits.size >= maxResults) return
@@ -605,7 +648,7 @@ internal fun collectRegexHits(
                 rootLabel,
                 pathPrefix,
                 skipPath,
-                pathPrefixFilesSeen,
+                scannedFiles,
             )
         }
     } else {
@@ -613,7 +656,7 @@ internal fun collectRegexHits(
         if (pathPrefix != null && !pathToMatch.startsWith(pathPrefix)) return
         if (skipPath(pathToMatch)) return
         if (!matchesMask(pathToMatch)) return
-        pathPrefixFilesSeen?.let { seen -> seen[0] = true }
+        scannedFiles?.let { count -> count[0]++ }
         val content: String = try {
             String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
         } catch (e: Exception) {

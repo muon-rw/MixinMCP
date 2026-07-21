@@ -11,6 +11,7 @@ import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiField
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.PsiModifier
@@ -82,6 +83,9 @@ class SemanticNavigationToolset : McpToolset {
                         current = current.superClass
                         depth++
                     }
+                    if (depth == 0) {
+                        appendLine("  (none)")
+                    }
                     if (includeInterfaces) {
                         appendLine()
                         appendInterfaceSections(psiClass, maxDepth)
@@ -94,23 +98,34 @@ class SemanticNavigationToolset : McpToolset {
                     val query = ClassInheritorsSearch.search(psiClass, scope, true)
                     val deduper = ClassContentDeduper()
                     val entries: MutableList<String> = mutableListOf()
+                    var sawMore = false
                     query.forEach(Processor<PsiClass> { sub ->
                         val key: String? =
                             sub.qualifiedName
                                 ?: sub.containingClass?.qualifiedName?.let { "$it\$anonymous" }
                                 ?: sub.name
                         if (key != null && deduper.record(key, sub.containingFile?.virtualFile)) {
+                            if (entries.size >= maxResults) {
+                                sawMore = true
+                                return@Processor false
+                            }
                             entries.add(key)
                         }
-                        entries.size < maxResults
+                        true
                     })
+                    if (entries.isEmpty()) {
+                        appendLine(
+                            if (psiClass.hasModifierProperty(PsiModifier.FINAL)) "  (none; class is final)"
+                            else "  (none)",
+                        )
+                    }
                     var annotated = false
                     for (key: String in entries) {
                         val annotation: String? = if ("\$anonymous" in key) null else deduper.annotationFor(key)
                         if (annotation != null) annotated = true
                         appendLine("  $key${annotation ?: ""}")
                     }
-                    if (entries.size >= maxResults) {
+                    if (sawMore) {
                         appendLine("  ... (truncated at $maxResults results)")
                     }
                     if (annotated) {
@@ -226,6 +241,7 @@ class SemanticNavigationToolset : McpToolset {
                 appendLine()
                 val deduper = ClassContentDeduper()
                 val entries: MutableList<String> = mutableListOf()
+                var sawMore = false
                 query.forEach(Processor<PsiClass> { sub ->
                     // Fallback naming: anonymous/inner classes may have null qualifiedName
                     val key: String =
@@ -234,10 +250,26 @@ class SemanticNavigationToolset : McpToolset {
                             ?: sub.name
                             ?: "(anonymous)"
                     if (deduper.record(key, sub.containingFile?.virtualFile)) {
+                        if (entries.size >= maxResults) {
+                            sawMore = true
+                            return@Processor false
+                        }
                         entries.add(key)
                     }
-                    entries.size < maxResults
+                    true
                 })
+                if (entries.isEmpty()) {
+                    val reason: String? = when {
+                        psiClass.hasModifierProperty(PsiModifier.FINAL) -> "class is final"
+                        psiClass.isRecord -> "records are implicitly final"
+                        psiClass.isEnum -> "enum cannot be extended"
+                        else -> null
+                    }
+                    appendLine(
+                        if (reason != null) "  ($reason; no implementors possible)"
+                        else "  (no implementors found in the current classpath)",
+                    )
+                }
                 var annotated = false
                 for (key: String in entries) {
                     val annotation: String? =
@@ -245,7 +277,7 @@ class SemanticNavigationToolset : McpToolset {
                     if (annotation != null) annotated = true
                     appendLine("  $key${annotation ?: ""}")
                 }
-                if (entries.size >= maxResults) {
+                if (sawMore) {
                     appendLine("  ... (truncated at $maxResults results)")
                 }
                 if (annotated) {
@@ -286,6 +318,9 @@ class SemanticNavigationToolset : McpToolset {
             val mixins: MutableList<Pair<PsiClass, List<String>>> = mutableListOf()
             val deduper = ClassContentDeduper()
             var ownBuildSkipped: Int = 0
+            var methodFilteredOut: Int = 0
+            val methodFilteredFqcns: MutableList<String> = mutableListOf()
+            var sawMore = false
 
             if (mixinAnnotationClass != null) {
                 val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
@@ -304,11 +339,20 @@ class SemanticNavigationToolset : McpToolset {
                                 extractAllInjections(psiClass)
                             }
                             if (methodName == null || injections.isNotEmpty()) {
+                                if (mixins.size >= maxResults) {
+                                    sawMore = true
+                                    return@Processor false
+                                }
                                 mixins.add(psiClass to injections)
+                            } else {
+                                methodFilteredOut++
+                                if (methodFilteredFqcns.size < 10) {
+                                    methodFilteredFqcns.add(psiClass.qualifiedName ?: psiClass.name ?: "?")
+                                }
                             }
                         }
                     }
-                    mixins.size < maxResults
+                    true
                 })
             }
 
@@ -324,11 +368,25 @@ class SemanticNavigationToolset : McpToolset {
                     appendLine("=== Mixins targeting $normalizedTarget${if (methodName != null) "#$methodName" else ""} ===")
                     appendLine()
                     if (fallback.isEmpty()) {
-                        appendLine("No mixins found targeting this class.")
-                        if (mixinAnnotationClass == null) {
-                            appendLine("(Mixin library may not be on classpath — add org.spongepowered:mixin as dependency)")
+                        if (methodName != null && methodFilteredOut > 0) {
+                            val more: String = if (methodFilteredOut > methodFilteredFqcns.size) ", ..." else ""
+                            appendLine(
+                                "No mixins found injecting into '$methodName', but $methodFilteredOut mixin(s) target " +
+                                    "$normalizedTarget via other members: ${methodFilteredFqcns.joinToString(", ")}$more. " +
+                                    "Rerun without methodName for their full injection lists.",
+                            )
+                        } else {
+                            appendLine("No mixins found targeting this class (annotation index and textual source fallback both empty).")
+                            if (mixinAnnotationClass == null) {
+                                appendLine("(Mixin library may not be on classpath; add org.spongepowered:mixin as dependency)")
+                            }
                         }
                     } else {
+                        appendLine(
+                            "(annotation index found no verified @Mixin targets; entries below are heuristic text " +
+                                "matches from dependency-attached sources and may be false positives; verify with mixin_find_class)",
+                        )
+                        appendLine()
                         for ((i, pair) in fallback.withIndex()) {
                             appendLine("${i + 1}. ${pair.first}")
                             appendLine("   Source: ${pair.second}")
@@ -359,7 +417,7 @@ class SemanticNavigationToolset : McpToolset {
                         appendLine("   Source: $source")
                         appendLine()
                     }
-                    if (mixins.size >= maxResults) {
+                    if (sawMore) {
                         appendLine("  ... (truncated at $maxResults results)")
                     }
                     if (annotated) {
@@ -562,6 +620,7 @@ class SemanticNavigationToolset : McpToolset {
                 val query = OverridingMethodsSearch.search(psiMethod, scope, true)
                 val deduper = ClassContentDeduper()
                 val overrides: MutableList<Pair<String, PsiMethod>> = mutableListOf()
+                var sawMore = false
                 query.forEach(Processor<PsiMethod> { overriding ->
                     val overridingClass: PsiClass? = overriding.containingClass
                     val key: String =
@@ -570,9 +629,13 @@ class SemanticNavigationToolset : McpToolset {
                             ?: overridingClass?.name
                             ?: "(unknown)"
                     if (deduper.record(key, overridingClass?.containingFile?.virtualFile)) {
+                        if (overrides.size >= maxResults) {
+                            sawMore = true
+                            return@Processor false
+                        }
                         overrides.add(key to overriding)
                     }
-                    overrides.size < maxResults
+                    true
                 })
 
                 if (overrides.isEmpty()) {
@@ -600,7 +663,7 @@ class SemanticNavigationToolset : McpToolset {
                     appendLine("  ${i + 1}. $fqcn$abstractTag${annotation ?: ""}")
                     appendLine("     Source: $path$locationSuffix")
                 }
-                if (overrides.size >= maxResults) {
+                if (sawMore) {
                     appendLine("  ... (truncated at $maxResults results)")
                 }
                 if (annotated) {
@@ -634,32 +697,22 @@ class SemanticNavigationToolset : McpToolset {
 
                 if (fieldResult != null && parameterTypes == null && methodDescriptor == null) {
                     val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
-                    val query = ReferencesSearch.search(fieldResult, scope, true)
-                    val refs: MutableList<PsiReference> = mutableListOf()
-                    query.forEach(Processor<PsiReference> { ref ->
-                        refs.add(ref)
-                        refs.size < maxResults
-                    })
+                    val (refs: List<PsiReference>, sawMore: Boolean) = collectReferences(fieldResult, scope, maxResults)
+                    val sameNameMethods: Int = psiClass.findMethodsByName(memberName, true).size
 
                     val result: String = buildString {
                         appendLine("=== References to $className.$memberName (field) ===")
                         appendLine()
                         appendLine("Field type: ${fieldResult.type.presentableText}")
+                        if (sameNameMethods > 0) {
+                            appendLine(
+                                "(Note: $sameNameMethods method(s) named '$memberName' also exist in this class or its " +
+                                    "supertypes and were not searched; pass parameterTypes or methodDescriptor to " +
+                                    "search method references instead.)",
+                            )
+                        }
                         appendLine()
-                        for (ref: PsiReference in refs) {
-                            val element = ref.element
-                            val file = element.containingFile
-                            val vf = file?.virtualFile
-                            val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
-                            val line: Int = element.containingFile?.let { f ->
-                                val doc = PsiDocumentManager.getInstance(project).getDocument(f)
-                                doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
-                            } ?: 0
-                            appendLine("  $path:$line  ${element.text.take(80)}${if (element.text.length > 80) "..." else ""}")
-                        }
-                        if (refs.size >= maxResults) {
-                            appendLine("  ... (truncated at $maxResults results)")
-                        }
+                        appendReferenceList(project, refs, sawMore, maxResults)
                     }
                     return@smartReadAction McpToolCallResult.text(result)
                 }
@@ -672,12 +725,7 @@ class SemanticNavigationToolset : McpToolset {
                 if (resolution is MethodResolver.Resolution.Error) {
                     if (fieldResult != null) {
                         val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
-                        val query = ReferencesSearch.search(fieldResult, scope, true)
-                        val refs: MutableList<PsiReference> = mutableListOf()
-                        query.forEach(Processor<PsiReference> { ref ->
-                            refs.add(ref)
-                            refs.size < maxResults
-                        })
+                        val (refs: List<PsiReference>, sawMore: Boolean) = collectReferences(fieldResult, scope, maxResults)
 
                         val result: String = buildString {
                             appendLine("=== References to $className.$memberName (field) ===")
@@ -685,20 +733,7 @@ class SemanticNavigationToolset : McpToolset {
                             appendLine("Field type: ${fieldResult.type.presentableText}")
                             appendLine("(Note: no method named '$memberName' was found; showing field references.)")
                             appendLine()
-                            for (ref: PsiReference in refs) {
-                                val element = ref.element
-                                val file = element.containingFile
-                                val vf = file?.virtualFile
-                                val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
-                                val line: Int = element.containingFile?.let { f ->
-                                    val doc = PsiDocumentManager.getInstance(project).getDocument(f)
-                                    doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
-                                } ?: 0
-                                appendLine("  $path:$line  ${element.text.take(80)}${if (element.text.length > 80) "..." else ""}")
-                            }
-                            if (refs.size >= maxResults) {
-                                appendLine("  ... (truncated at $maxResults results)")
-                            }
+                            appendReferenceList(project, refs, sawMore, maxResults)
                         }
                         return@smartReadAction McpToolCallResult.text(result)
                     }
@@ -707,30 +742,12 @@ class SemanticNavigationToolset : McpToolset {
                 val psiMethod: PsiMethod = (resolution as MethodResolver.Resolution.Found).method
 
                 val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
-                val query = ReferencesSearch.search(psiMethod, scope, true)
-                val refs: MutableList<PsiReference> = mutableListOf()
-                query.forEach(Processor<PsiReference> { ref ->
-                    refs.add(ref)
-                    refs.size < maxResults
-                })
+                val (refs: List<PsiReference>, sawMore: Boolean) = collectReferences(psiMethod, scope, maxResults)
 
                 val result: String = buildString {
                     appendLine("=== References to $className#$memberName ===")
                     appendLine()
-                    for (ref: PsiReference in refs) {
-                        val element = ref.element
-                        val file = element.containingFile
-                        val vf = file?.virtualFile
-                        val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
-                        val line: Int = element.containingFile?.let { f ->
-                            val doc = PsiDocumentManager.getInstance(project).getDocument(f)
-                            doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
-                        } ?: 0
-                        appendLine("  $path:$line  ${element.text.take(80)}${if (element.text.length > 80) "..." else ""}")
-                    }
-                    if (refs.size >= maxResults) {
-                        appendLine("  ... (truncated at $maxResults results)")
-                    }
+                    appendReferenceList(project, refs, sawMore, maxResults)
                 }
                 McpToolCallResult.text(result)
             }
@@ -742,36 +759,63 @@ class SemanticNavigationToolset : McpToolset {
                 ?: return@smartReadAction null
 
             val scope: GlobalSearchScope = GlobalSearchScope.allScope(project)
-            val query = ReferencesSearch.search(psiClass, scope, true)
-            val refs: MutableList<PsiReference> = mutableListOf()
-            query.forEach(Processor<PsiReference> { ref ->
-                refs.add(ref)
-                refs.size < maxResults
-            })
+            val (refs: List<PsiReference>, sawMore: Boolean) = collectReferences(psiClass, scope, maxResults)
 
             buildString {
                 appendLine("=== References to $className ===")
                 appendLine()
-                for (ref: PsiReference in refs) {
-                    val element = ref.element
-                    val file = element.containingFile
-                    val vf = file?.virtualFile
-                    val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
-                    val line: Int = element.containingFile?.let { f ->
-                        val doc = PsiDocumentManager.getInstance(project).getDocument(f)
-                        doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
-                    } ?: 0
-                    appendLine("  $path:$line  ${element.text.take(80)}${if (element.text.length > 80) "..." else ""}")
-                }
-                if (refs.size >= maxResults) {
-                    appendLine("  ... (truncated at $maxResults results)")
-                }
+                appendReferenceList(project, refs, sawMore, maxResults)
             }
         }
 
         return when {
             result != null -> McpToolCallResult.text(result)
             else -> McpToolCallResult.error("Class not found: $className\n${FqcnResolver.CLASS_NOT_FOUND_HINT}")
+        }
+    }
+
+    @RequiresReadLock
+    private fun collectReferences(
+        target: PsiElement,
+        scope: GlobalSearchScope,
+        maxResults: Int,
+    ): Pair<List<PsiReference>, Boolean> {
+        val refs: MutableList<PsiReference> = mutableListOf()
+        var sawMore = false
+        ReferencesSearch.search(target, scope, true).forEach(Processor<PsiReference> { ref ->
+            if (refs.size >= maxResults) {
+                sawMore = true
+                return@Processor false
+            }
+            refs.add(ref)
+            true
+        })
+        return refs to sawMore
+    }
+
+    @RequiresReadLock
+    private fun StringBuilder.appendReferenceList(
+        project: Project,
+        refs: List<PsiReference>,
+        sawMore: Boolean,
+        maxResults: Int,
+    ) {
+        if (refs.isEmpty()) {
+            appendLine("  (no references found in the current classpath)")
+            return
+        }
+        for (ref: PsiReference in refs) {
+            val element = ref.element
+            val vf = element.containingFile?.virtualFile
+            val path: String = vf?.let { projectRelativePath(project, it) } ?: "(unknown)"
+            val line: Int = element.containingFile?.let { f ->
+                val doc = PsiDocumentManager.getInstance(project).getDocument(f)
+                doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
+            } ?: 0
+            appendLine("  $path:$line  ${element.text.take(80)}${if (element.text.length > 80) "..." else ""}")
+        }
+        if (sawMore) {
+            appendLine("  ... (truncated at $maxResults results)")
         }
     }
 
@@ -827,9 +871,17 @@ class SemanticNavigationToolset : McpToolset {
                 appendLine("--- $header (max depth $maxDepth, max results $maxResults) ---")
 
                 when (direction) {
-                    "callers" -> CallHierarchyExpander.expandCallers(
-                        project, psiMethod, 0, maxDepth, scope, visited, budget, this,
-                    )
+                    "callers" -> {
+                        CallHierarchyExpander.expandCallers(
+                            project, psiMethod, 0, maxDepth, scope, visited, budget, this,
+                        )
+                        if (budget.used == 0) {
+                            appendLine(
+                                "  (no callers found in source or the indexed classpath; reflective, event-bus, " +
+                                    "or mixin-framework invocations will not appear here)",
+                            )
+                        }
+                    }
                     "callees" -> {
                         val target = CallHierarchyExpander.targetFor(psiMethod, methodDescriptor)
                         CallHierarchyExpander.expandCallees(

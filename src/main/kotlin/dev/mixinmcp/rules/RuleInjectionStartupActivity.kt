@@ -607,29 +607,54 @@ private val MC_BUILD_PLUGIN_PATTERNS = listOf(
 )
 
 internal fun hasGradlePlugin(root: Path): Boolean {
-    if (Files.exists(root.resolve(".gradle/mixinmcp/manifest.json"))) return true
+    if (gradlePluginAppliedIn(root)) return true
+    return immediateChildDirs(root).any { gradlePluginAppliedIn(it) }
+}
 
-    fun buildFileContainsPlugin(file: Path): Boolean {
-        if (!Files.exists(file)) return false
-        return try {
-            "dev.mixinmcp.decompile" in Files.readString(file)
-        } catch (_: IOException) {
-            false
-        }
+private fun gradlePluginAppliedIn(dir: Path): Boolean {
+    if (Files.exists(dir.resolve(".gradle/mixinmcp/manifest.json"))) return true
+    return buildFileContainsPlugin(dir.resolve("build.gradle")) ||
+        buildFileContainsPlugin(dir.resolve("build.gradle.kts"))
+}
+
+private fun buildFileContainsPlugin(file: Path): Boolean {
+    if (!Files.exists(file)) return false
+    return try {
+        "dev.mixinmcp.decompile" in Files.readString(file)
+    } catch (_: IOException) {
+        false
     }
+}
 
-    return buildFileContainsPlugin(root.resolve("build.gradle")) ||
-        buildFileContainsPlugin(root.resolve("build.gradle.kts"))
+private fun immediateChildDirs(root: Path): List<Path> {
+    return try {
+        Files.list(root).use { children ->
+            children.filter { Files.isDirectory(it) }
+                .filter { !it.fileName.toString().startsWith(".") }
+                .toList()
+        }
+    } catch (_: IOException) {
+        emptyList()
+    }
 }
 
 /**
- * Version declared next to the plugin id in a root build file. Catches a just-bumped
- * version before any sync has stamped a manifest; misses version-catalog declarations,
- * which the manifest stamp covers after the next genDependencySources run.
+ * Version declared next to the plugin id in a root or immediate-subproject build file.
+ * Catches a just-bumped version before any sync has stamped a manifest; misses
+ * version-catalog declarations, which the manifest stamp covers after the next
+ * genDependencySources run.
  */
 internal fun declaredGradlePluginVersion(root: Path): String? {
+    declaredDecompileVersionIn(root)?.let { return it }
+    for (child in immediateChildDirs(root)) {
+        declaredDecompileVersionIn(child)?.let { return it }
+    }
+    return null
+}
+
+private fun declaredDecompileVersionIn(dir: Path): String? {
     for (name in listOf("build.gradle", "build.gradle.kts")) {
-        val file = root.resolve(name)
+        val file = dir.resolve(name)
         if (!Files.exists(file)) continue
         val version: String? = try {
             parseDeclaredDecompileVersion(Files.readString(file))

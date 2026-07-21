@@ -82,8 +82,15 @@ object MethodResolver {
         val methods: List<PsiMethod> = findMethodsByName(psiClass, methodName)
 
         if (methods.isEmpty()) {
+            val syntheticHint: String = if ('$' in methodName) {
+                " Names containing '\$' (lambda\$..., access\$..., bridges) are compiler-generated; " +
+                    "such methods exist only in bytecode and are invisible to PSI-based tools. " +
+                    "Use mixin_method_bytecode or mixin_class_bytecode, or query the enclosing source method."
+            } else {
+                ""
+            }
             return Resolution.Error(
-                "No method named '$methodName' found in ${psiClass.qualifiedName ?: className}.",
+                "No method named '$methodName' found in ${psiClass.qualifiedName ?: className}.$syntheticHint",
             )
         }
 

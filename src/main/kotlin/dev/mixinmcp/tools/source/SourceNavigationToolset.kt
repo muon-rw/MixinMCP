@@ -24,7 +24,13 @@ import com.intellij.psi.search.PsiShortNamesCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import dev.mixinmcp.tools.projectRelativePath
+import dev.mixinmcp.cache.DecompilationCacheService
 import dev.mixinmcp.cache.SourceAutoAttacher
+import dev.mixinmcp.cache.compareGradlePluginVersions
+import dev.mixinmcp.cache.isGradlePluginVersionAtLeast
+import dev.mixinmcp.rules.declaredGradlePluginVersion
+import dev.mixinmcp.rules.hasGradlePlugin
+import dev.mixinmcp.settings.MixinMcpSettings
 import dev.mixinmcp.resolve.ClassVariants
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.ModuleScopeResult
@@ -75,8 +81,12 @@ class SourceNavigationToolset : McpToolset {
 
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className, scope)
                 ?: return@smartReadAction McpToolCallResult.error(
-                    if (pinnedModule != null) {
-                        "Class not found in module '$pinnedModule': $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}"
+                    if (pinnedModule != null && FqcnResolver.resolveNested(project, className) != null) {
+                        "Class $className exists on the classpath but not in the dependency scope of module " +
+                            "'$pinnedModule'; drop module= to search the whole project, or pin a different module."
+                    } else if (pinnedModule != null) {
+                        "Class not found in module '$pinnedModule' or anywhere else on the classpath: $className. " +
+                            FqcnResolver.CLASS_NOT_FOUND_HINT
                     } else {
                         "Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}"
                     },
@@ -375,28 +385,41 @@ class SourceNavigationToolset : McpToolset {
                 var annotationEmitted: Boolean = false
 
                 fun renderEntries(entries: List<Pair<String?, String>>, deduper: ClassContentDeduper) {
-                    for ((key, line) in entries) {
+                    for ((key, line) in entries.take(maxResults)) {
                         val note: String? = deduper.annotationFor(key)
                         if (note != null) annotationEmitted = true
                         appendLine(line + (note ?: ""))
                     }
-                    if (entries.size >= maxResults) appendLine("  ... (truncated)")
+                    if (entries.size > maxResults) appendLine("  ... (truncated at $maxResults results; more exist)")
+                }
+
+                fun emptySectionNote(noNames: Boolean, inScopeCandidates: Int): String = when {
+                    noNames || inScopeCandidates == 0 && scopeMode == "all" ->
+                        "  (no symbols matching '$effectiveQuery')"
+                    inScopeCandidates == 0 ->
+                        "  (names matching '$effectiveQuery' exist, but none in scope=$scopeMode; retry with scope=all)"
+                    else ->
+                        "  (all matches were shaded Gradle-internal duplicates and are hidden)"
                 }
 
                 if (kindMode == "class" || kindMode == "all") {
                     appendLine("--- Classes ---")
                     val deduper = ClassContentDeduper()
                     val entries: MutableList<Pair<String?, String>> = mutableListOf()
-                    outer@ for (name: String in rankedNames(cache.allClassNames)) {
+                    val names: List<String> = rankedNames(cache.allClassNames)
+                    var candidates = 0
+                    outer@ for (name: String in names) {
                         ProgressManager.checkCanceled()
                         for (c: PsiClass in cache.getClassesByName(name, searchScope)) {
+                            candidates++
                             if (isShadedImpldep(c.qualifiedName)) continue
                             if (!deduper.record(c.qualifiedName, c.containingFile?.virtualFile)) continue
                             entries.add(c.qualifiedName to "  ${c.qualifiedName ?: name}")
-                            if (entries.size >= maxResults) break@outer
+                            if (entries.size > maxResults) break@outer
                         }
                     }
                     renderEntries(entries, deduper)
+                    if (entries.isEmpty()) appendLine(emptySectionNote(names.isEmpty(), candidates))
                     appendLine()
                 }
 
@@ -404,9 +427,12 @@ class SourceNavigationToolset : McpToolset {
                     appendLine("--- Methods ---")
                     val deduper = ClassContentDeduper()
                     val entries: MutableList<Pair<String?, String>> = mutableListOf()
-                    outer@ for (name: String in rankedNames(cache.allMethodNames)) {
+                    val names: List<String> = rankedNames(cache.allMethodNames)
+                    var candidates = 0
+                    outer@ for (name: String in names) {
                         ProgressManager.checkCanceled()
                         for (m: PsiMethod in cache.getMethodsByName(name, searchScope)) {
+                            candidates++
                             val declClass: PsiClass? = m.containingClass
                             val ownerFqcn: String? = declClass?.qualifiedName
                             if (isShadedImpldep(ownerFqcn)) continue
@@ -417,10 +443,11 @@ class SourceNavigationToolset : McpToolset {
                             val params: String = m.parameterList.parameters
                                 .joinToString(", ") { it.type.presentableText }
                             entries.add(key to "  ${ownerFqcn ?: "?"}#$name($params)")
-                            if (entries.size >= maxResults) break@outer
+                            if (entries.size > maxResults) break@outer
                         }
                     }
                     renderEntries(entries, deduper)
+                    if (entries.isEmpty()) appendLine(emptySectionNote(names.isEmpty(), candidates))
                     appendLine()
                 }
 
@@ -428,19 +455,23 @@ class SourceNavigationToolset : McpToolset {
                     appendLine("--- Fields ---")
                     val deduper = ClassContentDeduper()
                     val entries: MutableList<Pair<String?, String>> = mutableListOf()
-                    outer@ for (name: String in rankedNames(cache.allFieldNames)) {
+                    val names: List<String> = rankedNames(cache.allFieldNames)
+                    var candidates = 0
+                    outer@ for (name: String in names) {
                         ProgressManager.checkCanceled()
                         for (f: PsiField in cache.getFieldsByName(name, searchScope)) {
+                            candidates++
                             val declClass: PsiClass? = f.containingClass
                             val ownerFqcn: String? = declClass?.qualifiedName
                             if (isShadedImpldep(ownerFqcn)) continue
                             val key: String? = ownerFqcn?.let { "$it#${f.name}" }
                             if (!deduper.record(key, declClass?.containingFile?.virtualFile)) continue
                             entries.add(key to "  ${ownerFqcn ?: "?"}.${f.name}: ${f.type.presentableText}")
-                            if (entries.size >= maxResults) break@outer
+                            if (entries.size > maxResults) break@outer
                         }
                     }
                     renderEntries(entries, deduper)
+                    if (entries.isEmpty()) appendLine(emptySectionNote(names.isEmpty(), candidates))
                 }
 
                 if (annotationEmitted) {
@@ -644,10 +675,37 @@ class SourceNavigationToolset : McpToolset {
                 for ((i, info: SourceRootInfo) in cacheRoots.withIndex()) {
                     appendRootDetail(i + 1, info, "  (empty — dependency may not have classes or decompilation pending)")
                 }
+                val cacheStats = DecompilationCacheService.getInstance(project).lastScanStats
+                val projectRootPath: java.nio.file.Path? = project.basePath?.let { java.nio.file.Path.of(it) }
+                val pluginPresent: Boolean = projectRootPath != null && hasGradlePlugin(projectRootPath)
                 if (cacheRoots.isEmpty()) {
-                    appendLine("  (none: dependencies without published sources are not searchable; apply the")
-                    appendLine("   dev.mixinmcp.decompile Gradle plugin and run ./gradlew genDependencySources)")
+                    when {
+                        cacheStats.noVirtualFile > 0 -> {
+                            appendLine("  (none attached, but ${cacheStats.noVirtualFile} cache entries exist on disk;")
+                            appendLine("   run mixin_sync_project to attach them, no re-decompile needed)")
+                        }
+                        pluginPresent -> {
+                            appendLine("  (none: the dev.mixinmcp.decompile plugin is applied but no cache entries exist;")
+                            appendLine("   run ./gradlew genDependencySources, then mixin_sync_project)")
+                        }
+                        else -> {
+                            appendLine("  (none: dependencies without published sources are not searchable; apply the")
+                            appendLine("   dev.mixinmcp.decompile Gradle plugin and run ./gradlew genDependencySources)")
+                        }
+                    }
                     appendLine()
+                } else if (pluginPresent) {
+                    val required: String = DecompilationCacheService.REQUIRED_GRADLE_PLUGIN_VERSION
+                    val installed: String? = listOfNotNull(
+                        DecompilationCacheService.getInstance(project).installedGradlePluginVersion(),
+                        declaredGradlePluginVersion(projectRootPath),
+                    ).maxWithOrNull(::compareGradlePluginVersions)
+                    if (!isGradlePluginVersionAtLeast(installed, required)) {
+                        appendLine("  Caveat: applied Gradle plugin (${installed ?: "pre-$required"}) is older than $required;")
+                        appendLine("  cache entries for some dependencies may be missing (affects only dependencies without")
+                        appendLine("  a published -sources.jar). Update dev.mixinmcp.decompile and rerun ./gradlew genDependencySources.")
+                        appendLine()
+                    }
                 }
 
                 appendLine("=== Buildscript classpath source roots (${buildscriptRoots.size}) ===")
@@ -665,7 +723,13 @@ class SourceNavigationToolset : McpToolset {
                     appendLine("  and ${buildscriptNames.size - 50} more")
                 }
                 if (buildscriptRoots.isEmpty()) {
-                    appendLine("  (none: Gradle plugin absent, indexing setting off, or project not yet synced)")
+                    if (!MixinMcpSettings.getInstance(project).indexBuildscriptClasspath) {
+                        appendLine("  (none: buildscript indexing is disabled in Settings | Tools | MixinMCP)")
+                    } else {
+                        appendLine("  (none: IDE Gradle support unavailable or project not yet synced; build plugins")
+                        appendLine("   without published sources also need the dev.mixinmcp.decompile Gradle plugin")
+                        appendLine("   and ./gradlew genDependencySources)")
+                    }
                 }
                 appendLine()
 
@@ -737,12 +801,14 @@ class SourceNavigationToolset : McpToolset {
         val matchesMask: (String) -> Boolean = buildFileMaskMatcher(fileMask)
 
         val requestStart: Long = System.currentTimeMillis()
+        // Scan one hit past the cap so the truncation footer can state definitively
+        // whether more matches exist, without counting everything past the cap.
+        val scanCap: Int = if (maxResults == Int.MAX_VALUE) maxResults else maxResults + 1
         val scanResult: DepRegexScanResult = smartReadAction(project) {
             val startTime: Long = System.currentTimeMillis()
             val hits: MutableList<DepSearchHit> = mutableListOf()
             var timedOut: Boolean = false
-            val pathPrefixFilesSeen: BooleanArray? =
-                if (normalizedPathPrefix != null) booleanArrayOf(false) else null
+            val scannedFiles = IntArray(1)
 
             val allRoots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
             val libraryRoots: List<SourceRootInfo> =
@@ -758,20 +824,20 @@ class SourceNavigationToolset : McpToolset {
                         timedOut = true
                         return
                     }
-                    if (hits.size >= maxResults) return
+                    if (hits.size >= scanCap) return
                     collectRegexHits(
                         info.root,
                         info.root,
                         pattern,
                         matchesMask,
                         hits,
-                        maxResults,
+                        scanCap,
                         startTime,
                         timeout,
                         info.typeLabel,
                         normalizedPathPrefix,
                         skipPath,
-                        pathPrefixFilesSeen,
+                        scannedFiles,
                     )
                 }
             }
@@ -783,13 +849,13 @@ class SourceNavigationToolset : McpToolset {
                 else -> {
                     scanRoots(libraryRoots, skipPath = { false })
                     val pathsHitInLibrary: Set<String> = hits.map { it.filePath }.toSet()
-                    if (hits.size < maxResults && !timedOut) {
+                    if (hits.size < scanCap && !timedOut) {
                         scanRoots(cacheRoots, skipPath = { it in pathsHitInLibrary })
                     }
                     // Buildscript roots scan last: game and mod classpath hits stay first
                     // and duplicate paths already found are not repeated.
                     val pathsHit: Set<String> = hits.map { it.filePath }.toSet()
-                    if (hits.size < maxResults && !timedOut) {
+                    if (hits.size < scanCap && !timedOut) {
                         scanRoots(buildscriptRoots, skipPath = { it in pathsHit })
                     }
                 }
@@ -801,21 +867,39 @@ class SourceNavigationToolset : McpToolset {
                     val base: List<String> = buildNoMatchHintsForDepSearch(
                         project,
                         normalizedPathPrefix,
-                        sawAnyFileUnderPathPrefix = pathPrefixFilesSeen?.get(0) == true,
+                        rootsMode,
                     )
-                    if (rootsMode == "buildscript" && buildscriptRoots.isEmpty()) {
-                        base + ("No buildscript classpath roots are available. Possible causes: buildscript " +
-                            "indexing is disabled in Settings | Tools | MixinMCP, the IDE's Gradle support is " +
-                            "disabled, or the project has not synced. Build plugins without published sources " +
-                            "also need the MixinMCP Gradle plugin: apply dev.mixinmcp.decompile and run " +
-                            "./gradlew genDependencySources.")
-                    } else {
-                        base
+                    val zeroTierNotice: String? = when {
+                        rootsMode == "buildscript" && buildscriptRoots.isEmpty() -> {
+                            val cause: String =
+                                if (!MixinMcpSettings.getInstance(project).indexBuildscriptClasspath) {
+                                    "buildscript indexing is disabled in Settings | Tools | MixinMCP."
+                                } else {
+                                    "IDE Gradle support unavailable or project not yet synced. Build plugins " +
+                                        "without published sources also need the MixinMCP Gradle plugin: apply " +
+                                        "dev.mixinmcp.decompile and run ./gradlew genDependencySources."
+                                }
+                            "No buildscript classpath roots are available; nothing was searched. $cause"
+                        }
+                        rootsMode == "library" && libraryRoots.isEmpty() ->
+                            "No Library SOURCES roots are attached; nothing was searched for roots=library. " +
+                                "Run mixin_list_source_roots for diagnostics."
+                        rootsMode == "decompiled" && cacheRoots.isEmpty() ->
+                            "No decompiled cache roots are attached; nothing was searched for roots=decompiled. " +
+                                "Run mixin_list_source_roots for diagnostics."
+                        else -> null
                     }
+                    if (zeroTierNotice != null) base + zeroTierNotice else base
                 } else {
                     emptyList()
                 }
-            DepRegexScanResult(hits = hits.toList(), timedOut = timedOut, noMatchHints = noMatchHints)
+            DepRegexScanResult(
+                hits = hits.take(maxResults),
+                timedOut = timedOut,
+                noMatchHints = noMatchHints,
+                scannedFiles = scannedFiles[0],
+                sawMore = hits.size > maxResults,
+            )
         }
 
         val elapsed: Long = System.currentTimeMillis() - requestStart
@@ -831,12 +915,15 @@ class SourceNavigationToolset : McpToolset {
             }
             appendLine()
             if (hits.isEmpty()) {
-                appendLine("No matches found.")
-                for (line: String in scanResult.noMatchHints) {
-                    appendLine(line)
-                }
                 if (timedOut) {
-                    appendLine("(search timed out after ${elapsed}ms — try a more specific pattern, add fileMask, pathPrefix, or increase timeout)")
+                    appendLine("Search INCOMPLETE (timed out after ${elapsed}ms); not all files were searched, so this is not a confirmed negative.")
+                    appendLine("No matches in the ${scanResult.scannedFiles} files scanned before the cutoff. Retry with a more specific pattern, fileMask, or pathPrefix, or increase timeout.")
+                } else {
+                    appendLine("No matches found.")
+                    appendLine(describeEmptyScan(scanResult.scannedFiles, fileMask, normalizedPathPrefix))
+                    for (line: String in scanResult.noMatchHints) {
+                        appendLine(line)
+                    }
                 }
             } else {
                 if (timedOut) {
@@ -844,8 +931,10 @@ class SourceNavigationToolset : McpToolset {
                     appendLine()
                 }
                 formatGroupedHitsWithContext(this, hits, contextLines)
-                if (hits.size >= maxResults) {
-                    appendLine("  ... (truncated at $maxResults matches)")
+                if (scanResult.sawMore) {
+                    appendLine("  ... (truncated at $maxResults matches; more exist)")
+                } else if (timedOut && hits.size >= maxResults) {
+                    appendLine("  ... (stopped at $maxResults matches; unscanned files may hold more)")
                 }
             }
         }
@@ -883,32 +972,50 @@ class SourceNavigationToolset : McpToolset {
         }
         val pinned: ModuleScopeResult.Found? = moduleResult as? ModuleScopeResult.Found
 
+        val trimmedPath: String? = path?.trim()?.takeIf { it.isNotEmpty() }
+        val fromUrl: VirtualFile? =
+            if (!url.isNullOrBlank()) VirtualFileManager.getInstance().findFileByUrl(url) else null
+        val urlFailed: Boolean = !url.isNullOrBlank() && (fromUrl == null || !fromUrl.isValid)
         val vf: VirtualFile? = when {
-            !url.isNullOrBlank() -> VirtualFileManager.getInstance().findFileByUrl(url)
-            else -> smartReadAction(project) { locateDepSourceByPath(project, path!!.trim(), pinned?.scope) }
+            fromUrl != null && fromUrl.isValid -> fromUrl
+            trimmedPath != null -> smartReadAction(project) { locateDepSourceByPath(project, trimmedPath, pinned?.scope) }
+            else -> null
         }
+        val viaPathFallback: Boolean = urlFailed && vf != null && vf.isValid
 
         if (vf == null || !vf.isValid) {
-            val hint: String = if (!url.isNullOrBlank()) {
-                "Pass the exact jar:// URL from mixin_search_in_deps results, or try the `path` parameter (e.g. io/redspace/.../Utils.java)."
-            } else {
-                val normalizedPath: String = path!!.trim()
+            fun pathMissHint(normalizedPath: String, rootsTotal: Int): String {
                 if (normalizedPath.startsWith("net/minecraft/")) {
-                    "Vanilla Minecraft classes may not be available via path lookup: on MDG they live in the " +
+                    return "Vanilla Minecraft classes may not be available via path lookup: on MDG they live in the " +
                         "merged jar; on Loom toolchains they come from the genSources jar, or from the decompiled " +
                         "cache when genSources has not run. " +
                         "Use mixin_find_class with includeSource=true to read the source, " +
                         "or mixin_search_in_deps to get the jar url. " +
                         "If Minecraft sources are missing entirely, the user may need to run " +
                         "./gradlew genSources (Loom toolchains) or ./gradlew genDependencySources --force."
-                } else {
-                    val pinHint: String = pinned?.let {
-                        " Module pin '${it.module.name}' restricts the lookup to that module's classpath; drop module= to search all roots." +
-                            " Module pinning always excludes decompiled-cache and buildscript-classpath roots (synthetic roots with no module order entries), so drop module= for those paths."
-                    } ?: ""
-                    "Path not found in dependency sources. " +
-                        "Use mixin_search_in_deps to find the file, then pass its `url` to this tool.$pinHint"
                 }
+                if (rootsTotal == 0) {
+                    return "No dependency source roots are attached; nothing was searched. " +
+                        "Run mixin_list_source_roots for diagnostics; sources may require " +
+                        "./gradlew genDependencySources (or genSources on Loom toolchains)."
+                }
+                val pinHint: String = pinned?.let {
+                    " Module pin '${it.module.name}' restricts the lookup to that module's classpath; drop module= to search all roots." +
+                        " Module pinning always excludes decompiled-cache and buildscript-classpath roots (synthetic roots with no module order entries), so drop module= for those paths."
+                } ?: ""
+                return "Path not found in any of the $rootsTotal dependency source roots searched. " +
+                    "Use mixin_search_in_deps to find the file, then pass its `url` to this tool.$pinHint"
+            }
+
+            val rootsTotal: Int =
+                if (trimmedPath != null) smartReadAction(project) { collectAllSourceRoots(project).size } else 0
+            val hint: String = when {
+                urlFailed && trimmedPath != null ->
+                    "url `$url` did not resolve, and path `$trimmedPath` was not found either. " +
+                        pathMissHint(trimmedPath, rootsTotal)
+                urlFailed ->
+                    "Pass the exact jar:// URL from mixin_search_in_deps results, or try the `path` parameter (e.g. io/redspace/.../Utils.java)."
+                else -> pathMissHint(trimmedPath!!, rootsTotal)
             }
             return McpToolCallResult.error("File not found. $hint")
         }
@@ -924,18 +1031,24 @@ class SourceNavigationToolset : McpToolset {
         }
 
         val lines: List<String> = content.lines()
-        val start: Int = (lineNumber - linesBefore).coerceAtLeast(1)
-        val end: Int = (lineNumber + linesAfter).coerceAtMost(lines.size)
+        val outOfRange: Boolean = lineNumber < 1 || lineNumber > lines.size
+        val anchor: Int = lineNumber.coerceIn(1, lines.size)
+        val start: Int = (anchor - linesBefore).coerceAtLeast(1)
+        val end: Int = (anchor + linesAfter).coerceAtMost(lines.size)
 
         val result: String = buildString {
+            if (viaPathFallback) {
+                appendLine("(url `$url` did not resolve; located via the `path` parameter instead. The url may be stale; re-run mixin_search_in_deps for a fresh one.)")
+            }
+            if (outOfRange) {
+                appendLine("(requested line $lineNumber is out of range; ${vf.name} has ${lines.size} lines; showing lines $start-$end. Line numbers may be stale; re-run mixin_search_in_deps.)")
+            }
             val modSuffix: String = pinned?.let { " [pinned module: ${it.module.name}]" } ?: ""
             appendLine("=== ${vf.name} (lines $start-$end) [sourceKind: $sourceKind]$modSuffix ===")
             appendLine()
             for (i in start..end) {
-                if (i >= 1 && i <= lines.size) {
-                    val marker: String = if (i == lineNumber) ">" else " "
-                    appendLine("$marker $i| ${lines[i - 1]}")
-                }
+                val marker: String = if (i == lineNumber) ">" else " "
+                appendLine("$marker $i| ${lines[i - 1]}")
             }
         }
 

@@ -437,6 +437,11 @@ class InlineToolset : McpToolset {
             appendLine("  declared in: ${prep.filePath}")
             appendLine("  declaration would be ${if (deleteDeclaration) "removed" else "kept"}")
             appendLine()
+            if (prep.refCount == 0) {
+                appendLine("No usages found; a non-dry run will refuse this inline (nothing to inline into).")
+                appendLine("Use mixin_safe_delete to remove the declaration instead.")
+                return@buildString
+            }
             if (data.usagesByFile.isEmpty()) {
                 appendLine("No usages found.")
             } else {

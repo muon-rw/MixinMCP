@@ -229,6 +229,7 @@ class SymbolRefactorToolset : McpToolset {
         val targetFilePath: String,
         val deletesWholeFile: Boolean,
         val usages: List<UsageRef>,
+        val sameFileUsagesSkipped: Int,
     )
 
     private data class UsageRef(
@@ -322,7 +323,7 @@ class SymbolRefactorToolset : McpToolset {
             }
 
             val usages: MutableList<UsageRef> = mutableListOf()
-            collectUsages(project, target, skipUsageFile, usages)
+            val sameFileUsagesSkipped: Int = collectUsages(project, target, skipUsageFile, usages)
             if (target is PsiMethod) {
                 collectOverrides(project, target, usages)
             }
@@ -335,6 +336,7 @@ class SymbolRefactorToolset : McpToolset {
                     targetFilePath = targetFilePath,
                     deletesWholeFile = deletesWholeFile,
                     usages = usages.toList(),
+                    sameFileUsagesSkipped = sameFileUsagesSkipped,
                 ),
             )
         }
@@ -345,13 +347,18 @@ class SymbolRefactorToolset : McpToolset {
         element: PsiNamedElement,
         skipFile: VirtualFile?,
         sink: MutableList<UsageRef>,
-    ) {
+    ): Int {
+        var skipped = 0
         ReferencesSearch.search(element).forEach { reference ->
             val refElement: PsiElement = reference.element
             val refFile: VirtualFile = refElement.containingFile?.virtualFile ?: return@forEach
-            if (skipFile != null && refFile == skipFile) return@forEach
+            if (skipFile != null && refFile == skipFile) {
+                skipped++
+                return@forEach
+            }
             sink.add(toUsageRef(project, refElement, refFile, tag = null))
         }
+        return skipped
     }
 
     private fun collectOverrides(
@@ -406,7 +413,20 @@ class SymbolRefactorToolset : McpToolset {
             }
             appendLine()
             if (prep.usages.isEmpty()) {
-                appendLine("No usages found across project and dependencies.")
+                if (prep.sameFileUsagesSkipped > 0) {
+                    val fileNote: String = if (prep.deletesWholeFile) {
+                        "the whole file is deleted with it"
+                    } else {
+                        "other declarations remaining in that file may be left broken"
+                    }
+                    appendLine(
+                        "No usages found outside the deleted element's own file; " +
+                            "${prep.sameFileUsagesSkipped} reference(s) inside ${prep.targetFilePath} " +
+                            "are not counted ($fileNote).",
+                    )
+                } else {
+                    appendLine("No usages found across project and dependencies.")
+                }
                 if (dryRun) appendLine("Re-run without dryRun=true to perform the deletion.")
             } else {
                 appendLine("Found ${prep.usages.size} usage(s):")
@@ -605,6 +625,7 @@ class SymbolRefactorToolset : McpToolset {
 
     private fun performMove(project: Project, prep: MovePreparation): McpToolCallResult {
         var error: String? = null
+        var pushedConflicts: List<RefactorSupport.ConflictRef> = emptyList()
 
         ApplicationManager.getApplication().invokeAndWait {
             try {
@@ -625,6 +646,7 @@ class SymbolRefactorToolset : McpToolset {
                 @Suppress("UsePropertyAccessSyntax") // setter is public, getter is protected
                 processor.setPreviewUsages(false)
                 processor.run()
+                pushedConflicts = processor.pushedConflicts
                 PsiDocumentManager.getInstance(project).commitAllDocuments()
                 FileDocumentManager.getInstance().saveAllDocuments()
             } catch (t: Throwable) {
@@ -643,6 +665,13 @@ class SymbolRefactorToolset : McpToolset {
             appendLine("  to:   ${prep.targetRelative}")
             prep.moveMessage?.let { appendLine("  $it") }
             appendLine()
+            if (pushedConflicts.isNotEmpty()) {
+                appendLine("Move completed; proceeded despite ${pushedConflicts.size} conflict(s):")
+                for (c: RefactorSupport.ConflictRef in pushedConflicts) {
+                    appendLine("  [${c.tag}] ${c.file}  ${c.message}")
+                }
+                appendLine()
+            }
             appendLine(
                 "Package declaration and project-wide imports updated by IntelliJ. References inside JSON, " +
                     "TOML, ServiceLoader files etc. are updated when their language plugins contribute PSI " +
@@ -1087,8 +1116,9 @@ class SymbolRefactorToolset : McpToolset {
 
     /**
      * MoveFilesOrDirectoriesProcessor variant that suppresses the conflict dialog so
-     * the move runs headlessly. Conflicts surface via the processor's normal
-     * exception path instead of a modal dialog that would deadlock the MCP call.
+     * the move runs headlessly. Platform-detected conflicts are pushed through, but
+     * rendered here while their PSI is still valid; performMove reports them in the
+     * result text.
      */
     private class HeadlessMoveFilesProcessor(
         project: Project,
@@ -1104,10 +1134,16 @@ class SymbolRefactorToolset : McpToolset {
         searchForReferences, searchInComments, searchInNonJavaFiles,
         moveCallback, prepareSuccessfulCallback,
     ) {
+        var pushedConflicts: List<RefactorSupport.ConflictRef> = emptyList()
+            private set
+
         override fun showConflicts(conflicts: MultiMap<PsiElement, String>, usages: Array<out UsageInfo>?): Boolean {
-            // Returning true means "proceed regardless"; we already surfaced any
-            // blocking state via prepareMove, so any remaining conflicts are
-            // ones the IDE flagged late and the agent has decided to push through.
+            if (!conflicts.isEmpty) {
+                pushedConflicts = ApplicationManager.getApplication()
+                    .runReadAction<List<RefactorSupport.ConflictRef>> {
+                        RefactorSupport.renderConflicts(myProject, conflicts)
+                    }
+            }
             return true
         }
     }

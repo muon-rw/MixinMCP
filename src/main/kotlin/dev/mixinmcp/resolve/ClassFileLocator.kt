@@ -30,14 +30,22 @@ object ClassFileLocator {
     private const val CLASS_MAGIC: Int = 0xCAFEBABE.toInt()
 
     sealed class LocateResult {
+        /** Outcomes for a class that resolved to a PsiClass. */
+        sealed class Resolved : LocateResult()
+
         /**
          * [maybeStale]: the source file is newer than the .class (or has unsaved editor
          * changes), so the bytes may not reflect current source. mtime-based; a content-unchanged
          * touch (git checkout, formatter no-op) also trips it, so it is a warning, not an error.
          */
-        class Found(val bytes: ByteArray, val maybeStale: Boolean = false) : LocateResult()
-        data object NotFound : LocateResult()
-        data object NotBuilt : LocateResult()
+        class Found(val bytes: ByteArray, val maybeStale: Boolean = false) : Resolved()
+
+        /** Class resolved but no readable .class bytes at its origin. */
+        data object NotFound : Resolved()
+        data object NotBuilt : Resolved()
+
+        /** The name did not resolve to any class in the given scope. */
+        data object Unresolved : LocateResult()
     }
 
     @RequiresReadLock
@@ -55,7 +63,7 @@ object ClassFileLocator {
         scope: GlobalSearchScope = GlobalSearchScope.everythingScope(project),
     ): LocateResult {
         val psiClass: PsiClass = FqcnResolver.resolveNested(project, fqcn, scope)
-            ?: return LocateResult.NotFound
+            ?: return LocateResult.Unresolved
 
         return locateForClass(psiClass)
     }
@@ -65,7 +73,7 @@ object ClassFileLocator {
      * variant's own origin (its jar entry or its module's compiler output).
      */
     @RequiresReadLock
-    fun locateForClass(psiClass: PsiClass): LocateResult {
+    fun locateForClass(psiClass: PsiClass): LocateResult.Resolved {
         val containingFile = psiClass.containingFile ?: return LocateResult.NotFound
 
         if (containingFile is ClsFileImpl) {
@@ -101,7 +109,7 @@ object ClassFileLocator {
         return locateFromCompilerOutput(psiClass, virtualFile)
     }
 
-    private fun locateFromCompilerOutput(psiClass: PsiClass, sourceVf: VirtualFile): LocateResult {
+    private fun locateFromCompilerOutput(psiClass: PsiClass, sourceVf: VirtualFile): LocateResult.Resolved {
         val module: Module = ModuleUtilCore.findModuleForPsiElement(psiClass) ?: return LocateResult.NotFound
         val jvmName: String = ClassUtil.getJVMClassName(psiClass) ?: return LocateResult.NotFound
         val relativePath: String = jvmName.replace('.', '/') + ".class"

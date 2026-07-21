@@ -69,12 +69,34 @@ class DecompilationCacheService(private val project: Project) {
         buildscriptRootNamesByPath = result
             .filter { it.classpathKind == "buildscript" }
             .associate { it.root.path to it.libraryName }
+        lastScanStats = CacheScanStats(
+            valid = result.size,
+            missingCacheDir = missingCache,
+            noVirtualFile = noVirtualFile,
+            totalManifestEntries = mergedEntries.size,
+        )
 
         LOG.info("MixinMCP: getCachedRoots() → ${result.size} valid, " +
             "$missingCache missing cache dir, " +
             "$noVirtualFile no VirtualFile (of ${mergedEntries.size} total)")
         return result
     }
+
+    /**
+     * Snapshot from the last getCachedRoots pass, same lifecycle as
+     * buildscriptRootNamesByPath; lets hint builders distinguish an
+     * unpopulated cache from one that is on disk but not yet in the VFS.
+     */
+    @Volatile
+    var lastScanStats: CacheScanStats = CacheScanStats(0, 0, 0, 0)
+        private set
+
+    data class CacheScanStats(
+        val valid: Int,
+        val missingCacheDir: Int,
+        val noVirtualFile: Int,
+        val totalManifestEntries: Int,
+    )
 
     /**
      * Snapshot from the last getCachedRoots pass. labelFor runs once per root per

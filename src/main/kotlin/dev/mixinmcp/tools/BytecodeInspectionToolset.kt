@@ -66,9 +66,20 @@ private fun locateScoped(project: Project, className: String, module: String?): 
                 "Build the project, then retry.",
         )
         ClassFileLocator.LocateResult.NotFound -> ScopedLocate.Failure(
-            "Class not found or could not locate bytecode: $className" +
+            "Class $className resolved but its .class bytes could not be read" +
                 (if (pinnedModule != null) " (module: $pinnedModule)" else "") +
-                ". " + FqcnResolver.CLASS_NOT_FOUND_HINT,
+                "; the jar entry or compiled output may be corrupt, removed, or decompiled-only. " +
+                "Re-sync dependencies or rebuild, then retry.",
+        )
+        ClassFileLocator.LocateResult.Unresolved -> ScopedLocate.Failure(
+            if (pinnedModule != null && FqcnResolver.resolveNested(project, className) != null) {
+                "Class $className exists on the classpath but not in the dependency scope of " +
+                    "module '$pinnedModule'; drop module= to search the whole project, or pin a different module."
+            } else {
+                "Class not found: $className" +
+                    (if (pinnedModule != null) " (module: $pinnedModule)" else "") +
+                    ". " + FqcnResolver.CLASS_NOT_FOUND_HINT
+            },
         )
     }
 }
@@ -159,7 +170,16 @@ class BytecodeInspectionToolset : McpToolset {
                 } else {
                     analysis.methods
                 }
-                appendLine("--- Methods ---")
+                appendLine(if (syntheticOnly) "--- Synthetic Methods ---" else "--- Methods ---")
+                if (methodsToShow.isEmpty()) {
+                    appendLine(
+                        if (syntheticOnly) {
+                            "  (no synthetic methods; class declares ${analysis.methods.size}, none compiler-generated)"
+                        } else {
+                            "  (none declared)"
+                        },
+                    )
+                }
                 for (m in methodsToShow) {
                     val lambdaNote: String? = if (m.isLambda) {
                         val src = m.lambdaSourceMethod
@@ -180,7 +200,16 @@ class BytecodeInspectionToolset : McpToolset {
                 } else {
                     analysis.fields
                 }
-                appendLine("--- Fields ---")
+                appendLine(if (syntheticOnly) "--- Synthetic Fields ---" else "--- Fields ---")
+                if (fieldsToShow.isEmpty()) {
+                    appendLine(
+                        if (syntheticOnly) {
+                            "  (no synthetic fields; class declares ${analysis.fields.size}, none compiler-generated)"
+                        } else {
+                            "  (none declared)"
+                        },
+                    )
+                }
                 for (f in fieldsToShow) {
                     appendLine("  ${BytecodeAnalyzer.accessFlagsToString(f.access)} ${f.name} ${f.descriptor}")
                 }
@@ -281,6 +310,33 @@ class BytecodeInspectionToolset : McpToolset {
                 for (m in similar) {
                     appendLine("  ${m.name}${m.descriptor}")
                 }
+            }
+            scoped.report?.takeIf { it.hasMultipleVariants }?.let { report ->
+                val addedIn: List<String> = report.groups
+                    .filter { group ->
+                        group.diff?.methodsAdded?.any { matchesDiffKey(it, methodName, methodDescriptor) } == true
+                    }
+                    .flatMap { group -> group.variants.map { ClassVariants.originWithProvenance(it) } }
+                    .distinct()
+                    .sorted()
+                if (addedIn.isNotEmpty()) {
+                    appendLine(
+                        "'$methodName' exists in ${addedIn.joinToString(", ")}; " +
+                            "pass module= to resolve against that classpath.",
+                    )
+                } else if (report.excluded.isNotEmpty() || report.truncatedCount > 0) {
+                    appendLine(
+                        "Some classpath variants of $className were not analyzed (not built, unreadable, " +
+                            "or over the variant cap); absence here does not cover them.",
+                    )
+                }
+            }
+            if (located.maybeStale) {
+                appendLine(
+                    "NOTE: the compiled .class is older than its source (unsaved or unbuilt changes); " +
+                        "the methods listed reflect the last build. If '$methodName' was added or its " +
+                        "signature changed recently, rebuild and retry.",
+                )
             }
         })
     }

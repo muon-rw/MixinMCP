@@ -123,8 +123,14 @@ internal fun extractInjectionsForMethod(psiClass: PsiClass, methodName: String):
         for (ann in method.modifierList.annotations) {
             val shortName: String? = ann.qualifiedName?.substringAfterLast('.')
             if (shortName != null && shortName in INJECTOR_ANNOTATION_SHORT_NAMES) {
-                val methodValues: List<String> = extractMethodAttributeValues(ann.findAttributeValue("method"))
-                if (methodValues.any { methodTargets(it, methodName) }) {
+                // @Overwrite has no 'method' attribute; it targets via the mixin method's own name.
+                val matches: Boolean = if (shortName == "Overwrite") {
+                    method.name == methodName
+                } else {
+                    extractMethodAttributeValues(ann.findAttributeValue("method"))
+                        .any { methodTargets(it, methodName) }
+                }
+                if (matches) {
                     result.add(ann.text.trim())
                 }
             }
@@ -159,7 +165,7 @@ internal fun findTargetingMixinsByRegex(
     val escapedClass: String = Pattern.quote(className)
     val pattern: Pattern = try {
         if (methodName != null) {
-            Pattern.compile("@Mixin.*$escapedClass.*$methodName", Pattern.DOTALL)
+            Pattern.compile("@Mixin.*$escapedClass.*${Pattern.quote(methodName)}", Pattern.DOTALL)
         } else {
             Pattern.compile("@Mixin.*$escapedClass", Pattern.DOTALL)
         }
