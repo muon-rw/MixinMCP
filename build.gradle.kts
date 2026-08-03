@@ -180,16 +180,59 @@ tasks {
     }
 }
 
+// Exec resolves a bare command against the daemon's PATH, which is whatever launched the daemon. An
+// IDE- or launchd-started daemon gets /usr/bin:/bin:/usr/sbin:/sbin, so "claude" fails to start even
+// though a login shell finds it. Resolve an absolute path, searching the CLI's install locations on
+// top of PATH; -PclaudeCli=<path> or CLAUDE_CLI overrides.
+val claudeCli: String? = run {
+    val windows = providers.systemProperty("os.name").get().lowercase().contains("windows")
+    val names = if (windows) listOf("claude.cmd", "claude.exe", "claude") else listOf("claude")
+    val override = providers.gradleProperty("claudeCli").orNull
+        ?: providers.environmentVariable("CLAUDE_CLI").orNull
+    if (override != null) {
+        return@run override
+    }
+    val home = providers.systemProperty("user.home").get()
+    val pathDirs = providers.environmentVariable("PATH").getOrElse("")
+        .split(File.pathSeparator)
+        .filter { it.isNotBlank() }
+    val installDirs = listOf("$home/.local/bin", "$home/.claude/local", "/opt/homebrew/bin", "/usr/local/bin")
+    (pathDirs + installDirs).asSequence()
+        .flatMap { dir -> names.asSequence().map { File(dir, it) } }
+        .firstOrNull { it.isFile && it.canExecute() }
+        ?.absolutePath
+}
+
 // Windows npm shims are claude.cmd, which ProcessBuilder cannot exec directly.
-fun claudeCommand(vararg args: String): List<String> =
-    if (System.getProperty("os.name").lowercase().contains("windows")) listOf("cmd", "/c", "claude", *args)
-    else listOf("claude", *args)
+fun claudeCommand(vararg args: String): List<String> {
+    val cli = claudeCli ?: "claude"
+    return if (cli.endsWith(".cmd", ignoreCase = true) || cli.endsWith(".bat", ignoreCase = true)) {
+        listOf("cmd", "/c", cli, *args)
+    } else {
+        listOf(cli, *args)
+    }
+}
+
+// Configuration-time resolution failure must not break every build, so report it when the task runs.
+fun Exec.requireClaudeCli() {
+    val resolved = claudeCli
+    doFirst {
+        if (resolved == null) {
+            throw GradleException(
+                "Claude Code CLI not found on PATH or in its usual install locations. " +
+                    "Install it, or pass -PclaudeCli=/path/to/claude (or set CLAUDE_CLI).",
+            )
+        }
+    }
+}
 
 val validateClaudePlugin by tasks.registering(Exec::class) {
+    requireClaudeCli()
     commandLine(claudeCommand("plugin", "validate", "claude-plugin", "--strict"))
 }
 
 val validateClaudeMarketplace by tasks.registering(Exec::class) {
+    requireClaudeCli()
     commandLine(claudeCommand("plugin", "validate", ".", "--strict"))
 }
 
@@ -199,6 +242,7 @@ val validateClaudeMarketplace by tasks.registering(Exec::class) {
 // (dirty tree at tag time) and a re-cut release should move its tag instead of failing.
 val publishClaudePlugin by tasks.registering(Exec::class) {
     dependsOn(validateClaudePlugin, validateClaudeMarketplace)
+    requireClaudeCli()
     commandLine(
         claudeCommand(
             "plugin", "tag", "claude-plugin",
