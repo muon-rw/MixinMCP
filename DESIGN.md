@@ -240,7 +240,8 @@ consumer of the cache the Gradle plugin populates.
 - The Marketplace description is extracted from README.md between the plugin-description
   markers; change notes render from CHANGELOG.md via the changelog plugin. Signing and
   publishing credentials come from environment variables.
-- `mixinmcp-gradle` builds in the same Gradle project, shares the root `pluginVersion`,
+- `mixinmcp-gradle` builds in the same Gradle project, shares the version from the
+  Claude plugin manifest (Section 12),
   and publishes plugin id `dev.mixinmcp.decompile` to `https://maven.muon.rip/releases`
   via `maven-publish`. Its dependencies are Vineflower and Gson.
 
@@ -913,9 +914,11 @@ The repository doubles as a Claude Code marketplace via `.claude-plugin/marketpl
 at the root, so `/plugin marketplace add muon-rw/MixinMCP` followed by
 `/plugin install mixinmcp@mixinmcp` installs straight from GitHub. The plugin is also
 submitted to the official community marketplace (clau.de/plugin-directory-submission),
-whose catalog pins commit SHAs and auto-bumps them as commits land. The
-`verifyClaudePluginVersion` Gradle task (wired into `check`) fails the build when the
-plugin.json version drifts from `pluginVersion`.
+whose catalog pins commit SHAs and auto-bumps them as commits land.
+`claude-plugin/.claude-plugin/plugin.json` is the single version source for the whole
+build: Claude Code and the community marketplace read the committed JSON directly, so
+both Gradle modules parse their version out of it instead of a `pluginVersion` property,
+and a release is versioned by bumping that one field.
 
 Releases are one task: `publishPlugin` also depends on `publishClaudePlugin` (strict
 `claude plugin validate` of plugin and marketplace, then `claude plugin tag --push`,

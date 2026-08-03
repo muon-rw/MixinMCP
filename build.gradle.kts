@@ -13,7 +13,18 @@ plugins {
 }
 
 group = providers.gradleProperty("pluginGroup").get()
-version = providers.gradleProperty("pluginVersion").get()
+
+// Single version source: Claude Code and the community marketplace read the committed plugin.json
+// directly, so Gradle derives from it rather than maintaining a second copy to keep in sync.
+val pluginVersion: Provider<String> = providers
+    .fileContents(layout.projectDirectory.file("claude-plugin/.claude-plugin/plugin.json"))
+    .asText
+    .map { text ->
+        Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
+            ?: throw GradleException("No version field in claude-plugin/.claude-plugin/plugin.json")
+    }
+
+version = pluginVersion.get()
 
 // Set the JVM language level used to build the project.
 kotlin {
@@ -86,7 +97,7 @@ dependencies {
 intellijPlatform {
     pluginConfiguration {
         name = providers.gradleProperty("pluginName")
-        version = providers.gradleProperty("pluginVersion")
+        version = pluginVersion
 
         // Extract the <!-- Plugin description --> section from README.md and provide for the plugin's manifest
         description = providers.fileContents(layout.projectDirectory.file("README.md")).asText.map {
@@ -103,10 +114,10 @@ intellijPlatform {
 
         val changelog = project.changelog // local variable for configuration cache compatibility
         // Get the latest available change notes from the changelog file
-        changeNotes = providers.gradleProperty("pluginVersion").map { pluginVersion ->
+        changeNotes = pluginVersion.map { releaseVersion ->
             with(changelog) {
                 renderItem(
-                    (getOrNull(pluginVersion) ?: getUnreleased())
+                    (getOrNull(releaseVersion) ?: getUnreleased())
                         .withHeader(false)
                         .withEmptySections(false),
                     Changelog.OutputType.HTML,
@@ -131,7 +142,7 @@ intellijPlatform {
         // The pluginVersion is based on the SemVer (https://semver.org) and supports pre-release labels, like 2.1.7-alpha.3
         // Specify pre-release label to publish the plugin in a custom Release Channel automatically. Read more:
         // https://plugins.jetbrains.com/docs/intellij/publishing-plugin.html#specifying-a-release-channel
-        channels = providers.gradleProperty("pluginVersion").map { listOf(it.substringAfter('-', "").substringBefore('.').ifEmpty { "default" }) }
+        channels = pluginVersion.map { listOf(it.substringAfter('-', "").substringBefore('.').ifEmpty { "default" }) }
     }
 
     pluginVerification {
@@ -169,28 +180,6 @@ tasks {
     }
 }
 
-// The Claude Code plugin in claude-plugin/ releases in lockstep with this plugin; a drifted
-// version field is the most common cause of plugin-marketplace rejection.
-val verifyClaudePluginVersion by tasks.registering {
-    val manifest = layout.projectDirectory.file("claude-plugin/.claude-plugin/plugin.json")
-    val expected = providers.gradleProperty("pluginVersion")
-    inputs.file(manifest)
-    inputs.property("pluginVersion", expected)
-    doLast {
-        val actual = Regex("\"version\"\\s*:\\s*\"([^\"]+)\"")
-            .find(manifest.asFile.readText())?.groupValues?.get(1)
-        if (actual != expected.get()) {
-            throw GradleException(
-                "claude-plugin/.claude-plugin/plugin.json version '$actual' does not match pluginVersion '${expected.get()}'",
-            )
-        }
-    }
-}
-
-tasks.named("check") {
-    dependsOn(verifyClaudePluginVersion)
-}
-
 // Windows npm shims are claude.cmd, which ProcessBuilder cannot exec directly.
 fun claudeCommand(vararg args: String): List<String> =
     if (System.getProperty("os.name").lowercase().contains("windows")) listOf("cmd", "/c", "claude", *args)
@@ -209,7 +198,7 @@ val validateClaudeMarketplace by tasks.registering(Exec::class) {
 // pushed commit. --force because the release workflow patches CHANGELOG.md before publishing
 // (dirty tree at tag time) and a re-cut release should move its tag instead of failing.
 val publishClaudePlugin by tasks.registering(Exec::class) {
-    dependsOn(verifyClaudePluginVersion, validateClaudePlugin, validateClaudeMarketplace)
+    dependsOn(validateClaudePlugin, validateClaudeMarketplace)
     commandLine(
         claudeCommand(
             "plugin", "tag", "claude-plugin",
@@ -220,10 +209,8 @@ val publishClaudePlugin by tasks.registering(Exec::class) {
 }
 
 // One release task ships all three artifacts: JetBrains Marketplace upload, the Gradle plugin to
-// maven.muon.rip (needs MAVEN_USERNAME/MAVEN_PASSWORD), and the Claude plugin tag. The released
-// SHA is also what the community-marketplace catalog pins, so the lockstep gate holds here too.
+// maven.muon.rip (needs MAVEN_USERNAME/MAVEN_PASSWORD), and the Claude plugin tag.
 tasks.named("publishPlugin") {
-    dependsOn(verifyClaudePluginVersion)
     dependsOn(publishClaudePlugin)
     dependsOn(":mixinmcp-gradle:publish")
 }

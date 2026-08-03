@@ -2,8 +2,9 @@
 
 # MixinMCP Changelog
 
+## [Unreleased]
+
 ## [1.4.0]
-#### For Skill injection, you now need the Claude Code plugin, which can be installed via the marketplace. See below. 
 
 ### Added
 
@@ -336,7 +337,8 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.3.1...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.4.0...HEAD
+[1.4.0]: https://github.com/muon-rw/MixinMCP/compare/1.3.1...1.4.0
 [1.3.1]: https://github.com/muon-rw/MixinMCP/compare/1.3.0...1.3.1
 [1.3.0]: https://github.com/muon-rw/MixinMCP/compare/1.2.1...1.3.0
 [1.2.1]: https://github.com/muon-rw/MixinMCP/compare/1.2.0...1.2.1
