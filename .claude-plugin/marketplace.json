@@ -1,0 +1,18 @@
+{
+  "name": "mixinmcp",
+  "owner": {
+    "name": "muon-rw",
+    "url": "https://github.com/muon-rw"
+  },
+  "description": "MixinMCP: IntelliJ MCP tools for JVM dependency search and Minecraft mixin development",
+  "plugins": [
+    {
+      "name": "mixinmcp",
+      "source": "./claude-plugin",
+      "description": "Skills that steer agents to the MixinMCP IntelliJ MCP tools for classpath search, bytecode inspection, refactoring, and mixin writing",
+      "author": {
+        "name": "muon-rw"
+      }
+    }
+  ]
+}

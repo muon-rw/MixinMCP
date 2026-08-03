@@ -1,6 +1,6 @@
 package dev.mixinmcp.cache
 
-import dev.mixinmcp.rules.parseDeclaredDecompileVersion
+import dev.mixinmcp.startup.parseDeclaredDecompileVersion
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

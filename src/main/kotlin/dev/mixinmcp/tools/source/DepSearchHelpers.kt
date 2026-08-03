@@ -15,8 +15,8 @@ import com.intellij.util.concurrency.annotations.RequiresReadLock
 import dev.mixinmcp.cache.DecompilationCacheService
 import dev.mixinmcp.cache.compareGradlePluginVersions
 import dev.mixinmcp.cache.isGradlePluginVersionAtLeast
-import dev.mixinmcp.rules.declaredGradlePluginVersion
-import dev.mixinmcp.rules.hasGradlePlugin
+import dev.mixinmcp.startup.declaredGradlePluginVersion
+import dev.mixinmcp.startup.hasGradlePlugin
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
 

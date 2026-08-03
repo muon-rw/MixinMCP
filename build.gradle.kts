@@ -169,6 +169,65 @@ tasks {
     }
 }
 
+// The Claude Code plugin in claude-plugin/ releases in lockstep with this plugin; a drifted
+// version field is the most common cause of plugin-marketplace rejection.
+val verifyClaudePluginVersion by tasks.registering {
+    val manifest = layout.projectDirectory.file("claude-plugin/.claude-plugin/plugin.json")
+    val expected = providers.gradleProperty("pluginVersion")
+    inputs.file(manifest)
+    inputs.property("pluginVersion", expected)
+    doLast {
+        val actual = Regex("\"version\"\\s*:\\s*\"([^\"]+)\"")
+            .find(manifest.asFile.readText())?.groupValues?.get(1)
+        if (actual != expected.get()) {
+            throw GradleException(
+                "claude-plugin/.claude-plugin/plugin.json version '$actual' does not match pluginVersion '${expected.get()}'",
+            )
+        }
+    }
+}
+
+tasks.named("check") {
+    dependsOn(verifyClaudePluginVersion)
+}
+
+// Windows npm shims are claude.cmd, which ProcessBuilder cannot exec directly.
+fun claudeCommand(vararg args: String): List<String> =
+    if (System.getProperty("os.name").lowercase().contains("windows")) listOf("cmd", "/c", "claude", *args)
+    else listOf("claude", *args)
+
+val validateClaudePlugin by tasks.registering(Exec::class) {
+    commandLine(claudeCommand("plugin", "validate", "claude-plugin", "--strict"))
+}
+
+val validateClaudeMarketplace by tasks.registering(Exec::class) {
+    commandLine(claudeCommand("plugin", "validate", ".", "--strict"))
+}
+
+// The repo itself is the Claude Code marketplace, so "publishing" the Claude plugin is strict
+// validation plus a mixinmcp--v<version> tag at the release commit; installs update from the
+// pushed commit. --force because the release workflow patches CHANGELOG.md before publishing
+// (dirty tree at tag time) and a re-cut release should move its tag instead of failing.
+val publishClaudePlugin by tasks.registering(Exec::class) {
+    dependsOn(verifyClaudePluginVersion, validateClaudePlugin, validateClaudeMarketplace)
+    commandLine(
+        claudeCommand(
+            "plugin", "tag", "claude-plugin",
+            "--push", "--force",
+            "-m", "MixinMCP Claude Code plugin %s",
+        ),
+    )
+}
+
+// One release task ships all three artifacts: JetBrains Marketplace upload, the Gradle plugin to
+// maven.muon.rip (needs MAVEN_USERNAME/MAVEN_PASSWORD), and the Claude plugin tag. The released
+// SHA is also what the community-marketplace catalog pins, so the lockstep gate holds here too.
+tasks.named("publishPlugin") {
+    dependsOn(verifyClaudePluginVersion)
+    dependsOn(publishClaudePlugin)
+    dependsOn(":mixinmcp-gradle:publish")
+}
+
 // Dev sandbox: a throwaway IDE instance for dogfooding against a real mod project, so the production
 // IDE never has to run a prerelease platform. Everything the tasks below reference is declared as a
 // local, because a script-level val would be captured as a Gradle script object reference and the

@@ -35,7 +35,7 @@
         <postStartupActivity
             implementation="dev.mixinmcp.cache.MixinDecompileCacheStartupActivity"/>
         <postStartupActivity
-            implementation="dev.mixinmcp.rules.RuleInjectionStartupActivity"/>
+            implementation="dev.mixinmcp.startup.StartupChecksActivity"/>
 
         <projectConfigurable
             parentId="tools"

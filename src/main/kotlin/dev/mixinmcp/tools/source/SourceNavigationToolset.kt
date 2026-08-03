@@ -28,8 +28,8 @@ import dev.mixinmcp.cache.DecompilationCacheService
 import dev.mixinmcp.cache.SourceAutoAttacher
 import dev.mixinmcp.cache.compareGradlePluginVersions
 import dev.mixinmcp.cache.isGradlePluginVersionAtLeast
-import dev.mixinmcp.rules.declaredGradlePluginVersion
-import dev.mixinmcp.rules.hasGradlePlugin
+import dev.mixinmcp.startup.declaredGradlePluginVersion
+import dev.mixinmcp.startup.hasGradlePlugin
 import dev.mixinmcp.settings.MixinMcpSettings
 import dev.mixinmcp.resolve.ClassVariants
 import dev.mixinmcp.resolve.FqcnResolver

@@ -11,7 +11,7 @@ import com.intellij.openapi.components.Storage
 class MixinMcpAppSettings : PersistentStateComponent<MixinMcpAppSettings.State> {
 
     data class State(
-        var injectToolsSkillIntoJvmProjects: Boolean = false,
+        var warnMissingClaudePlugin: Boolean = true,
     )
 
     private var state = State()
@@ -22,9 +22,9 @@ class MixinMcpAppSettings : PersistentStateComponent<MixinMcpAppSettings.State> 
         this.state = state
     }
 
-    var injectToolsSkillIntoJvmProjects: Boolean
-        get() = state.injectToolsSkillIntoJvmProjects
-        set(value) { state.injectToolsSkillIntoJvmProjects = value }
+    var warnMissingClaudePlugin: Boolean
+        get() = state.warnMissingClaudePlugin
+        set(value) { state.warnMissingClaudePlugin = value }
 
     companion object {
         fun getInstance(): MixinMcpAppSettings =

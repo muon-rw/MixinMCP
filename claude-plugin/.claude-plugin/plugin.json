@@ -1,0 +1,14 @@
+{
+  "name": "mixinmcp",
+  "displayName": "MixinMCP",
+  "version": "1.3.1",
+  "description": "Skills for the MixinMCP IntelliJ MCP tools: full-classpath dependency search, type hierarchies, bytecode inspection, reference-aware refactors, and SpongePowered Mixin / MixinExtras writing guidance.",
+  "author": {
+    "name": "muon-rw",
+    "url": "https://github.com/muon-rw"
+  },
+  "homepage": "https://github.com/muon-rw/MixinMCP",
+  "repository": "https://github.com/muon-rw/MixinMCP",
+  "license": "GPL-3.0",
+  "keywords": ["minecraft", "mixin", "intellij", "mcp", "jvm", "gradle"]
+}

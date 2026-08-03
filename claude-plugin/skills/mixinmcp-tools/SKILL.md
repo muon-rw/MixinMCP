@@ -161,5 +161,5 @@ ambiguous project produces an error listing the candidate paths.
 **If `mixin_*` tools are not available:**
 1. Ensure IntelliJ is running with the project open.
 2. In IntelliJ, Settings → Plugins: verify both "MCP Server" and "MixinMCP" are enabled.
-3. Verify the IntelliJ MCP server is configured in your Claude Code MCP settings (`~/.claude/settings.json` or project `.claude/settings.json` under `mcpServers`).
+3. Verify the IntelliJ MCP server is connected in Claude Code: `claude mcp list` should show it. If not, use IntelliJ's Auto-Configure (Settings → Tools → MCP Server) or `claude mcp add`.
 4. **Restart Claude Code** if IntelliJ started after the Claude Code session began.

@@ -2,7 +2,18 @@
 
 # MixinMCP Changelog
 
-## [Unreleased]
+## [1.4.0]
+#### For Skill injection, you now need the Claude Code plugin, which can be installed via the marketplace. See below. 
+
+### Added
+
+- Claude Code plugin: the `mixinmcp-tools` and `mixin-writing` skills now install once per machine with `/plugin marketplace add muon-rw/MixinMCP` then `/plugin install mixinmcp@mixinmcp`, instead of being copied into each project
+
+### Removed
+
+- No longer inject skills or rules into project `.cursor`/`.claude` directories, nor auto-`.gitignore`. A one-time migration on project open moves previously injected files that MixinMCP can attribute to itself into a backup under the IDE system dir. 
+- Cursor support dropped entirely for now, pending a Cursor plugin
+- Now-irrelevant settings from auto-injection: automatic add, overwrite on open, and non-Minecraft JVM tool-skill injection
 
 ## [1.3.1]
 

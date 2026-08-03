@@ -11,8 +11,6 @@ import com.intellij.openapi.project.Project
 class MixinMcpSettings : PersistentStateComponent<MixinMcpSettings.State> {
 
     data class State(
-        var autoInjectCursorRules: Boolean = true,
-        var overwriteExistingRules: Boolean = true,
         var warnMissingGradlePlugin: Boolean = true,
         var indexBuildscriptClasspath: Boolean = true,
     )
@@ -24,14 +22,6 @@ class MixinMcpSettings : PersistentStateComponent<MixinMcpSettings.State> {
     override fun loadState(state: State) {
         this.state = state
     }
-
-    var autoInjectCursorRules: Boolean
-        get() = state.autoInjectCursorRules
-        set(value) { state.autoInjectCursorRules = value }
-
-    var overwriteExistingRules: Boolean
-        get() = state.overwriteExistingRules
-        set(value) { state.overwriteExistingRules = value }
 
     var warnMissingGradlePlugin: Boolean
         get() = state.warnMissingGradlePlugin

@@ -56,13 +56,24 @@ jobs:
 
           ./gradlew patchChangelog --release-note-file=$RELEASE_NOTE
 
-      # Publish the plugin to JetBrains Marketplace
+      # publishPlugin also validates and tags the Claude Code plugin (publishClaudePlugin), which
+      # needs the claude CLI and a git identity for the annotated tag
+      - name: Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+
+      # Publish the plugin to JetBrains Marketplace, the Gradle plugin to maven.muon.rip, and the
+      # Claude Code plugin release tag
       - name: Publish Plugin
         env:
           PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
         run: ./gradlew publishPlugin
 
       # Upload an artifact as a release asset

@@ -35,7 +35,8 @@ While other tools might be able to read individual files in Minecraft sources, l
 - Update non-compiled references: mixin config JSON entries, `mods.toml`, ServiceLoader files, and javadoc links
 - Conflicts are reported per file instead of just discarded. Most tools support a dry-run preview
 
-### 4. Built-in Agent Skills for enhanced Mixin Writing:
+### 4. Agent Skills for enhanced Mixin Writing (companion Claude Code plugin):
+- Install once in Claude Code: `/plugin marketplace add muon-rw/MixinMCP`, then `/plugin install mixinmcp@mixinmcp`
 - Improve compatibility of written mixins by favoring MixinExtras injectors which LLMs often hallucinate or fail to use in the first place
 - Favor precise modification for the exact target for the task without workarounds, slices, or shift by's, thanks to MixinExtras' robust `@Expression` annotation
 
@@ -72,7 +73,7 @@ Use IntelliJ's **Auto-Configure** option for your client (or configure manually 
 > 
 > IntelliJ binds the server to localhost only by default, and you should leave it that way unless you have a specific reason and you know the risks. 
 
-For adherence and other optimizations, see [Bundled Rules and Skills](#bundled-rules-and-skills).
+For better agent adherence, also install the Claude Code plugin; see [Agent Skills](#agent-skills-claude-code-plugin).
 
 ### 4. Set up the Gradle plugin
 
@@ -164,18 +165,37 @@ For local development against an unpublished build, see [Decompilation cache det
 
 Ask the model to list MCP tools from the JetBrains server.  The `mixin_*` tools should appear. If they don't: (1) confirm MixinMCP is installed, (2) confirm the MCP Server plugin is enabled, (3) confirm your client is connected (most common failure)
 
-## Bundled Rules and Skills
+## Agent Skills (Claude Code plugin)
+
+MixinMCP's agent skills ship as a [Claude Code plugin](https://code.claude.com/docs/en/plugins), installed once per machine instead of copied into every project:
+
+- **mixinmcp-tools**: why, when, and how to use each `mixin_*` tool, common pitfalls, and the query patterns that cost the least context.
+- **mixin-writing**: injector selection, `@At` targeting, the MixinExtras `@Expression` reference, and a mixin workflow checklist.
+
+Install in Claude Code:
+
+```
+/plugin marketplace add muon-rw/MixinMCP
+/plugin install mixinmcp@mixinmcp
+```
+
+The IntelliJ plugin warns on opening a Minecraft project when Claude Code is present but the plugin is missing or outdated; toggle this in **Settings → Tools → MixinMCP**.
+
+Older MixinMCP versions injected these skills into `.cursor/` and `.claude/` and gitignored them. On first project open, files MixinMCP can attribute to itself (via its version stamp, its injection manifest, or its `.gitignore` entries) are moved to a backup folder under the IDE system directory and their `.gitignore` entries are removed; anything it cannot attribute is left alone. Cursor rule/skill injection is discontinued for now.
 
 <details>
-<summary>Built-in adherence tools and context for agents (click to expand)</summary>
+<summary>Team distribution (click to expand)</summary>
 
-On project open for Minecraft mod projects (Fabric, Forge, NeoForge, Quilt, Architectury), MixinMCP copies bundled assistant files: **Cursor** rules and skills under `.cursor/`, and **Claude Code** skills under `.claude/skills/`. 
+To have Claude Code prompt every teammate to install the plugin when they trust your mod repo, commit this to the mod project's `.claude/settings.json`:
 
-These provide better context for the LLM about why they should use these tools, and when and how to use each tool, common pitfalls, and a mixin workflow checklist. 
-
-Injected files are automatically added to `.gitignore` under a `# MixinMCP auto-injected rules` block. 
-
-You can edit these manually, but if you use the same name and do not change the configuration, they will be overwritten on project open. You can disable this override (or choose not to inject anything at all) in **Settings → Tools → MixinMCP**. 
+```json
+{
+  "extraKnownMarketplaces": {
+    "mixinmcp": { "source": { "source": "github", "repo": "muon-rw/MixinMCP" } }
+  },
+  "enabledPlugins": { "mixinmcp@mixinmcp": true }
+}
+```
 
 </details>
 
@@ -358,6 +378,18 @@ Option 2:
 After `buildPlugin`, the plugin ZIP will be at `build/distributions/MixinMCP-<version>.zip`.
 
 In IntelliJ: **Settings → Plugins** → ⚙ → **Install Plugin from Disk…**
+
+### Testing the Claude Code plugin locally:
+
+```bash
+# One-off session with the local plugin. Pass claude-plugin/, not the repo root:
+# the root is the marketplace, and --plugin-dir silently loads nothing from it.
+claude --plugin-dir /path/to/MixinMCP/claude-plugin
+
+# Or install from the local checkout as a marketplace:
+claude plugin marketplace add /path/to/MixinMCP
+claude plugin install mixinmcp@mixinmcp
+```
 </details>
 
 ## License

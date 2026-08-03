@@ -17,11 +17,12 @@
 9. [Mappings Subsystem](#9-mappings-subsystem-devmixinmcpmappings)
 10. [Decompilation Cache](#10-decompilation-cache)
 11. [Source Auto-Attach](#11-source-auto-attach)
-12. [Rules & Skills Injection](#12-rules--skills-injection)
+12. [Agent Skills Distribution (Claude Code Plugin)](#12-agent-skills-distribution-claude-code-plugin)
 13. [Settings](#13-settings)
 14. [Testing](#14-testing)
 15. [Known Pitfalls & Edge Cases](#15-known-pitfalls--edge-cases)
-16. [License](#16-license)
+16. [Buildscript Classpath Coverage](#16-buildscript-classpath-coverage)
+17. [License](#17-license)
 
 ---
 
@@ -69,7 +70,7 @@ decompiled source.
 │  ├── mappings/  mappings download + query      (Section 9)       │
 │  ├── cache/     decompilation cache reader,                      │
 │  │              source auto-attach             (Sections 10, 11) │
-│  ├── rules/     agent skill/rule injection     (Section 12)      │
+│  ├── startup/   plugin checks + legacy cleanup (Section 12)      │
 │  └── settings/  Settings > Tools > MixinMCP    (Section 13)      │
 └──────────────────────────────────────────────────────────────────┘
                     ▲  reads manifests + decompiled sources
@@ -193,17 +194,19 @@ MixinMCP/
 │   │   ├── MixinDecompileCacheSyncListener.kt
 │   │   ├── MixinDecompileCacheStartupActivity.kt
 │   │   └── SourceAutoAttacher.kt
-│   ├── rules/
-│   │   └── RuleInjectionStartupActivity.kt
+│   ├── startup/
+│   │   └── StartupChecksActivity.kt
 │   └── settings/
 │       ├── MixinMcpSettings.kt
 │       ├── MixinMcpAppSettings.kt
 │       └── MixinMcpSettingsConfigurable.kt
 ├── src/main/resources/
-│   ├── META-INF/plugin.xml
-│   └── inject/                        # bundled skills/rules (Section 12)
-│       ├── claude/skills/{mixinmcp-tools, mixin-writing}/
-│       └── cursor/{skills/..., rules/minecraft-mod-project.mdc}
+│   └── META-INF/plugin.xml
+├── .claude-plugin/marketplace.json    # Claude Code marketplace (Section 12)
+├── claude-plugin/                     # Claude Code plugin (Section 12)
+│   ├── .claude-plugin/plugin.json
+│   ├── README.md
+│   └── skills/{mixinmcp-tools, mixin-writing}/
 ├── src/test/kotlin/dev/mixinmcp/      # unit tests (Section 14)
 └── mixinmcp-gradle/                   # Gradle plugin (Section 10)
     └── src/main/kotlin/dev/mixinmcp/gradle/
@@ -276,7 +279,7 @@ consumer of the cache the Gradle plugin populates.
         <postStartupActivity
             implementation="dev.mixinmcp.cache.MixinDecompileCacheStartupActivity"/>
         <postStartupActivity
-            implementation="dev.mixinmcp.rules.RuleInjectionStartupActivity"/>
+            implementation="dev.mixinmcp.startup.StartupChecksActivity"/>
         <projectConfigurable parentId="tools" id="dev.mixinmcp.settings"
             displayName="MixinMCP"
             instance="dev.mixinmcp.settings.MixinMcpSettingsConfigurable"/>
@@ -902,47 +905,57 @@ classes.
 
 ---
 
-## 12. Rules & Skills Injection
+## 12. Agent Skills Distribution (Claude Code Plugin)
 
-`RuleInjectionStartupActivity` (a `postStartupActivity`) runs on every project open. On
-projects detected as Minecraft mods (`fabric.mod.json`, `mods.toml` /
+Skills ship as a Claude Code plugin rooted at `claude-plugin/`
+(`.claude-plugin/plugin.json` plus `skills/mixinmcp-tools` and `skills/mixin-writing`).
+The repository doubles as a Claude Code marketplace via `.claude-plugin/marketplace.json`
+at the root, so `/plugin marketplace add muon-rw/MixinMCP` followed by
+`/plugin install mixinmcp@mixinmcp` installs straight from GitHub. The plugin is also
+submitted to the official community marketplace (clau.de/plugin-directory-submission),
+whose catalog pins commit SHAs and auto-bumps them as commits land. The
+`verifyClaudePluginVersion` Gradle task (wired into `check`) fails the build when the
+plugin.json version drifts from `pluginVersion`.
+
+Releases are one task: `publishPlugin` also depends on `publishClaudePlugin` (strict
+`claude plugin validate` of plugin and marketplace, then `claude plugin tag --push`,
+cutting `mixinmcp--v<version>` at the release commit) and on `:mixinmcp-gradle:publish`
+(the Gradle plugin to maven.muon.rip). The release workflow installs the claude CLI and
+supplies `MAVEN_USERNAME`/`MAVEN_PASSWORD` secrets.
+
+`StartupChecksActivity` (a `postStartupActivity`) no longer injects anything. Once per
+project (a `PropertiesComponent` latch) it migrates files that older versions injected
+into `.cursor` and `.claude`. A file is claimed only when attributable to the plugin:
+listed in the injection manifest, under a skill whose SKILL.md carries the
+`<!-- mixinmcp-skill-version: ... -->` stamp, or an exact known path listed in a
+`.gitignore` bearing the `# MixinMCP auto-injected rules` marker (the signal that covers
+pre-stamp 1.1.x-and-earlier injections). Claimed files are moved to a backup under the
+IDE system directory (`mixinmcp/removed-skills/<locationHash>`) with a notification
+naming it; unattributable files are never touched. Every delete path is
+containment-checked against the real project root (traversal- and symlink-safe, junction
+aware), emptied injection directories are pruned without following links, stripped
+`.gitignore` entries plus the marker are dropped once none remain, and the manifest and
+latch finalize only on a failure-free pass so a locked file is retried next open.
+
+On projects detected as Minecraft mods (`fabric.mod.json`, `mods.toml` /
 `neoforge.mods.toml`, an existing `.gradle/mixinmcp/manifest.json`, or a known modding
-plugin id in the build file: Loom, NeoGradle, MDG, ForgeGradle, Architectury, Quilt
-Loom), it copies bundled resources into the project:
-
-- `inject/claude` to `.claude/`: skills `mixinmcp-tools` (SKILL.md +
-  `references/toolchains.md`) and `mixin-writing` (SKILL.md + `references/at-reference.md`
-  + `references/expressions-language.md`).
-- `inject/cursor` to `.cursor/`: the same two skills plus
-  `rules/minecraft-mod-project.mdc`, an always-apply rule mandating MixinMCP tools over
-  grep and jar extraction.
-
-The trees are identical except `mixinmcp-tools/SKILL.md`, which is tailored per agent
-(invocation syntax, server name). Existing files are overwritten unless the overwrite
-setting is off; rule files from older layouts are deleted. Written paths are appended to
-an existing `.gitignore` under a marker comment, skipping paths `git check-ignore`
-already covers; no `.gitignore` is created. An info notification lists what was written,
-with an opt-out action.
-
-On non-Minecraft projects the activity injects only the `mixinmcp-tools` skill, and only
-when the application-level `injectToolsSkillIntoJvmProjects` setting is on and the
-project looks like a JVM project.
-
-The same activity warns (balloon, with opt-out) when a Minecraft project does not apply
-the Gradle plugin, detected via `.gradle/mixinmcp/manifest.json` or the plugin id in the
-build file, since dependency search is source-blind without the cache.
+plugin id in the build file), the activity warns (balloon, with opt-out) when Claude Code
+is present (`~/.claude` exists) but the plugin is missing from
+`~/.claude/plugins/cache/<marketplace>/mixinmcp/<version>/`, or when the newest
+semver-like cached version trails the IDE plugin version. SHA-named community-marketplace
+cache directories are excluded from the version comparison, and Claude Code auto-updates
+its own installs, so the version warning is best-effort. The Gradle plugin
+missing/outdated warnings are unchanged.
 
 ---
 
 ## 13. Settings
 
 `MixinMcpSettings` is a project-level `PersistentStateComponent` (storage
-`mixinmcp.xml`) with three booleans, all defaulting to true: `autoInjectCursorRules`,
-`overwriteExistingRules`, `warnMissingGradlePlugin`. `MixinMcpAppSettings` is its
-application-level twin holding `injectToolsSkillIntoJvmProjects` (default false), the
-Section 12 non-Minecraft injection toggle. `MixinMcpSettingsConfigurable`
-(Kotlin UI DSL `BoundConfigurable`) exposes all four at Settings > Tools > MixinMCP; the
-overwrite checkbox is enabled only while injection is on.
+`mixinmcp.xml`) holding `warnMissingGradlePlugin` and `indexBuildscriptClasspath`, both
+defaulting to true. `MixinMcpAppSettings` is its application-level twin holding
+`warnMissingClaudePlugin` (default true). `MixinMcpSettingsConfigurable` (Kotlin UI DSL
+`BoundConfigurable`) exposes all three at Settings > Tools > MixinMCP.
 
 ---
 
