@@ -259,7 +259,7 @@ Reference-aware: each tool checks or updates every reference project-wide, inclu
 | `mixin_extract_method` | Extract a statement range or sub-expression into a new method; IntelliJ's control-flow analysis derives parameters, return value, and thrown exceptions. |
 | `mixin_introduce_variable` | Introduce a local variable for an expression, optionally replacing all other occurrences in scope. |
 | `mixin_inline` | Inline a method into every call site, a constant field into every read, or a local variable into its usages. Refuses recursive methods and non-final fields with writes. |
-| `mixin_move_members` | Move members between classes: pull up into a superclass or interface, or move static members to any class. Moving members into a `@Mixin` class flags external references as blocking `[mixin]` conflicts. Push down is unavailable on 2026.2+, which sealed the platform's push-down engine with no headless replacement. |
+| `mixin_move_members` | Move members between classes: pull up into a superclass or interface, push down into every direct subclass, or move static members to any class. Moving members into a `@Mixin` class flags external references as blocking `[mixin]` conflicts. |
 
 </details>
 

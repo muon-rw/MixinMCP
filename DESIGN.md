@@ -678,12 +678,10 @@ processor bail-out surfaces as an error.
 **`mixin_move_members`** drives the real IntelliJ processors headlessly per `direction`:
 `up` a `PullUpProcessor` whose duplicate-replacement dialog is skipped (the target must
 be in the source's inheritance chain; `makeAbstract` pulls methods up as abstract
-declarations and keeps the implementations), `toClass` a `MoveMembersProcessor` for static
-members. `direction="down"` is refused: 2026.2 sealed the whole
-`com.intellij.refactoring.memberPushDown` package as `@ApiStatus.Internal` and left no
-headless entry point, since the only public one always shows a modal dialog and
-`JavaPushDownDelegate` takes a `PushDownData` whose constructors are package-private.
-`members` entries
+declarations and keeps the implementations), `down` a `PushDownProcessor` into every direct
+subclass, `toClass` a `MoveMembersProcessor` for static members. Push-down refuses up front
+when `DirectClassInheritorsSearch` finds no direct subclass, because the platform would
+otherwise open a modal offering to create one. `members` entries
 are a simple `name` or `name#descriptor` for overloads, resolved against members declared
 directly on `className`. Moves into a `@Mixin` class report external references to the
 moved members as blocking `[mixin]` conflicts, since mixin members are unreachable from

@@ -8,7 +8,7 @@
 
 - `mixin_get_dep_source` now accepts an explicit inclusive range via `startLine` / `endLine`, which overrides the `lineNumber` window; `startLine` alone reads to end of file, `endLine` alone reads from line 1
 - Every `mixin_*` tool now rejects parameter names it does not declare, listing the accepted ones, instead of silently dropping bad args and running on defaults.
-
+- Re-added `direction="down"` to `mixin_move_members` (now supported by IntelliJ API)
 ### Fixed
 
 - Buildscript classpath roots are now served from a snapshot recomputed on project open, after Gradle sync, and when the indexing setting changes. Fixes a VFS refresh related IDE process hang related to File System Synchronization
