@@ -3,7 +3,7 @@
 junit = "4.13.2"
 opentest4j = "1.3.0"
 asm = "9.10.1"
-mappingIo = "0.8.0"
+mappingIo = "0.9.1"
 
 # plugins
 changelog = "2.5.0"
