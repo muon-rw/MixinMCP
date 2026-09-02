@@ -9,8 +9,11 @@ import dev.mixinmcp.tools.source.LabeledSyntheticRootsProvider
 
 class BuildscriptClasspathRootsProvider : AdditionalLibraryRootsProvider(), LabeledSyntheticRootsProvider {
 
+    private fun entries(project: Project): List<BuildscriptEntry> =
+        BuildscriptClasspathSnapshot.getInstance(project).entries()
+
     override fun getAdditionalProjectLibraries(project: Project): Collection<SyntheticLibrary> {
-        return BuildscriptClasspathRoots.collectEntries(project)
+        return entries(project)
             .filterNot { it.kotlinDslOnly }
             .map { e ->
                 // Must be JavaSyntheticLibrary: NonIncrementalContributors gives binary roots
@@ -26,9 +29,7 @@ class BuildscriptClasspathRootsProvider : AdditionalLibraryRootsProvider(), Labe
     }
 
     override fun getRootsToWatch(project: Project): Collection<VirtualFile> =
-        BuildscriptClasspathRoots.collectEntries(project)
-            .filterNot { it.kotlinDslOnly }
-            .flatMap { listOfNotNull(it.classesRoot, it.sourcesRoot) }
+        BuildscriptClasspathSnapshot.indexedRoots(entries(project))
 
     override fun labelFor(project: Project, root: VirtualFile): String =
         BuildscriptClasspathRoots.labelForRoot(root)
@@ -39,12 +40,12 @@ class BuildscriptClasspathRootsProvider : AdditionalLibraryRootsProvider(), Labe
      * text-search tools walk roots directly and would otherwise never see them.
      */
     override fun textSearchOnlyRoots(project: Project): List<VirtualFile> =
-        BuildscriptClasspathRoots.collectEntries(project)
+        entries(project)
             .filter { it.kotlinDslOnly }
             .mapNotNull { it.sourcesRoot }
 
     override fun sourcedClassesJarPaths(project: Project): Set<String> =
-        BuildscriptClasspathRoots.collectEntries(project)
+        entries(project)
             .filter { it.sourcesRoot != null }
             .mapNotNull { it.classesRoot?.path?.substringBefore("!/") }
             .map { normalizeDiskPath(it) }
@@ -52,10 +53,14 @@ class BuildscriptClasspathRootsProvider : AdditionalLibraryRootsProvider(), Labe
 
     override fun isBuildscriptClasspathFile(project: Project, vf: VirtualFile): Boolean {
         val vfUrl: String = vf.url
-        return BuildscriptClasspathRoots.collectEntries(project).any { e ->
+        return entries(project).any { e ->
             sequenceOf(e.classesRoot, e.sourcesRoot).filterNotNull().any { root ->
                 vfUrl.startsWith(root.url.trimEnd('/'))
             }
         }
+    }
+
+    override fun indexingSettingChanged(project: Project) {
+        BuildscriptClasspathSnapshot.getInstance(project).scheduleRefresh("settings")
     }
 }

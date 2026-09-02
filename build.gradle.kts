@@ -42,7 +42,7 @@ repositories {
 }
 
 // The IDE provides the Kotlin stdlib and org.jetbrains annotations at runtime; never ship our own
-// copies even when transitive deps (mapping-io, kotlinx-serialization) pull them in.
+// copies even when transitive deps (mapping-io) pull them in.
 // See https://plugins.jetbrains.com/docs/intellij/using-kotlin.html
 configurations.runtimeClasspath {
     exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib")
@@ -64,8 +64,9 @@ dependencies {
     implementation(libs.asm)
     implementation(libs.asm.util)
 
-    // kotlinx.serialization for @Serializable MCP tool args
-    implementation(libs.kotlinx.serialization.json)
+    // kotlinx.serialization comes from the IDE (lib/intellij.libraries.kotlinx.serialization.json.jar, on the
+    // compile classpath via the platform dependency). Never bundle a copy: the plugin classloader would
+    // resolve Json/JsonObject to it, and every mcpserver call naming those types fails with a LinkageError.
 
     // mapping-io: parses tiny v1/v2, tsrg/tsrg2, ProGuard; composes namespaces
     implementation(libs.mapping.io)

@@ -1,5 +1,6 @@
 package dev.mixinmcp.buildscript
 
+import com.intellij.openapi.application.readAction
 import com.intellij.openapi.externalSystem.service.project.ProjectDataManager
 import com.intellij.openapi.externalSystem.util.ExternalSystemApiUtil
 import com.intellij.openapi.module.ModuleManager
@@ -10,7 +11,6 @@ import com.intellij.openapi.roots.OrderRootType
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
-import com.intellij.util.concurrency.annotations.RequiresReadLock
 import dev.mixinmcp.settings.MixinMcpSettings
 import dev.mixinmcp.tools.GradleCachePaths
 import dev.mixinmcp.tools.source.BUILDSCRIPT_LABEL_PREFIX
@@ -41,26 +41,34 @@ internal data class BuildscriptEntry(
  */
 internal object BuildscriptClasspathRoots {
 
-    @RequiresReadLock
-    fun collectEntries(project: Project): List<BuildscriptEntry> {
+    /**
+     * Only [BuildscriptClasspathSnapshot] calls this, on a background coroutine. The manager calls
+     * stay outside any read action: each may [GradleBuildClasspathManager.reload], which resolves
+     * every classpath path through a synchronous VFS refresh.
+     */
+    suspend fun collectEntries(project: Project): List<BuildscriptEntry> {
         if (!MixinMcpSettings.getInstance(project).indexBuildscriptClasspath) return emptyList()
 
         val manager = GradleBuildClasspathManager.getInstance(project)
         // Prime the lazily-loaded classpath map: getModuleClasspathEntries never triggers
-        // the initial load itself, so the first query of a session (notably the platform's
-        // startup scan asking the roots provider) would see an empty map and index nothing.
+        // the initial load itself, so the first query of a session would see an empty map.
         manager.getAllClasspathEntries()
+        val modulePaths: List<Pair<String, String>> = readAction {
+            ModuleManager.getInstance(project).modules.mapNotNull { module ->
+                val modulePath: String = ExternalSystemApiUtil.getExternalProjectPath(module) ?: return@mapNotNull null
+                val buildRoot: String = ExternalSystemApiUtil.getExternalRootProjectPath(module) ?: return@mapNotNull null
+                modulePath to buildRoot
+            }
+        }
         val rootsByBuild = LinkedHashMap<String, LinkedHashSet<VirtualFile>>()
-        for (module in ModuleManager.getInstance(project).modules) {
-            val modulePath: String = ExternalSystemApiUtil.getExternalProjectPath(module) ?: continue
-            val buildRoot: String = ExternalSystemApiUtil.getExternalRootProjectPath(module) ?: continue
+        for ((modulePath, buildRoot) in modulePaths) {
             val entries: List<VirtualFile> = manager.getModuleClasspathEntries(modulePath)
             if (entries.isEmpty()) continue
             rootsByBuild.getOrPut(buildRoot) { LinkedHashSet() }.addAll(entries)
         }
         if (rootsByBuild.isEmpty()) return emptyList()
 
-        val moduleLibraryJarPaths: Set<String> = collectModuleLibraryJarPaths(project)
+        val moduleLibraryJarPaths: Set<String> = readAction { collectModuleLibraryJarPaths(project) }
         val ktsBuilds: Set<String> = rootsByBuild.keys.filterTo(mutableSetOf()) { isKotlinDslBuild(it) }
 
         val byKey = LinkedHashMap<String, MutableEntry>()
@@ -85,7 +93,7 @@ internal object BuildscriptClasspathRoots {
         val hasDistLibJar: Boolean = byKey.values.any { e ->
             e.classes?.let { isGradleDistLibPath(it.path) } == true
         }
-        val recordedSources: Map<String, String> = sourcesByClassesPath(project, rootsByBuild.keys)
+        val recordedSources: Map<String, String> = readAction { sourcesByClassesPath(project, rootsByBuild.keys) }
 
         return byKey.entries.mapNotNull { (key, e) ->
             val classesPath: String? = e.classes?.path?.substringBefore("!/")

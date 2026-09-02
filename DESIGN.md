@@ -138,9 +138,21 @@ class SourceNavigationToolset : McpToolset {
 
 ### Registration in plugin.xml
 
-One `<mcpToolset>` entry per class (see Section 6); all `@McpTool` methods are discovered
-automatically. A new category means a new class and registration; a new tool in an
-existing category is just another method.
+A single `<mcpToolsProvider>` entry, `MixinMcpToolsProvider` (see Section 6), lists every
+toolset class and reflects its `@McpTool` methods with the framework's own `asTools`
+helper, the same code path the built-in `mcpToolset` extension point runs. Each reflected
+tool is wrapped in `UnknownParameterRejectingTool` before the server sees it. A new
+category means a new class added to the provider's list; a new tool in an existing
+category is just another method.
+
+The wrapper exists because the framework decodes arguments with `ignoreUnknownKeys`: a
+call carrying a misspelled or invented parameter binds only the names it recognises and
+runs the tool on defaults, so the caller gets a plausible but wrong answer instead of an
+error. `McpTool.call(JsonObject)` is the only point that sees the raw argument object, and
+only a `mcpToolsProvider` constructs `McpTool` instances, hence the registration choice.
+The wrapper diffs the argument keys against the descriptor's input schema plus the
+framework-injected `projectPath` and rejects the call naming the accepted parameters, with
+a suggestion when a name differs only by case, underscores, or hyphens.
 
 **IMPORTANT:** The extension namespace is `com.intellij.mcpServer` (capital S). Lowercase
 silently fails to register tools.
@@ -158,12 +170,15 @@ MixinMCP/
 ├── README.md                          # user-facing docs
 ├── src/main/kotlin/dev/mixinmcp/
 │   ├── tools/
+│   │   ├── MixinMcpToolsProvider.kt   # mcpToolsProvider: reflects + wraps every toolset
+│   │   ├── UnknownParameterRejectingTool.kt  # rejects undeclared argument names
 │   │   ├── ProjectResolution.kt       # requireProject / softProject
 │   │   ├── ClassContentDeduper.kt     # classpath-variant dedup + diff
 │   │   ├── BytecodeInspectionToolset.kt
 │   │   ├── ProjectManagementToolset.kt
 │   │   ├── source/
 │   │   │   ├── SourceNavigationToolset.kt
+│   │   │   ├── SourceWindow.kt        # mixin_get_dep_source line selection
 │   │   │   └── DepSearchHelpers.kt    # root collection, regex scan, hints
 │   │   ├── semantic/
 │   │   │   ├── SemanticNavigationToolset.kt
@@ -178,6 +193,12 @@ MixinMCP/
 │   │       ├── ExtractToolset.kt      # extract method, introduce variable
 │   │       ├── InlineToolset.kt
 │   │       └── MemberMoveToolset.kt
+│   ├── buildscript/                   # optional Gradle module (Section 16)
+│   │   ├── BuildscriptClasspathSnapshot.kt   # project service; sole caller of the enumeration
+│   │   ├── BuildscriptClasspathRoots.kt      # GradleBuildClasspathManager enumeration + helpers
+│   │   ├── BuildscriptClasspathRootsProvider.kt
+│   │   ├── BuildscriptClasspathStartupActivity.kt
+│   │   └── BuildscriptClasspathSyncListener.kt
 │   ├── resolve/                       # shared utilities (Section 7)
 │   │   ├── FqcnResolver.kt
 │   │   ├── MethodResolver.kt
@@ -201,7 +222,8 @@ MixinMCP/
 │       ├── MixinMcpAppSettings.kt
 │       └── MixinMcpSettingsConfigurable.kt
 ├── src/main/resources/
-│   └── META-INF/plugin.xml
+│   ├── META-INF/plugin.xml
+│   └── META-INF/mixinmcp-buildscript.xml  # registrations behind the optional Gradle dependency
 ├── .claude-plugin/marketplace.json    # Claude Code marketplace (Section 12)
 ├── claude-plugin/                     # Claude Code plugin (Section 12)
 │   ├── .claude-plugin/plugin.json
@@ -232,8 +254,12 @@ consumer of the cache the Gradle plugin populates.
 - **Libraries** (versions pinned in `gradle/libs.versions.toml`):
   - ASM `asm` + `asm-util`: IntelliJ bundles ASM, but `asm-util`'s `Textifier` is not
     accessible to plugins.
-  - `kotlinx-serialization-json`: MCP framework compatibility and manifest parsing.
   - `net.fabricmc:mapping-io`: parses tiny v1/v2, tsrg/tsrg2, and ProGuard mapping files.
+  - `kotlinx-serialization-json` is NOT declared: the IDE bundles it
+    (`lib/intellij.libraries.kotlinx.serialization.json.jar`, on the compile classpath through
+    the platform dependency) and the MCP framework's API names `Json`/`JsonObject` in
+    signatures. A bundled copy makes the plugin classloader resolve those types to different
+    classes than the mcpserver plugin, and calls such as `asTools()` fail with a `LinkageError`.
 - **Java toolchain:** 17. Kotlin version comes from the catalog.
 - `runtimeClasspath` excludes `kotlin-stdlib` and `org.jetbrains:annotations`: the IDE
   provides both, and transitive dependencies must not ship their own copies.
@@ -260,16 +286,7 @@ consumer of the cache the Gradle plugin populates.
     <depends>com.intellij.mcpServer</depends>
 
     <extensions defaultExtensionNs="com.intellij.mcpServer">
-        <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.mappings.MappingsToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.ChangeSignatureToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.ExtractToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.InlineToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.MemberMoveToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.SymbolRefactorToolset"/>
+        <mcpToolsProvider implementation="dev.mixinmcp.tools.MixinMcpToolsProvider"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.intellij">
@@ -374,7 +391,7 @@ paste-ready for `@At(target = "...")`.
 | `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false`, `methodName?`, `fieldName?`, `module?` |
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` |
 | `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000`, `pathPrefix?`, `roots=all`, `contextLines=0` |
-| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70`, `module?` |
+| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70`, `startLine?`, `endLine?`, `module?` |
 | `mixin_list_source_roots` | `maxSamplesPerRoot=5`, `verbose=false` |
 
 `mixin_search_in_deps` and `mixin_get_dep_source` cover two root sets: library SOURCES
@@ -411,7 +428,10 @@ hints; empty results return hints that distinguish "no files under pathPrefix" f
 lines matched" and add toolchain-specific guidance for vanilla/Forge/NeoForge paths.
 
 **`mixin_get_dep_source`** reads a window around `lineNumber`, marking the requested
-line. `url` (from search output) takes precedence over `path` (a package path like
+line, or an explicit inclusive range when `startLine`/`endLine` are given. Line selection
+lives in `resolveSourceWindow` (`SourceWindow.kt`): the range overrides the window, a range
+that runs past the file is clamped with a note, and one that starts past the file is an
+error. `url` (from search output) takes precedence over `path` (a package path like
 `net/minecraft/world/level/Level.java`, resolved across all roots).
 
 **`mixin_list_source_roots`** is the coverage diagnostic: all roots grouped into library
@@ -976,9 +996,15 @@ Automated tests are JUnit unit tests of static helpers (the auto-attacher's matc
   cache).
 - `ToolchainPathClassificationTest`: toolchain classification of dependency-search paths
   for the empty-result hints.
+- `SourceWindowTest`: `mixin_get_dep_source` line selection (window clamping, out-of-range
+  notes, explicit ranges and their validation).
+- `UnknownParameterRejectingToolTest`: the unknown-parameter guard every tool is wrapped
+  in (pass-through of declared names and `projectPath`, rejection message, near-name
+  suggestions).
 
-The MCP tools have no automated coverage; end-to-end verification is manual against real
-Fabric and Forge/NeoForge projects. The canonical smoke test for the bytecode workflow:
+Beyond those helpers the MCP tools have no automated coverage; end-to-end verification is
+manual against real Fabric and Forge/NeoForge projects. The canonical smoke test for the
+bytecode workflow:
 
 1. `mixin_find_class` on a game class: members and superclass resolve.
 2. `mixin_class_bytecode` with `filter=synthetic`: lambda targets are discovered.
@@ -1057,10 +1083,19 @@ Everything Gradle-API-touching lives in `dev.mixinmcp.buildscript`, registered o
 (`OptionalGradleModuleIsolationTest`) enforces that isolation.
 
 `BuildscriptClasspathRoots` enumerates roots from `GradleBuildClasspathManager`, keyed per linked
-build via `ExternalSystemApiUtil` module paths. Two non-obvious platform constraints shape it:
-`getModuleClasspathEntries` never triggers the classpath map's lazy initial load (only
-`getAllClasspathEntries()` does; without priming, the startup scan sees an empty provider and never
-rescans), and `AdditionalLibraryRootsProvider` binary roots are stub-indexed only when contributed
+build via `ExternalSystemApiUtil` module paths. It runs only inside `BuildscriptClasspathSnapshot`,
+a project service that recomputes on a background coroutine at project open, after Gradle sync,
+and when the indexing setting changes, then fires `AdditionalLibraryRootsListener` if the indexed
+root set changed. `BuildscriptClasspathRootsProvider` serves the snapshot and nothing else. The
+reason is a platform trap: the workspace file index queries providers while VFS events are applied
+under the write action, and every `GradleBuildClasspathManager` query calls `checkRootsValidity`,
+which `reload()`s with a synchronous `refreshAndFindFileByPath` per classpath path once any cached
+root is invalid (a rebuilt `build/` output dir on the classpath suffices). A synchronous refresh
+from inside event processing cannot complete, so the IDE froze for about 30 s per occurrence.
+Three further platform constraints shape the enumeration: the manager calls stay outside read
+actions for the same reason; `getModuleClasspathEntries` never triggers the classpath map's lazy
+initial load (only `getAllClasspathEntries()` does; without priming, the startup snapshot is
+empty); and `AdditionalLibraryRootsProvider` binary roots are stub-indexed only when contributed
 as `JavaSyntheticLibrary` (plain `SyntheticLibrary` binary roots are watched but never indexed).
 Kotlin-DSL builds are excluded from indexing (the K2 Kotlin plugin already indexes their script
 classpath through the workspace file index) but still feed text search via `textSearchOnlyRoots`.

@@ -211,7 +211,7 @@ To have Claude Code prompt every teammate to install the plugin when they trust 
 | `mixin_find_class` | Look up any class by FQCN across project, libraries, JDK, and the Gradle buildscript classpath. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. |
 | `mixin_search_symbols` | Find classes, methods, or fields by name substring across project and all dependencies. |
 | `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath, JDK `src.zip` and buildscript classpath included. Pass `contextLines` to capture short method bodies inline; `roots="buildscript"` limits the scan to build-plugin sources. |
-| `mixin_get_dep_source` | Read source from dependency jars or decompiled cache. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java). |
+| `mixin_get_dep_source` | Read source from dependency jars or decompiled cache. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java); pick lines with a `lineNumber` window or an explicit `startLine`/`endLine` range. |
 | `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
 
 ### Semantic Navigation

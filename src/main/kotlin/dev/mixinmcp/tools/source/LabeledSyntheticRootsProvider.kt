@@ -32,4 +32,7 @@ interface LabeledSyntheticRootsProvider {
      * sources, so the decompiled-cache provider can skip mirroring duplicates.
      */
     fun sourcedClassesJarPaths(project: Project): Set<String> = emptySet()
+
+    /** Providers serving a cached root set recompute and re-announce it. */
+    fun indexingSettingChanged(project: Project) {}
 }

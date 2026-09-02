@@ -944,7 +944,7 @@ class SourceNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Reads source from dependency jars or decompiled cache. Use this tool to view library code that grep/read_file cannot access. Pass url (exact url: string from mixin_search_in_deps results — may be jar://…!/path/File.java or file://…/path/File.java) or path (package path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java — not a filesystem path). url takes precedence if both given. lineNumber, linesBefore (default 30), linesAfter (default 70) define a window around a specific line. module: restricts the path lookup to source roots on that module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); url lookups only validate the name.")
+    @McpDescription("Reads source from dependency jars or decompiled cache. Use this tool to view library code that grep/read_file cannot access. Pass url (exact url: string from mixin_search_in_deps results — may be jar://…!/path/File.java or file://…/path/File.java) or path (package path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java — not a filesystem path). url takes precedence if both given. Two ways to choose lines: a window, lineNumber (default 1) with linesBefore (default 30) and linesAfter (default 70) around it; or an explicit inclusive 1-based range, startLine and/or endLine, which overrides the window (startLine alone reads to end of file, endLine alone reads from line 1). module: restricts the path lookup to source roots on that module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); url lookups only validate the name.")
     @Suppress("unused")
     suspend fun mixin_get_dep_source(
         url: String? = null,
@@ -952,6 +952,8 @@ class SourceNavigationToolset : McpToolset {
         lineNumber: Int = 1,
         linesBefore: Int = 30,
         linesAfter: Int = 70,
+        startLine: Int? = null,
+        endLine: Int? = null,
         module: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
@@ -1031,23 +1033,25 @@ class SourceNavigationToolset : McpToolset {
         }
 
         val lines: List<String> = content.lines()
-        val outOfRange: Boolean = lineNumber < 1 || lineNumber > lines.size
-        val anchor: Int = lineNumber.coerceIn(1, lines.size)
-        val start: Int = (anchor - linesBefore).coerceAtLeast(1)
-        val end: Int = (anchor + linesAfter).coerceAtMost(lines.size)
+        val window: SourceWindow.Lines = when (
+            val resolved: SourceWindow =
+                resolveSourceWindow(vf.name, lines.size, lineNumber, linesBefore, linesAfter, startLine, endLine)
+        ) {
+            is SourceWindow.Invalid -> return McpToolCallResult.error(resolved.message)
+            is SourceWindow.Lines -> resolved
+        }
 
         val result: String = buildString {
             if (viaPathFallback) {
                 appendLine("(url `$url` did not resolve; located via the `path` parameter instead. The url may be stale; re-run mixin_search_in_deps for a fresh one.)")
             }
-            if (outOfRange) {
-                appendLine("(requested line $lineNumber is out of range; ${vf.name} has ${lines.size} lines; showing lines $start-$end. Line numbers may be stale; re-run mixin_search_in_deps.)")
-            }
+            window.note?.let { appendLine("($it)") }
             val modSuffix: String = pinned?.let { " [pinned module: ${it.module.name}]" } ?: ""
-            appendLine("=== ${vf.name} (lines $start-$end) [sourceKind: $sourceKind]$modSuffix ===")
+            appendLine("=== ${vf.name} (lines ${window.start}-${window.end}) [sourceKind: $sourceKind]$modSuffix ===")
             appendLine()
-            for (i in start..end) {
-                val marker: String = if (i == lineNumber) ">" else " "
+            val markedLine: Int? = if (startLine == null && endLine == null) lineNumber else null
+            for (i in window.start..window.end) {
+                val marker: String = if (i == markedLine) ">" else " "
                 appendLine("$marker $i| ${lines[i - 1]}")
             }
         }

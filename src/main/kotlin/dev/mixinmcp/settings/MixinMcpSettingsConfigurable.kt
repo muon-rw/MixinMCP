@@ -2,8 +2,10 @@ package dev.mixinmcp.settings
 
 import com.intellij.openapi.options.BoundConfigurable
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.AdditionalLibraryRootsProvider
 import com.intellij.ui.dsl.builder.bindSelected
 import com.intellij.ui.dsl.builder.panel
+import dev.mixinmcp.tools.source.LabeledSyntheticRootsProvider
 
 class MixinMcpSettingsConfigurable(private val project: Project) : BoundConfigurable("MixinMCP") {
 
@@ -42,6 +44,16 @@ class MixinMcpSettingsConfigurable(private val project: Project) : BoundConfigur
                         "fallback; broad search and text grep do not cover buildscript classes.",
                 )
             }
+        }
+    }
+
+    override fun apply() {
+        val indexBuildscriptBefore: Boolean = settings.indexBuildscriptClasspath
+        super.apply()
+        if (settings.indexBuildscriptClasspath != indexBuildscriptBefore) {
+            AdditionalLibraryRootsProvider.EP_NAME.extensionList
+                .filterIsInstance<LabeledSyntheticRootsProvider>()
+                .forEach { it.indexingSettingChanged(project) }
         }
     }
 }

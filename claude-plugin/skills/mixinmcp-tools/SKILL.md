@@ -82,6 +82,8 @@ mixin_find_references(className="net.minecraft.world.entity.LivingEntity", membe
 
 Only what isn't obvious from the tool descriptions.
 
+Every `mixin_*` tool rejects parameter names it does not declare and lists the accepted ones; nothing is silently ignored. An unknown-parameter error means the call is wrong, not the tool.
+
 **Searching dependency source** (`mixin_search_in_deps` / `mixin_get_dep_source`)
 - `regexPattern` is Java regex — escape metacharacters (`addEffect\\(`, not `addEffect(`). Unescaped, the tool hints the fix.
 - `fileMask` without wildcards is a case-insensitive substring on the path, so a short fragment like `apotheosis` also matches `compat/apotheosis/` inside other jars; use a longer fragment or `pathPrefix`. It never matches jar names or Maven coordinates.
@@ -89,6 +91,7 @@ Only what isn't obvious from the tool descriptions.
 - Each hit's `--- path [root] ---` header names the matching root; prefer `Library SOURCES` over decompiled. Copy the `url:` line verbatim into `mixin_get_dep_source`.
 - `contextLines` (3–10) captures a short matched body inline so you can skip the follow-up read; leave it 0 for long methods.
 - `mixin_get_dep_source` takes that `url` verbatim, or a package `path` (`.../Foo.java`, not a filesystem path). If `path` misses, search first and use the returned `url`.
+- To read a known span, pass `startLine`/`endLine` (inclusive, 1-based); they override the `lineNumber`/`linesBefore`/`linesAfter` window. `startLine` alone reads to end of file, `endLine` alone from line 1.
 - Buildscript roots (labeled `Buildscript classpath: …`) scan last in the default `roots="all"` mode, so game and mod hits stay first; use `roots="buildscript"` to search only build plugins.
 
 **Reading a class** (`mixin_find_class`)

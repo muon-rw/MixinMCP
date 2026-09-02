@@ -1,7 +1,9 @@
 package dev.mixinmcp.cache
 
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.AdditionalLibraryRootsListener
 import com.intellij.openapi.roots.AdditionalLibraryRootsProvider
 import com.intellij.openapi.roots.LibraryOrderEntry
 import com.intellij.openapi.roots.ModuleRootManager
@@ -43,6 +45,24 @@ class MixinDecompiledRootsProvider : AdditionalLibraryRootsProvider(), LabeledSy
 
     override fun getRootsToWatch(project: Project): Collection<VirtualFile> =
         activeCachedRoots(project).map { it.root }
+
+    override fun indexingSettingChanged(project: Project) {
+        val app = ApplicationManager.getApplication()
+        app.executeOnPooledThread {
+            if (project.isDisposed) return@executeOnPooledThread
+            val roots: List<VirtualFile> = app.runReadAction<List<VirtualFile>> {
+                activeCachedRoots(project).map { it.root }
+            }
+            app.invokeLater {
+                if (project.isDisposed) return@invokeLater
+                app.runWriteAction {
+                    AdditionalLibraryRootsListener.fireAdditionalLibraryChanged(
+                        project, null, emptyList(), roots, "mixinmcp-decompiled",
+                    )
+                }
+            }
+        }
+    }
 
     /**
      * Cache roots whose classes jar already has Library SOURCES attached are skipped; indexing

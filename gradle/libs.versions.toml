@@ -2,7 +2,6 @@
 # libraries
 junit = "4.13.2"
 opentest4j = "1.3.0"
-kotlinxSerialization = "1.9.0"
 asm = "9.10.1"
 mappingIo = "0.8.0"
 
@@ -16,7 +15,6 @@ qodana = "2026.1.3"
 [libraries]
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 opentest4j = { group = "org.opentest4j", name = "opentest4j", version.ref = "opentest4j" }
-kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
 asm = { group = "org.ow2.asm", name = "asm", version.ref = "asm" }
 asm-util = { group = "org.ow2.asm", name = "asm-util", version.ref = "asm" }
 mapping-io = { group = "net.fabricmc", name = "mapping-io", version.ref = "mappingIo" }

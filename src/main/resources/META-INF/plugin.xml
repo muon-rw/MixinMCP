@@ -15,16 +15,7 @@
     <depends optional="true" config-file="mixinmcp-buildscript.xml">org.jetbrains.plugins.gradle</depends>
 
     <extensions defaultExtensionNs="com.intellij.mcpServer">
-        <mcpToolset implementation="dev.mixinmcp.tools.source.SourceNavigationToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.semantic.SemanticNavigationToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.BytecodeInspectionToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.ProjectManagementToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.mappings.MappingsToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.ChangeSignatureToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.ExtractToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.InlineToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.MemberMoveToolset"/>
-        <mcpToolset implementation="dev.mixinmcp.tools.refactor.SymbolRefactorToolset"/>
+        <mcpToolsProvider implementation="dev.mixinmcp.tools.MixinMcpToolsProvider"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.intellij">

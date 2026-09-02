@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.file.Path
 
 class BuildscriptClasspathHelpersTest {
 
@@ -73,8 +74,8 @@ class BuildscriptClasspathHelpersTest {
     fun modulesCacheVersionDirDerivation() {
         val jar = "/Users/x/.gradle/caches/modules-2/files-2.1/net.fabricmc/fabric-loom/1.16.3/28c6/fabric-loom-1.16.3.jar"
         assertEquals(
-            "/Users/x/.gradle/caches/modules-2/files-2.1/net.fabricmc/fabric-loom/1.16.3",
-            modulesCacheVersionDir(jar)?.toString(),
+            Path.of("/Users/x/.gradle/caches/modules-2/files-2.1/net.fabricmc/fabric-loom/1.16.3"),
+            modulesCacheVersionDir(jar),
         )
         val distJar = "/Users/x/.gradle/wrapper/dists/gradle-9.4.1-bin/abc/gradle-9.4.1/lib/gradle-core-api-9.4.1.jar"
         assertEquals(null, modulesCacheVersionDir(distJar))

@@ -2,7 +2,22 @@
 
 # MixinMCP Changelog
 
-## [Unreleased]
+## [1.4.1]
+
+### Added
+
+- `mixin_get_dep_source` now accepts an explicit inclusive range via `startLine` / `endLine`, which overrides the `lineNumber` window; `startLine` alone reads to end of file, `endLine` alone reads from line 1
+- Every `mixin_*` tool now rejects parameter names it does not declare, listing the accepted ones, instead of silently dropping bad args and running on defaults.
+
+### Fixed
+
+- Buildscript classpath roots are now served from a snapshot recomputed on project open, after Gradle sync, and when the indexing setting changes. Fixes a VFS refresh related IDE process hang related to File System Synchronization
+- Guard against underflows in `mixin_get_dep_source`'s `linesBefore` / `linesAfter`
+- Mixin MCP no longer bundles its own `kotlinx-serialization-json`; now uses the IDE's copy.
+
+### Changed
+
+- Tools now register through one `mcpToolsProvider` extension (`MixinMcpToolsProvider`) instead of one `mcpToolset` entry per class, so each reflected tool can be wrapped with the unknown-parameter check
 
 ## [1.4.0]
 
