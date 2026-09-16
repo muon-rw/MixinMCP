@@ -3,7 +3,6 @@
 # MixinMCP Changelog
 
 ## [1.5.0]
-## UX Improvements! 
 ### Added
 
 - New tool `mixin_ide_status`: reports dumb mode, in-progress Gradle resolves or project imports, most recent sync outcome and its error text, and linked Gradle roots
