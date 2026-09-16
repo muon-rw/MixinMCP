@@ -29,7 +29,7 @@
 ## 1. What This Plugin Does
 
 MixinMCP is an IntelliJ Platform plugin that extends the IDE's built-in MCP Server with
-25 tools for Minecraft mod development: mixin authoring, dependency navigation, bytecode
+27 tools for Minecraft mod development: mixin authoring, dependency navigation, bytecode
 inspection, mappings lookup, and reference-aware refactoring. A companion Gradle plugin
 (`dev.mixinmcp.decompile`) decompiles dependencies without published sources into a cache
 the IntelliJ plugin indexes, so the tools see the full compiled classpath.
@@ -59,15 +59,17 @@ decompiled source.
 │                                                                  │
 │  MixinMCP plugin, registered via com.intellij.mcpServer EP:      │
 │  ├── SourceNavigationToolset    (5 tools)                        │
+│  ├── JarEntriesToolset          (1 tool)                         │
 │  ├── SemanticNavigationToolset  (7 tools)                        │
 │  ├── BytecodeInspectionToolset  (2 tools)                        │
-│  ├── ProjectManagementToolset   (2 tools)                        │
+│  ├── ProjectManagementToolset   (3 tools)                        │
 │  ├── MappingsToolset            (1 tool)                         │
 │  ├── refactor/: SymbolRefactor (3), ChangeSignature (1),         │
 │  │       Extract (2), Inline (1), MemberMove (1) Toolsets        │
 │  │                                                               │
 │  ├── resolve/   shared PSI/bytecode resolution (Section 7)       │
 │  ├── mappings/  mappings download + query      (Section 9)       │
+│  ├── sync/      resolve + import state         (Section 3)       │
 │  ├── cache/     decompilation cache reader,                      │
 │  │              source auto-attach             (Sections 10, 11) │
 │  ├── startup/   plugin checks + legacy cleanup (Section 12)      │
@@ -130,8 +132,8 @@ class SourceNavigationToolset : McpToolset {
   errors.
 - **Threading.** Tool functions run on background threads without a read lock. PSI reads
   go through `smartReadAction(project) { }`, which yields to pending writers and waits
-  out indexing instead of failing in dumb mode. Write operations dispatch to the EDT:
-  `WriteCommandAction` for PSI mutation, `RefactorSupport.runRefactoringOnEdt` for the
+  out indexing instead of failing in dumb mode; `IdeBusyGuardingTool` bounds that wait.
+  Write operations dispatch to the EDT: `WriteCommandAction` for PSI mutation, `RefactorSupport.runRefactoringOnEdt` for the
   refactor processors, `invokeLater` for sync.
 - **`@McpDescription`** is what the LLM sees. Dollar signs must be escaped (`\$`) or
   Kotlin treats them as string templates.
@@ -141,7 +143,8 @@ class SourceNavigationToolset : McpToolset {
 A single `<mcpToolsProvider>` entry, `MixinMcpToolsProvider` (see Section 6), lists every
 toolset class and reflects its `@McpTool` methods with the framework's own `asTools`
 helper, the same code path the built-in `mcpToolset` extension point runs. Each reflected
-tool is wrapped in `UnknownParameterRejectingTool` before the server sees it. A new
+tool is wrapped in `UnknownParameterRejectingTool` (argument check, outermost) over
+`IdeBusyGuardingTool` (bounded wait for a busy IDE) before the server sees it. A new
 category means a new class added to the provider's list; a new tool in an existing
 category is just another method.
 
@@ -150,9 +153,27 @@ call carrying a misspelled or invented parameter binds only the names it recogni
 runs the tool on defaults, so the caller gets a plausible but wrong answer instead of an
 error. `McpTool.call(JsonObject)` is the only point that sees the raw argument object, and
 only a `mcpToolsProvider` constructs `McpTool` instances, hence the registration choice.
-The wrapper diffs the argument keys against the descriptor's input schema plus the
-framework-injected `projectPath` and rejects the call naming the accepted parameters, with
-a suggestion when a name differs only by case, underscores, or hyphens.
+The wrapper first rewrites argument keys to their canonical names: parameters renamed
+across releases (`path` to `filePath` on `mixin_refresh_vfs`, `force` to `ignoreConflicts`
+on `mixin_safe_delete`, `methodName` to `newMethodName` on `mixin_extract_method`), and
+synonyms from the auto-alias table in `ParameterAliases.kt` (`pattern` to `regexPattern`,
+`class` to `className`, `limit` to `maxResults`) whenever exactly one of the synonym's
+targets is declared on that tool and the synonym itself is not. A synonym whose meaning
+depends on the tool (`file` as `path` or `filePath`, `name` as a target or a new name,
+`method` where both `methodName` and `memberName` exist) is never rewritten. Passing a
+rewritten key together with its canonical name is an error. Remaining unknown keys reject
+the call naming the accepted parameters, with a suggestion drawn in order from a
+case/underscore/hyphen-insensitive match, the synonym tables, and a unique declared name
+starting or ending with the given word (`context` to `contextLines`).
+
+`IdeBusyGuardingTool` covers the other silent failure mode. Tool bodies read PSI under
+`smartReadAction`, which waits out indexing with no deadline, so a call landing during a
+sync blocks for minutes with nothing said to the caller. The wrapper polls
+`DumbService.isDumb` plus the `IdeSyncState` project service (`dev.mixinmcp.sync`, fed by
+`IdeSyncStateListener` for resolve tasks and the platform's `ProjectDataImportListener` for
+the import that follows) for up to 30 s, then returns an error naming what it is waiting
+on. `mixin_sync_project`, `mixin_refresh_vfs`, `mixin_ide_status`, and
+`mixin_mappings_lookup` are exempt: they are how a caller observes or resolves a busy IDE.
 
 **IMPORTANT:** The extension namespace is `com.intellij.mcpServer` (capital S). Lowercase
 silently fails to register tools.
@@ -172,12 +193,15 @@ MixinMCP/
 │   ├── tools/
 │   │   ├── MixinMcpToolsProvider.kt   # mcpToolsProvider: reflects + wraps every toolset
 │   │   ├── UnknownParameterRejectingTool.kt  # rejects undeclared argument names
+│   │   ├── ParameterAliases.kt        # renamed parameters, silent synonyms, suggestions
+│   │   ├── IdeBusyGuardingTool.kt     # bounded wait for indexing / sync
 │   │   ├── ProjectResolution.kt       # requireProject / softProject
 │   │   ├── ClassContentDeduper.kt     # classpath-variant dedup + diff
 │   │   ├── BytecodeInspectionToolset.kt
 │   │   ├── ProjectManagementToolset.kt
 │   │   ├── source/
 │   │   │   ├── SourceNavigationToolset.kt
+│   │   │   ├── JarEntriesToolset.kt   # mixin_list_jar_entries
 │   │   │   ├── SourceWindow.kt        # mixin_get_dep_source line selection
 │   │   │   └── DepSearchHelpers.kt    # root collection, regex scan, hints
 │   │   ├── semantic/
@@ -208,6 +232,9 @@ MixinMCP/
 │   │   ├── PsiDescriptors.kt
 │   │   └── ClassVariants.kt           # classpath-variant provenance
 │   ├── mappings/                      # mappings subsystem (Section 9)
+│   ├── sync/                          # resolve + import state for the busy guard
+│   │   ├── IdeSyncState.kt            # project service: snapshot, await helpers
+│   │   └── IdeSyncStateListener.kt    # externalSystemTaskNotificationListener
 │   ├── cache/                         # cache reader + auto-attach (10, 11)
 │   │   ├── DecompilationCacheService.kt
 │   │   ├── DecompilationManifest.kt
@@ -233,6 +260,7 @@ MixinMCP/
 └── mixinmcp-gradle/                   # Gradle plugin (Section 10)
     └── src/main/kotlin/dev/mixinmcp/gradle/
         ├── MixinDecompilePlugin.kt
+        ├── MixinMcpExtension.kt       # mixinmcp { extraJars }
         ├── MixinDecompileTask.kt      # genDependencySources
         ├── CleanCacheTask.kt          # cleanSourcesCache
         ├── DecompilationManifest.kt   # Gson twin of the IDE manifest
@@ -294,6 +322,8 @@ consumer of the cache the Gradle plugin populates.
             implementation="dev.mixinmcp.cache.MixinDecompiledRootsProvider"/>
         <externalSystemTaskNotificationListener
             implementation="dev.mixinmcp.cache.MixinDecompileCacheSyncListener"/>
+        <externalSystemTaskNotificationListener
+            implementation="dev.mixinmcp.sync.IdeSyncStateListener"/>
         <postStartupActivity
             implementation="dev.mixinmcp.cache.MixinDecompileCacheStartupActivity"/>
         <postStartupActivity
@@ -384,6 +414,20 @@ paste-ready for `@At(target = "...")`.
 
 ## 8. Tool Definitions
 
+**Parameter vocabulary.** One name, one meaning, across every tool. `className` is the dot
+FQCN of the class being looked up or edited; a destination is `targetClassName` or
+`targetPackage`. `methodName` names an existing method, `fieldName` an existing field, and
+`memberName` either one where the tool infers the kind, with `parameterTypes` /
+`methodDescriptor` disambiguating overloads. A name being created is `new*`: `newName`,
+`newMethodName`, `newVisibility`, `newReturnType`. `regexPattern` is the only regex input;
+`query` is a short-name substring, `symbol` a mapping-namespace symbol, `expression` exact
+source text. `url` is a `jar://` or `file://` URL, `path` a classpath-relative source path,
+`filePath` an on-disk or project-relative file, `jarPath` a jar on disk, `projectPath` a
+project root. `maxResults` caps result counts; `dryRun` previews and `ignoreConflicts`
+proceeds past conflicts on every refactor tool; `caseSensitive` defaults to false on
+`mixin_search_symbols` and true on `mixin_search_in_deps`. Renamed parameters keep their
+old name as an alias (Section 3).
+
 ### Source Navigation
 
 | Tool | Parameters |
@@ -391,16 +435,22 @@ paste-ready for `@At(target = "...")`.
 | `mixin_find_class` | `className`, `includeMembers=true`, `includeSource=false`, `methodName?`, `fieldName?`, `module?` |
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` |
 | `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000`, `pathPrefix?`, `roots=all`, `contextLines=0` |
-| `mixin_get_dep_source` | `url?` or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70`, `startLine?`, `endLine?`, `module?` |
-| `mixin_list_source_roots` | `maxSamplesPerRoot=5`, `verbose=false` |
+| `mixin_get_dep_source` | `url?`, `jarPath?` + `entry?`, `className?`, or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70`, `startLine?`, `endLine?`, `module?` |
+| `mixin_list_jar_entries` | `jarPath?` or `jar?`, `pathPrefix?`, `fileMask?`, `includeClasses=false`, `maxResults=200` |
+| `mixin_list_source_roots` | `maxSamplesPerRoot=5`, `verbose=false`, `filter?` |
 
-`mixin_search_in_deps` and `mixin_get_dep_source` cover two root sets: library SOURCES
-roots (published `-sources.jar` files plus anything else attached as SOURCES, such as
-auto-attached merged game jars) and decompiled cache roots (Section 10). `roots`
-selects `all`, `library`, or `decompiled`. In `all` mode library roots are scanned first
-and cache files whose logical path already matched are skipped, so results never
-duplicate. Roots attached as library SOURCES that physically live under the decompilation
-cache keep the decompiled label, so the `roots` contract holds.
+`mixin_search_in_deps` and `mixin_get_dep_source` cover library SOURCES roots (published
+`-sources.jar` files plus anything else attached as SOURCES, such as auto-attached merged
+game jars), decompiled cache roots (Section 10), the JDK `src.zip`, and the buildscript
+classpath (Section 16). `searchTiers` (`DepSearchHelpers.kt`) splits them into five tiers
+scanned in order: game roots, other library sources, the decompiled cache, the JDK, the
+buildscript classpath. Each tier skips logical paths an earlier one already matched, so
+results never duplicate. `roots` picks the tiers: `all` (all five in that order), `library`
+(game, library, then JDK last), `decompiled`, `jdk`, `game`, `buildscript`. The JDK sits at
+the front of every module's order entries, so without the tiering it would fill a result
+set before any game or mod root was reached. Roots attached as library SOURCES that
+physically live under the decompilation cache keep the decompiled label, so the `roots`
+contract holds.
 
 **`mixin_find_class`** resolves any class by FQCN and reports header info plus a
 `SourceKind` classification (library sources, decompiled cache, project source, binary).
@@ -411,7 +461,13 @@ nested classes with ready-to-copy follow-up calls; `includeSource` appends the f
 `module` (exact name or dot-boundary suffix) pins resolution to one module's classpath;
 without it, a class with several classpath copies gets a Variants block in which
 byte-identical copies are merged and patched copies get a provenance-tagged structural
-diff (`ClassContentDeduper`). The same parameter and Variants handling apply to
+diff (`ClassContentDeduper`). A `Modules:` header line names the modules whose classpath
+provides the class, each tagged with its dependency scope when that is not COMPILE
+(`neoforge.main, common.main (RUNTIME)`); the Variants block's `[modules: ...]` carries the
+same tags. `module` is therefore also a compile-visibility check: a class that resolves
+without it but not with it is declared `runtimeOnly` or test-only in that module, and the
+error says so, because a mixin in that module would fail `compileJava` however clean the
+inspections look. The same parameter and Variants handling apply to
 `mixin_get_dep_source` and the bytecode tools.
 
 **`mixin_search_symbols`** is a short-name substring search over `PsiShortNamesCache`.
@@ -421,23 +477,50 @@ budget.
 
 **`mixin_search_in_deps`** is a regex grep across dependency sources. `fileMask` is a
 case-insensitive substring of the logical path, or a glob when it contains `*`/`?` (`*`
-crosses `/`). `contextLines` (0 to 200) renders match windows with overlapping windows
-merged; matches are highlighted with `||...||` markers. Hits are grouped per file with a
-`url:` line consumable by `mixin_get_dep_source`. Regex syntax errors return escape
-hints; empty results return hints that distinguish "no files under pathPrefix" from "no
-lines matched" and add toolchain-specific guidance for vanilla/Forge/NeoForge paths.
+crosses `/`); backslashes normalize to `/` and every non-wildcard character is quoted, so
+`{Foo,Bar}*.java` and `com\intellij*` match text instead of throwing a raw regex error.
+`pathPrefix` matches case-insensitively and prunes whole directories that cannot contain
+it; a value shaped like a URL or a disk path is refused with a hint. Binary entries
+(`.class`, images, sounds) are skipped; the resources decompiled-cache roots carry
+alongside sources (`META-INF`, `assets/`, `data/`, `*.mixins.json`) are searchable. `contextLines` (0 to 200)
+renders match windows with overlapping windows merged; matches are highlighted with
+`||...||` markers. Hits are grouped per file with a `url:` line consumable by
+`mixin_get_dep_source`. Regex syntax errors return escape hints; empty results return hints
+that distinguish "no files under pathPrefix" from "no lines matched" and add
+toolchain-specific guidance for vanilla/Forge/NeoForge paths. The output also reports how
+many files could not be read per root (a jar that changed on disk since the IDE opened it),
+and a timeout names the root the scan stopped in.
 
-**`mixin_get_dep_source`** reads a window around `lineNumber`, marking the requested
-line, or an explicit inclusive range when `startLine`/`endLine` are given. Line selection
-lives in `resolveSourceWindow` (`SourceWindow.kt`): the range overrides the window, a range
-that runs past the file is clamped with a note, and one that starts past the file is an
-error. `url` (from search output) takes precedence over `path` (a package path like
-`net/minecraft/world/level/Level.java`, resolved across all roots).
+**`mixin_get_dep_source`** addresses a file four ways, in precedence order: `url` (from
+search output, or a bare disk path containing `!/`, which is normalized to a `jar://` URL),
+`jarPath` + `entry` (any jar on disk, on the classpath or not), `className` (a dot FQCN
+resolved to its attached or decompiled source the way `mixin_find_class` does), and `path`
+(a package path like `net/minecraft/world/level/Level.java`, resolved across all roots).
+Any text entry can be read: `mods.toml`, `fabric.mod.json`, lang files, models, recipes,
+mixin configs. A `.class` entry addressed by `url` or `jarPath` is decompiled by the IDE; other
+binary entries report their size instead of their content, and a jar entry outside every
+source root is labelled `Jar entry (not a source root)`. Lines come from a window around
+`lineNumber`, marking the requested line, or an explicit inclusive range when
+`startLine`/`endLine` are given. Line selection lives in `resolveSourceWindow`
+(`SourceWindow.kt`): the range overrides the window, a range that runs past the file is
+clamped with a note, and one that starts past the file is an error.
 
 **`mixin_list_source_roots`** is the coverage diagnostic: all roots grouped into library
 SOURCES and decompiled cache with sample paths, MDG merged-jar detection, the auto-attach
 report (Section 11), and sentinel canary checks for vanilla, Forge, and NeoForge sources
-with per-toolchain remediation guidance.
+with per-toolchain remediation guidance. `filter` answers "is jar X attached" in one call:
+a case-insensitive substring or glob matched against each root's label, jar name, Maven
+coordinates, and URL, printing only matching roots and skipping the diagnostics.
+Decompiled-cache roots are named by Maven coordinates plus jar file name
+(`Decompiled cache (MixinMCP): <coords> (<jar>)`, ad hoc jars marked `[ad hoc jar]`) and
+condense to a name grid in non-verbose mode like other library roots; empty cache roots
+stay in full under the warnings section.
+
+**`mixin_list_jar_entries`** lists a jar's entries with their sizes so a caller can name
+one for `mixin_get_dep_source`. `jarPath` takes any jar on disk; `jar` takes a
+case-insensitive substring of a classpath or cache jar's file name or coordinates and
+lists every match, up to 10. `pathPrefix` and `fileMask` narrow the listing; `.class`
+entries are excluded unless `includeClasses=true`.
 
 ### Semantic Navigation
 
@@ -521,13 +604,17 @@ only when the annotation search finds nothing, returning FQCN and path only.
 
 | Tool | Parameters |
 |------|-----------|
-| `mixin_class_bytecode` | `className`, `filter=all`, `includeInstructions=false`, `module?` |
-| `mixin_method_bytecode` | `className`, `methodName`, `methodDescriptor?`, `module?` |
+| `mixin_class_bytecode` | `className`, `filter=all`, `includeInstructions=false`, `module?`, `jarPath?` |
+| `mixin_method_bytecode` | `className`, `methodName`, `methodDescriptor?`, `module?`, `jarPath?` |
 
 `filter` accepts `all`, `synthetic`, `methods`, `fields`; `synthetic` restricts both
 methods and fields to synthetic members (including fields like `this$0` and `$VALUES`).
 Whenever synthetics exist, a synthetic-method summary section is appended regardless of
 filter, tagging each as lambda (with source method), bridge, or synthetic.
+
+`jarPath` reads the class straight from a jar on disk: the entry is located by internal
+name inside the zip, with no classpath, no index, and no wait for indexing, which is how an
+off-classpath mod is inspected without a build change. `module` must be omitted with it.
 
 Both tools work on the project's own classes after a build: `ClassFileLocator` reads
 compiler output, returns a build-and-retry error when output is missing (`NotBuilt`), and
@@ -539,20 +626,36 @@ similar and available method names; a name with no descriptor match lists every 
 
 | Tool | Parameters |
 |------|-----------|
-| `mixin_sync_project` | `projectPath?` |
-| `mixin_refresh_vfs` | `path?` |
+| `mixin_sync_project` | `projectPath?`, `wait=true`, `timeoutMs=90000` |
+| `mixin_ide_status` | (none) |
+| `mixin_refresh_vfs` | `filePath?` |
 
-**`mixin_sync_project`** saves all documents, then triggers
-`ExternalSystemUtil.refreshProject` with `ProgressExecutionMode.START_IN_FOREGROUND_ASYNC`
-on the EDT and returns immediately (fire and forget). A Maven retry fires only when the
-Gradle call throws synchronously; async sync failures are not reported. When the Gradle
-plugin is applied, sync also re-runs `genDependencySources` (Section 10).
+**`mixin_sync_project`** normalizes `projectPath` (either separator form) and resolves it
+against the linked Gradle roots: an exact match, the deepest linked root containing it, or,
+when the request is the IDE project directory, the sole linked root nested under it.
+Anything else errors with the list of linked roots, which is what a Windows backslash path
+used to hit as "No Gradle project is linked at this path". It then saves all documents and
+triggers `ExternalSystemUtil.refreshProject` with
+`ProgressExecutionMode.START_IN_FOREGROUND_ASYNC` on the EDT. With `wait=true` (the
+default) it blocks on `IdeSyncState` until the resolve and the project-data import that
+follows it finish, up to `timeoutMs` (1000 to 600000), and reports SUCCESS, FAILURE with
+the error text, CANCELLED, or a timeout that says the sync continues in the background.
+`wait=false` returns once the resolve has started; a resolve that never starts within 10 s
+is an error naming the likely causes. Maven is not attempted (the old silent Maven retry
+was a no-op); the error points at the IDE's Maven reload. When the Gradle plugin is
+applied, sync also re-runs `genDependencySources` (Section 10).
+
+**`mixin_ide_status`** reports whether the IDE can answer classpath questions right now:
+dumb mode, resolve and import in flight with how long ago the resolve started, the last
+sync outcome with its error text and any trigger failure, and the linked Gradle roots that
+`mixin_sync_project` accepts. It is the poll target for `wait=false` and for the busy error
+every other tool returns (Section 3).
 
 **`mixin_refresh_vfs`** resolves a refresh target via
 `LocalFileSystem.refreshAndFindFileByIoFile`, then calls
 `VfsUtil.markDirtyAndRefresh(async=false, recursive, reloadChildren=true, vf)`. Target
-selection handles three input shapes: an existing directory (project root when `path` is
-omitted) refreshes recursively; an existing file refreshes its parent non-recursively
+selection handles three input shapes: an existing directory (project root when `filePath`
+is omitted) refreshes recursively; an existing file refreshes its parent non-recursively
 (`reloadChildren` picks up the content change plus created and deleted siblings); a
 missing path walks up to the nearest existing ancestor, non-recursively, so deletions are
 noticed without fanning out. Explicit dirty-marking forces a re-read even when VFS
@@ -576,9 +679,9 @@ modifying anything. Conflicts are rendered one per line with a project-relative 
 a `[library]` or `[source]` tag (`[library]` usually means a stale build jar; member
 moves into a `@Mixin` class add `[mixin]`) and block execution unless
 `ignoreConflicts=true`, the headless equivalent of the IDE conflict dialog's Continue.
-Two exceptions: `mixin_safe_delete` uses `force` instead, and `mixin_move_file` takes
-neither flag, refusing everything it can detect at validation time. Mutations run on the
-EDT; most tools go through `runRefactoringOnEdt`, which commits and saves all documents,
+One exception: `mixin_move_file` takes neither flag, refusing everything it can detect at
+validation time. Mutations run on the EDT; most tools go through `runRefactoringOnEdt`,
+which commits and saves all documents,
 while SymbolRefactorToolset inlines the same invokeAndWait-plus-commit pattern and
 extract mutates through `DuplicatesMethodExtractor` first, using `runRefactoringOnEdt`
 only to save. The processor-driven tools replace the conflict dialog with a stub that
@@ -599,10 +702,10 @@ whole-line range resolution (`resolveRange`), and sub-expression picking
 | Tool | Parameters |
 |------|-----------|
 | `mixin_rename` | `className`, `newName`, `memberName?`, `memberKind?`, `variableName?`, `parameterTypes?`, `methodDescriptor?`, `ignoreConflicts=false`, `dryRun=false` |
-| `mixin_safe_delete` | `className`, `methodName?`, `fieldName?`, `parameterTypes?`, `methodDescriptor?`, `force=false`, `dryRun=false` |
+| `mixin_safe_delete` | `className`, `methodName?`, `fieldName?`, `parameterTypes?`, `methodDescriptor?`, `ignoreConflicts=false`, `dryRun=false` |
 | `mixin_move_file` | `className`, `targetPackage` |
 | `mixin_change_signature` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?`, `newName?`, `newVisibility?`, `newReturnType?`, `parametersJson?`, `ignoreConflicts=false`, `dryRun=false` |
-| `mixin_extract_method` | `filePath`, `startLine`, `endLine`, `methodName`, `expression?`, `occurrenceIndex?`, `visibility="private"`, `makeStatic?`, `ignoreConflicts=false`, `dryRun=false` |
+| `mixin_extract_method` | `filePath`, `startLine`, `endLine`, `newMethodName`, `expression?`, `occurrenceIndex?`, `visibility="private"`, `makeStatic?`, `ignoreConflicts=false`, `dryRun=false` |
 | `mixin_introduce_variable` | `filePath`, `startLine`, `endLine`, `name?`, `expression?`, `occurrenceIndex?`, `replaceAllOccurrences=false`, `ignoreConflicts=false`, `dryRun=false` |
 | `mixin_inline` | `kind`, `className`, `memberName?`, `parameterTypes?`, `methodDescriptor?`, `methodName?`, `localName?`, `deleteDeclaration=true`, `ignoreConflicts=false`, `dryRun=false` |
 | `mixin_move_members` | `direction`, `className`, `members`, `targetClassName?`, `makeAbstract=false`, `ignoreConflicts=false`, `dryRun=false` |
@@ -625,7 +728,8 @@ Preparation resolves the target (member resolution per Section 7.2, Kotlin light
 unwrapped to their source declaration), then collects `ReferencesSearch` usages plus, for
 methods, `OverridingMethodsSearch` results tagged `[override]`; a top-level class's
 own-file references are excluded, and deleting the sole top-level declaration removes the
-file. `dryRun` reports what would happen; existing usages block deletion unless `force`.
+file. `dryRun` reports what would happen; existing usages block deletion unless
+`ignoreConflicts`.
 The delete is a direct `PsiElement.delete()` in a named `WriteCommandAction` on the EDT
 (not `SafeDeleteProcessor`), then commits and saves all documents.
 
@@ -750,16 +854,19 @@ CI-friendly and reproducible from dependency resolution alone.
 
 <gradleProjectDir>/.gradle/mixinmcp/   # per Gradle (sub)project
 ├── manifest.json                      # {"entries": {"<hash>": CacheEntry}}
+├── adhoc-manifest.json                # same schema, jars named by --jar / extraJars
 ├── hash-memo.json                     # (path|size|mtime) -> content hash
 └── unresolved.txt                     # resolution-failure count (transient)
 ```
 
 `CacheEntry` fields: `libraryName`, `classesJarPath`, `jarSize`, `jarModified`,
 `cachePath`, `decompilerVersion` (`vineflower-<version>` or `published-sources`),
-`createdAt`. The artifact hash is the SHA-256 of the jar's bytes, so renamed jars and
+`createdAt`, `classpathKind` (`compile`, `buildscript`, or `adhoc`; null means `compile`
+in manifests written before the field existed). The artifact hash is the SHA-256 of the
+jar's bytes, so renamed jars and
 multiple projects sharing a dependency hit the same entry; the persisted memo avoids
-re-hashing unchanged jars. Each subproject writes its own manifest; the IDE merges the
-root manifest with those of first-level subdirectories, falling back to a legacy global
+re-hashing unchanged jars. Each subproject writes its own manifests; the IDE merges the
+root manifests with those of first-level subdirectories, falling back to a legacy global
 manifest at the cache root when none exist. Cache directories untouched for 30 days are
 evicted; every cache hit refreshes the directory mtime to keep in-use entries alive. The
 manifest format is duplicated between the two modules (kotlinx-serialization on the IDE
@@ -771,11 +878,14 @@ side, Gson on the Gradle side) writing identical JSON.
 property is set, appends `genDependencySources` to the Gradle start parameters so every
 IntelliJ sync populates the cache (the same technique MDG and Loom use).
 
-**`genDependencySources`** (options `--threads=N`, default 2, and `--force`):
+**`genDependencySources`** (options `--threads=N`, default 2, `--force`, and a repeatable
+`--jar <path>`):
 
 1. Resolves `compileClasspath` through a lenient artifact view, so artifact-transform
-   failures are collected instead of failing the task. Only module components with `.jar`
-   files are processed; JDK jars are skipped.
+   failures are collected instead of failing the task. Jars with no module coordinate (a
+   local `files(...)` dependency) are decompiled too, named by their file name; project
+   (subproject) dependencies are excluded, since their sources are already in the build.
+   JDK jars are skipped.
 2. Artifacts with a published `-sources.jar` (found via an `ArtifactResolutionQuery` with
    `SourcesArtifact`) are mirrored: the sources jar is unpacked into the cache under the
    classes jar's content hash (zip-slip defended), entry marked `published-sources`. This
@@ -808,14 +918,26 @@ IntelliJ sync populates the cache (the same technique MDG and Loom use).
    coordinate, and the failure count is written to `unresolved.txt` (deleted when zero);
    the IDE turns the marker into a notification.
 
-**`cleanSourcesCache`** deletes the cache directories referenced by this project's
-manifest plus the manifest itself; `--global` wipes the entire store.
+9. Jars named by `--jar` (relative paths resolve against the project dir) or by the
+   `mixinmcp { extraJars.from(...) }` extension (`MixinMcpExtension`, a
+   `ConfigurableFileCollection`) are decompiled even though they are on no classpath, which
+   is how a mod sitting in a modpack folder becomes searchable. They go to
+   `adhoc-manifest.json` with `classpathKind = "adhoc"` and `libraryName` = the jar file
+   name: every run that names extra jars rebuilds that manifest, a run that names none
+   leaves it untouched, and it is never pruned against the classpath, so stale cache
+   directories fall to the 30-day eviction instead. Missing, non-jar, and corrupt paths are
+   warned about and skipped.
+
+**`cleanSourcesCache`** deletes the cache directories referenced by both of this project's
+manifests plus the manifests themselves; `--global` wipes the entire store.
 
 ### 10.5 IDE Components (dev.mixinmcp.cache)
 
 - **`DecompilationCacheService`** (project service): `getCachedRoots()` merges the
-  per-project manifests and resolves cache directories to `VirtualFile`s; `refreshVfs()`
-  synchronously refreshes the cache root so directories created outside the IDE resolve;
+  per-project manifests, classpath and ad hoc alike, and resolves cache directories to
+  `VirtualFile`s, naming each root by Maven coordinates plus jar file name and marking ad
+  hoc entries `[ad hoc jar]`; `refreshVfs()` synchronously refreshes the cache root so
+  directories created outside the IDE resolve;
   `isDecompiledCachePath` is the shared predicate used by the search tools and the
   auto-attacher, and `normalizeJarDiskPath` backs the roots provider's duplicate
   suppression.
@@ -833,7 +955,10 @@ manifest plus the manifest itself; `--global` wipes the entire store.
 - **`MixinDecompileCacheSyncListener`** (`ExternalSystemTaskNotificationListener`): on
   each successful project resolve, does the same refresh + fire + schedule, then reads
   the `unresolved.txt` markers and raises a warning balloon pointing at
-  `./gradlew genDependencySources`.
+  `./gradlew genDependencySources`. The project comes from
+  `ExternalSystemTaskId.findProject()`, never from matching the external path against
+  `Project.basePath`: that path can be a subproject or a non-canonical form, and the
+  comparison silently skipped the cache refresh and source auto-attach whenever it differed.
 
 Existing tools need no changes: `mixin_find_class` and `mixin_search_symbols` see the
 roots through `allScope()` and the index; the dep-search helpers query
@@ -999,6 +1124,15 @@ Automated tests are JUnit unit tests of static helpers (the auto-attacher's matc
 - `UnknownParameterRejectingToolTest`: the unknown-parameter guard every tool is wrapped
   in (pass-through of declared names and `projectPath`, rejection message, near-name
   suggestions).
+- `ParameterAliasesTest`: alias rewriting, silent synonym rewriting and its ambiguity and
+  declared-name guards, the alias-plus-canonical conflict, and the suggestion table.
+- `GradleRootResolutionTest`: `mixin_sync_project`'s path normalization and linked-root
+  matching (separator forms, a directory inside a root, the sole root under the project dir).
+- `DepSourceAddressingTest`: URL normalization, URL/disk-shaped `pathPrefix` detection,
+  binary-entry detection, and directory pruning for the dependency readers.
+- `JarClassEntryTest`: locating a class entry inside a jar on disk (dotted nested names,
+  similar-name listing on a miss, corrupt jar).
+- `FileMaskMatcherEscapingTest`: literal treatment of non-wildcard characters in `fileMask`.
 
 Beyond those helpers the MCP tools have no automated coverage; end-to-end verification is
 manual against real Fabric and Forge/NeoForge projects. The canonical smoke test for the
@@ -1035,6 +1169,25 @@ Tool functions are called on background threads without a read lock. PSI reads g
 `smartReadAction(project) { }`; PSI writes go through `WriteCommandAction` or a headless
 refactoring processor on the EDT.
 
+### Waiting on a Busy IDE
+`smartReadAction` waits out indexing with no deadline, so a tool call landing during a sync
+blocks for minutes and the caller sees a hang, not an error. `IdeBusyGuardingTool` (Section
+3) caps that at 30 s and returns what the IDE is waiting on. Anything added to
+`EXEMPT_TOOLS` must not read PSI, or the hang comes back.
+
+### Optional Gradle Module
+Always-loaded code must not touch `org.jetbrains.plugins.gradle` classes: `GradleConstants`
+in `ProjectManagementToolset` or `IdeSyncStateListener` would fail to load wherever the
+Gradle plugin is disabled. Use `ProjectSystemId("GRADLE")` instead; only the classes
+registered through `META-INF/mixinmcp-buildscript.xml` (Section 16) may reference the Gradle
+plugin's API.
+
+### External-System Listeners
+Resolve the project from `ExternalSystemTaskId.findProject()`, never by comparing the task's
+external path to `Project.basePath`. The external path is the Gradle root, which can be a
+subproject or a non-canonical spelling of the project directory; both sync listeners used to
+drop those events silently.
+
 ### Multi-Window Sessions
 With several projects open and no `projectPath` argument, the framework throws
 `McpExpectedError` instead of returning null. `requireProject` converts this into an
@@ -1042,7 +1195,8 @@ error listing the open projects so the agent can retry.
 
 ### ProgressExecutionMode
 For project sync, use `ProgressExecutionMode.START_IN_FOREGROUND_ASYNC` (not
-`IN_FOREGROUND_ASYNC_PLAIN`, which does not exist).
+`IN_FOREGROUND_ASYNC_PLAIN`, which does not exist). It returns before the sync finishes, so
+completion is observed through `IdeSyncState`, not the call.
 
 ### MethodResolver and Overloads
 `resolveSingle()` returns null for ambiguous overloads without `parameterTypes`.
@@ -1082,8 +1236,9 @@ Everything Gradle-API-touching lives in `dev.mixinmcp.buildscript`, registered o
 
 `BuildscriptClasspathRoots` enumerates roots from `GradleBuildClasspathManager`, keyed per linked
 build via `ExternalSystemApiUtil` module paths. It runs only inside `BuildscriptClasspathSnapshot`,
-a project service that recomputes on a background coroutine at project open, after Gradle sync,
-and when the indexing setting changes, then fires `AdditionalLibraryRootsListener` if the indexed
+a project service that recomputes on a background coroutine at project open, after Gradle sync
+(the listener resolves the project from the task id, see Section 15), and when the indexing
+setting changes, then fires `AdditionalLibraryRootsListener` if the indexed
 root set changed. `BuildscriptClasspathRootsProvider` serves the snapshot and nothing else. The
 reason is a platform trap: the workspace file index queries providers while VFS events are applied
 under the write action, and every `GradleBuildClasspathManager` query calls `checkRootsValidity`,

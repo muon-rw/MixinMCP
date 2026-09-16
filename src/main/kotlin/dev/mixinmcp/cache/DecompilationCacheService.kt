@@ -66,9 +66,7 @@ class DecompilationCacheService(private val project: Project) {
             }
         }
 
-        buildscriptRootNamesByPath = result
-            .filter { it.classpathKind == "buildscript" }
-            .associate { it.root.path to it.libraryName }
+        rootInfoByPath = result.associateBy { it.root.path }
         lastScanStats = CacheScanStats(
             valid = result.size,
             missingCacheDir = missingCache,
@@ -103,9 +101,12 @@ class DecompilationCacheService(private val project: Project) {
      * enumeration and must not re-read every manifest from disk each time.
      */
     @Volatile
-    private var buildscriptRootNamesByPath: Map<String, String> = emptyMap()
+    private var rootInfoByPath: Map<String, CachedLibraryInfo> = emptyMap()
 
-    fun buildscriptCacheLibraryName(root: VirtualFile): String? = buildscriptRootNamesByPath[root.path]
+    fun cachedRootInfo(root: VirtualFile): CachedLibraryInfo? = rootInfoByPath[root.path]
+
+    fun buildscriptCacheLibraryName(root: VirtualFile): String? =
+        cachedRootInfo(root)?.takeIf { it.classpathKind == "buildscript" }?.libraryName
 
     /**
      * Discover per-project manifests from the root project and immediate subdirectories,
@@ -149,8 +150,10 @@ class DecompilationCacheService(private val project: Project) {
 
         fun tryLoadManifest(dir: Path) {
             val manifestDir = dir.resolve(".gradle").resolve("mixinmcp")
-            if (Files.exists(manifestDir.resolve("manifest.json"))) {
-                consume(DecompilationManifest().load(manifestDir))
+            for (fileName in MANIFEST_FILE_NAMES) {
+                if (Files.exists(manifestDir.resolve(fileName))) {
+                    consume(DecompilationManifest().load(manifestDir, fileName))
+                }
             }
         }
 
@@ -170,13 +173,26 @@ class DecompilationCacheService(private val project: Project) {
         val classesJarPath: String,
         val root: VirtualFile,
         val classpathKind: String = "compile",
-    )
+    ) {
+        val jarFileName: String
+            get() = classesJarPath.replace('\\', '/').trimEnd('/').substringAfterLast('/')
+
+        /** Coordinates plus jar file name, e.g. `com.example:foo:1.0 (foo-1.0.jar)`; ad hoc jars are marked. */
+        val displayName: String
+            get() {
+                val base: String = if (libraryName == jarFileName) libraryName else "$libraryName ($jarFileName)"
+                return if (classpathKind == "adhoc") "$base [ad hoc jar]" else base
+            }
+    }
 
     companion object {
         private val LOG = Logger.getInstance(DecompilationCacheService::class.java)
 
         /** Oldest Gradle plugin whose manifests cover everything this IDE plugin surfaces. */
         const val REQUIRED_GRADLE_PLUGIN_VERSION: String = "1.3.0"
+
+        /** Per-project manifests: the classpath one and the one for jars named via `--jar` / `extraJars`. */
+        val MANIFEST_FILE_NAMES: List<String> = listOf("manifest.json", "adhoc-manifest.json")
 
         val globalCacheRoot: Path
             get() = Paths.get(System.getProperty("user.home"), ".cache", "mixinmcp", "decompiled")

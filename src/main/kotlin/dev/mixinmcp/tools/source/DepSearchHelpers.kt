@@ -15,6 +15,7 @@ import com.intellij.util.concurrency.annotations.RequiresReadLock
 import dev.mixinmcp.cache.DecompilationCacheService
 import dev.mixinmcp.cache.compareGradlePluginVersions
 import dev.mixinmcp.cache.isGradlePluginVersionAtLeast
+import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.startup.declaredGradlePluginVersion
 import dev.mixinmcp.startup.hasGradlePlugin
 import java.nio.charset.StandardCharsets
@@ -49,6 +50,23 @@ internal val NEOFORGE_NEOFORGE_EVENT_SOURCE_SENTINELS: List<String> = listOf(
 
 internal data class SourceRootInfo(val root: VirtualFile, val typeLabel: String)
 
+internal const val DECOMPILED_CACHE_LABEL: String = "Decompiled cache (MixinMCP)"
+internal const val LIBRARY_SOURCES_LABEL_PREFIX: String = "Library SOURCES"
+internal const val JDK_LABEL_SUFFIX: String = "(JDK)"
+
+internal fun isDecompiledCacheLabel(label: String): Boolean =
+    label == DECOMPILED_CACHE_LABEL || label.startsWith("$DECOMPILED_CACHE_LABEL: ")
+
+internal fun isLibrarySourcesLabel(label: String): Boolean = label.startsWith(LIBRARY_SOURCES_LABEL_PREFIX)
+
+internal fun isJdkLabel(label: String): Boolean = isLibrarySourcesLabel(label) && label.endsWith(JDK_LABEL_SUFFIX)
+
+internal fun decompiledCacheLabel(project: Project, root: VirtualFile): String {
+    val info: DecompilationCacheService.CachedLibraryInfo =
+        DecompilationCacheService.getInstance(project).cachedRootInfo(root) ?: return DECOMPILED_CACHE_LABEL
+    return "$DECOMPILED_CACHE_LABEL: ${info.displayName}"
+}
+
 internal data class DepSearchHit(
     val url: String,
     val filePath: String,
@@ -63,6 +81,10 @@ internal data class DepRegexScanResult(
     val noMatchHints: List<String>,
     val scannedFiles: Int,
     val sawMore: Boolean,
+    val unreadableFilesByRoot: Map<String, Int> = emptyMap(),
+    val rootsScanned: Int = 0,
+    val rootsTotal: Int = 0,
+    val stoppedInRoot: String? = null,
 )
 
 /**
@@ -94,9 +116,9 @@ internal fun collectSourceRootsWithMetadata(project: Project): List<SourceRootIn
                         // Cache dirs attached by SourceAutoAttacher keep their decompiled label so the
                         // library/decompiled roots contract of mixin_search_in_deps holds.
                         val label: String = if (DecompilationCacheService.isDecompiledCachePath(root.path)) {
-                            "Decompiled cache (MixinMCP)"
+                            DECOMPILED_CACHE_LABEL
                         } else {
-                            "Library SOURCES: $libName"
+                            "$LIBRARY_SOURCES_LABEL_PREFIX: $libName"
                         }
                         result.add(SourceRootInfo(root, label))
                     }
@@ -105,7 +127,7 @@ internal fun collectSourceRootsWithMetadata(project: Project): List<SourceRootIn
                 val jdk = entry.jdk ?: continue
                 for (root in jdk.rootProvider.getFiles(OrderRootType.SOURCES)) {
                     if (seen.add(root)) {
-                        result.add(SourceRootInfo(root, "Library SOURCES: ${jdk.name} (JDK)"))
+                        result.add(SourceRootInfo(root, "$LIBRARY_SOURCES_LABEL_PREFIX: ${jdk.name} $JDK_LABEL_SUFFIX"))
                     }
                 }
             }
@@ -118,7 +140,7 @@ internal fun collectSourceRootsWithMetadata(project: Project): List<SourceRootIn
             for (root in synthLib.sourceRoots) {
                 if (!seen.add(root)) continue
                 val label: String = labeled?.labelFor(project, root)
-                    ?: "Library SOURCES (foreign: ${provider.javaClass.simpleName}): ${sourceRootDisplayName(root)}"
+                    ?: "$LIBRARY_SOURCES_LABEL_PREFIX (foreign: ${provider.javaClass.simpleName}): ${sourceRootDisplayName(root)}"
                 result.add(SourceRootInfo(root, label))
             }
         }
@@ -129,7 +151,49 @@ internal fun collectSourceRootsWithMetadata(project: Project): List<SourceRootIn
         }
     }
 
-    return result
+    // Cache dirs attached as library SOURCES were labeled before the cache service had
+    // enumerated its roots (the provider loop above does that), so name them last.
+    return result.map { info ->
+        if (info.typeLabel == DECOMPILED_CACHE_LABEL) info.copy(typeLabel = decompiledCacheLabel(project, info.root)) else info
+    }
+}
+
+internal val SEARCH_ROOTS_MODES: Set<String> = setOf("all", "library", "decompiled", "buildscript", "jdk", "game")
+
+/**
+ * Source roots split into the tiers the text-search tools scan in order: game roots first,
+ * then other library sources, then the decompiled cache, then JDK sources, then the
+ * buildscript classpath. JDK roots sit at the front of every module's order entries, so
+ * without this the JDK would fill every result set before a game or mod root was reached.
+ */
+internal class SearchTiers(
+    val game: List<SourceRootInfo>,
+    val library: List<SourceRootInfo>,
+    val cache: List<SourceRootInfo>,
+    val jdk: List<SourceRootInfo>,
+    val buildscript: List<SourceRootInfo>,
+) {
+    /** Scan order for the given `roots` mode; each list is scanned in sequence with cross-tier dedupe. */
+    fun tiersFor(mode: String): List<List<SourceRootInfo>> = when (mode) {
+        "library" -> listOf(game, library, jdk)
+        "decompiled" -> listOf(cache)
+        "buildscript" -> listOf(buildscript)
+        "jdk" -> listOf(jdk)
+        "game" -> listOf(game)
+        else -> listOf(game, library, cache, jdk, buildscript)
+    }
+
+    val total: Int get() = game.size + library.size + cache.size + jdk.size + buildscript.size
+}
+
+@RequiresReadLock
+internal fun searchTiers(project: Project, roots: List<SourceRootInfo>): SearchTiers {
+    val cache: List<SourceRootInfo> = roots.filter { isDecompiledCacheLabel(it.typeLabel) }
+    val jdk: List<SourceRootInfo> = roots.filter { isJdkLabel(it.typeLabel) }
+    val buildscript: List<SourceRootInfo> = roots.filter { it.typeLabel.startsWith(BUILDSCRIPT_LABEL_PREFIX) }
+    val placed: Set<VirtualFile> = (cache + jdk + buildscript).map { it.root }.toSet()
+    val (game, library) = roots.filter { it.root !in placed }.partition { isGameSourceRoot(project, it.root) }
+    return SearchTiers(game, library, cache, jdk, buildscript)
 }
 
 /**
@@ -160,6 +224,7 @@ internal fun classifySourceFile(project: Project, vf: VirtualFile): String {
     }
     val normPath: String = vf.path.replace('\\', '/')
     val projectPath = project.basePath?.replace('\\', '/')
+    val inJar: Boolean = vf.url.startsWith("jar://")
     if (projectPath != null && normPath.startsWith(projectPath)) {
         if (isLoomCacheArtifactPath(normPath, projectPath)) {
             return "Loom toolchain artifact (binary under .gradle/loom-cache; genSources provides real sources)"
@@ -167,9 +232,9 @@ internal fun classifySourceFile(project: Project, vf: VirtualFile): String {
         if (isGradleToolchainMergedOrBinaryInBuild(normPath, projectPath)) {
             return "MDG merged artifact (binary .class under build/)"
         }
-        return "Project source"
+        if (!inJar) return "Project source"
     }
-    return "Classes JAR (binary)"
+    return if (vf.extension.equals("class", ignoreCase = true)) "Classes JAR (binary)" else "Jar entry (not a source root)"
 }
 
 /**
@@ -324,6 +389,18 @@ internal fun describeEmptyScan(
     }
 }
 
+internal fun describeUnreadableFiles(unreadableByRoot: Map<String, Int>): String? {
+    if (unreadableByRoot.isEmpty()) return null
+    val total: Int = unreadableByRoot.values.sum()
+    val worst: String = unreadableByRoot.entries
+        .sortedByDescending { it.value }
+        .take(5)
+        .joinToString("; ") { (label, n) -> "$n under $label" }
+    val files: String = if (total == 1) "file" else "files"
+    return "$total $files could not be read ($worst); the jar may have changed on disk since the IDE opened it. " +
+        "Run mixin_refresh_vfs or mixin_sync_project and retry."
+}
+
 internal fun buildNoMatchHintsForDepSearch(
     project: Project,
     normalizedPathPrefix: String?,
@@ -331,9 +408,9 @@ internal fun buildNoMatchHintsForDepSearch(
 ): List<String> {
     val allRoots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
     val libRoots: List<SourceRootInfo> =
-        allRoots.filter { it.typeLabel.startsWith("Library SOURCES") }
+        allRoots.filter { isLibrarySourcesLabel(it.typeLabel) }
     val hasCacheRoots: Boolean = allRoots.any {
-        it.typeLabel == "Decompiled cache (MixinMCP)" ||
+        isDecompiledCacheLabel(it.typeLabel) ||
             it.typeLabel.startsWith("$BUILDSCRIPT_LABEL_PREFIX (decompiled cache)")
     }
     val hasForgeGameEvents: Boolean = hasForgeGameEventApiInLibrarySources(libRoots)
@@ -429,12 +506,25 @@ internal fun buildNoMatchHintsForDepSearch(
         }
     }
 
-    if (rootsMode == "library") {
-        hints.add(
-            "roots=library searched only published -sources.jar roots; the decompiled cache and buildscript " +
-                "tiers were not searched. Retry with roots=all to include them.",
-        )
-        return hints
+    when (rootsMode) {
+        "library" -> {
+            hints.add(
+                "roots=library searched only published -sources.jar roots (JDK last); the decompiled cache and " +
+                    "buildscript tiers were not searched. Retry with roots=all to include them.",
+            )
+            return hints
+        }
+        "game" -> {
+            hints.add(
+                "roots=game searched only Minecraft / loader game source roots; retry with roots=all for mods, " +
+                    "libraries, the decompiled cache, and the JDK.",
+            )
+            return hints
+        }
+        "jdk" -> {
+            hints.add("roots=jdk searched only the project SDK's src.zip; retry with roots=all for everything else.")
+            return hints
+        }
     }
 
     val projectRoot: java.nio.file.Path? = project.basePath?.let { java.nio.file.Path.of(it) }
@@ -545,6 +635,47 @@ private fun findFileByPathInTree(vf: VirtualFile, targetPath: String): VirtualFi
     return if (normalized == targetPath || normalized.endsWith("/$targetPath")) vf else null
 }
 
+internal fun cacheRootDisplayName(info: SourceRootInfo): String =
+    info.typeLabel.substringAfter("$DECOMPILED_CACHE_LABEL: ", sourceRootDisplayName(info.root))
+
+internal fun looksLikeUrlOrDiskPath(logicalPath: String): Boolean =
+    logicalPath.contains("://") || logicalPath.contains("!/") || Regex("^[A-Za-z]:/").containsMatchIn(logicalPath)
+
+/** `jar://` or `file://` form of [raw]; a bare disk path becomes a jar URL when it contains `!/`. */
+internal fun normalizeSourceUrl(raw: String): String {
+    val trimmed: String = raw.trim().replace('\\', '/')
+    if (trimmed.contains("://")) return trimmed
+    return if (trimmed.contains("!/")) "jar://$trimmed" else "file://$trimmed"
+}
+
+internal fun jarEntryUrl(jarPath: String, entry: String): String =
+    "jar://" + jarPath.trim().replace('\\', '/').trimEnd('/') + "!/" + entry.trim().replace('\\', '/').trimStart('/')
+
+internal fun looksBinary(bytes: ByteArray): Boolean {
+    val limit: Int = minOf(bytes.size, 8000)
+    for (i in 0 until limit) {
+        if (bytes[i] == 0.toByte()) return true
+    }
+    return false
+}
+
+internal sealed class ClassSourceLookup {
+    class Found(val file: VirtualFile) : ClassSourceLookup()
+    class BinaryOnly(val fqcn: String) : ClassSourceLookup()
+    data object NotFound : ClassSourceLookup()
+}
+
+/** The attached or decompiled source file of a class, resolved the way mixin_find_class does. */
+@RequiresReadLock
+internal fun lookupClassSource(project: Project, className: String, scope: GlobalSearchScope?): ClassSourceLookup {
+    val psiClass = FqcnResolver.resolveNested(project, className, scope ?: GlobalSearchScope.everythingScope(project))
+        ?: return ClassSourceLookup.NotFound
+    val fqcn: String = psiClass.qualifiedName ?: className
+    val vf: VirtualFile = (psiClass.navigationElement.containingFile ?: psiClass.containingFile)?.virtualFile
+        ?: return ClassSourceLookup.BinaryOnly(fqcn)
+    return if (vf.extension.equals("class", ignoreCase = true)) ClassSourceLookup.BinaryOnly(fqcn) else ClassSourceLookup.Found(vf)
+}
+
 /**
  * If the query looks like an FQCN (contains dots with lowercase segments, e.g.
  * "net.minecraft.world.entity.LivingEntity"), extracts the simple name so it
@@ -569,12 +700,14 @@ internal fun extractSimpleName(query: String): String {
  * - No glob characters (* ?) → case-insensitive substring match against the
  *   full path, so bare names like "LivingEntity" or "LivingEntity.java" work
  *   without requiring agents to wrap in wildcards.
- * - Contains glob characters → convert glob to regex anchored on the full path
- *   (single `*` crosses `/`, matching the documented behavior).
- * The regex is pre-compiled once instead of per-file.
+ * - Contains glob characters → case-insensitive unanchored glob over the full
+ *   path (single `*` crosses `/`); every other character is literal, so braces,
+ *   parentheses, and `$` never reach the regex engine as syntax.
+ * Backslashes are treated as path separators, matching the forward-slash paths
+ * produced by [getPathForMask]. The regex is pre-compiled once instead of per-file.
  */
 internal fun buildFileMaskMatcher(fileMask: String?): (String) -> Boolean {
-    val mask = fileMask?.trim()
+    val mask: String? = fileMask?.trim()?.replace('\\', '/')
     if (mask.isNullOrBlank() || mask == "*") return { true }
 
     val hasGlob = '*' in mask || '?' in mask
@@ -583,13 +716,36 @@ internal fun buildFileMaskMatcher(fileMask: String?): (String) -> Boolean {
         return { path -> path.lowercase().contains(lower) }
     }
 
-    val regex: String = mask
-        .replace(".", "\\.")
-        .replace("*", ".*")
-        .replace("?", ".")
-    val compiled = Regex(regex, RegexOption.IGNORE_CASE)
+    val compiled = Regex(globToRegex(mask), RegexOption.IGNORE_CASE)
     return { path -> compiled.containsMatchIn(path) }
 }
+
+internal fun globToRegex(glob: String): String = buildString {
+    var literalStart = 0
+    for ((i, ch) in glob.withIndex()) {
+        if (ch != '*' && ch != '?') continue
+        if (i > literalStart) append(Pattern.quote(glob.substring(literalStart, i)))
+        append(if (ch == '*') ".*" else ".")
+        literalStart = i + 1
+    }
+    if (literalStart < glob.length) append(Pattern.quote(glob.substring(literalStart)))
+}
+
+private val BINARY_ENTRY_EXTENSIONS: Set<String> = setOf(
+    "class", "jar", "zip", "png", "jpg", "jpeg", "gif", "ogg", "wav", "ttf", "otf",
+    "nbt", "dat", "bin", "so", "dll", "dylib", "ico", "icns",
+)
+
+internal fun isBinaryEntryName(name: String): Boolean =
+    name.substringAfterLast('.', "").lowercase() in BINARY_ENTRY_EXTENSIONS
+
+/**
+ * True when a directory at root-relative path [dirRel] (trailing slash) can hold files whose
+ * root-relative path starts with [prefix]: the directory is an ancestor of the prefix, or lies
+ * inside it.
+ */
+internal fun directoryMayContainPrefix(dirRel: String, prefix: String): Boolean =
+    prefix.startsWith(dirRel, ignoreCase = true) || dirRel.startsWith(prefix, ignoreCase = true)
 
 /**
  * Returns the path used for fileMask matching: the path of [vf] relative to
@@ -629,12 +785,17 @@ internal fun collectRegexHits(
     pathPrefix: String? = null,
     skipPath: (String) -> Boolean = { false },
     scannedFiles: IntArray? = null,
+    unreadableFiles: IntArray? = null,
 ) {
     ProgressManager.checkCanceled()
     if (hits.size >= maxResults) return
     if (System.currentTimeMillis() - startTime > timeout) return
 
     if (vf.isDirectory) {
+        if (pathPrefix != null && vf != root) {
+            val dirRel: String = getPathForMask(root, vf) + "/"
+            if (!directoryMayContainPrefix(dirRel, pathPrefix)) return
+        }
         for (child in vf.children) {
             collectRegexHits(
                 child,
@@ -649,19 +810,22 @@ internal fun collectRegexHits(
                 pathPrefix,
                 skipPath,
                 scannedFiles,
+                unreadableFiles,
             )
         }
     } else {
+        if (isBinaryEntryName(vf.name)) return
         val pathToMatch: String = getPathForMask(root, vf)
-        if (pathPrefix != null && !pathToMatch.startsWith(pathPrefix)) return
+        if (pathPrefix != null && !pathToMatch.startsWith(pathPrefix, ignoreCase = true)) return
         if (skipPath(pathToMatch)) return
         if (!matchesMask(pathToMatch)) return
-        scannedFiles?.let { count -> count[0]++ }
         val content: String = try {
             String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
         } catch (e: Exception) {
+            unreadableFiles?.let { count -> count[0]++ }
             return
         }
+        scannedFiles?.let { count -> count[0]++ }
         val lines: List<String> = content.lines()
         for ((i, line) in lines.withIndex()) {
             if (hits.size >= maxResults) return

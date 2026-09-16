@@ -164,6 +164,49 @@ object ClassFileLocator {
         return magic == CLASS_MAGIC
     }
 
+    sealed class JarClassLookup {
+        class Found(val bytes: ByteArray, val entryName: String) : JarClassLookup()
+        class NotFound(val similarEntries: List<String>) : JarClassLookup()
+        class Unreadable(val message: String) : JarClassLookup()
+    }
+
+    /**
+     * Reads a class straight out of any jar on disk, no index involved: for jars that are not on
+     * the project classpath. Accepts dot, slash, and `$` forms; `Outer.Inner` is tried as
+     * `Outer$Inner.class` the same way [FqcnResolver.resolveNested] does.
+     */
+    fun readClassEntry(jar: File, className: String): JarClassLookup {
+        val internalName: String = className.trim().replace('.', '/').removeSuffix("/class").removeSuffix(".class")
+        val candidates: List<String> = candidateEntryNames(internalName)
+        return try {
+            JarFile(jar).use { jf ->
+                for (name in candidates) {
+                    val entry = jf.getJarEntry(name) ?: continue
+                    val bytes: ByteArray = jf.getInputStream(entry).use { it.readBytes() }
+                    if (isValidClassBytes(bytes)) return JarClassLookup.Found(bytes, name)
+                }
+                val simple: String = internalName.substringAfterLast('/').substringAfterLast('$').lowercase()
+                val similar: List<String> = jf.entries().asSequence()
+                    .map { it.name }
+                    .filter { it.endsWith(".class") && it.substringAfterLast('/').lowercase().contains(simple) }
+                    .take(40)
+                    .toList()
+                JarClassLookup.NotFound(similar)
+            }
+        } catch (e: Exception) {
+            JarClassLookup.Unreadable(e.message ?: e.toString())
+        }
+    }
+
+    private fun candidateEntryNames(internalName: String): List<String> {
+        val out: MutableList<String> = mutableListOf("$internalName.class")
+        val parts: List<String> = internalName.split('/')
+        for (i in parts.size - 1 downTo 1) {
+            out.add(parts.subList(0, i).joinToString("/") + "$" + parts.subList(i, parts.size).joinToString("$") + ".class")
+        }
+        return out.distinct()
+    }
+
     /**
      * Fallback: read raw bytes from JAR when VirtualFile points to decompiled content.
      * Parses jar:///path/to.jar!/entry/Class.class URL.

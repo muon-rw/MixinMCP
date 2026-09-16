@@ -17,6 +17,9 @@ import dev.mixinmcp.resolve.ClassVariants
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.ModuleScopeResult
 import dev.mixinmcp.resolve.ModuleScopes
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.coroutines.coroutineContext
 
 private val VALID_FILTERS: Set<String> = linkedSetOf("all", "synthetic", "methods", "fields")
@@ -34,9 +37,37 @@ private sealed class ScopedLocate {
         val found: ClassFileLocator.LocateResult.Found,
         val pinnedModule: String?,
         val report: ClassVariants.VariantReport?,
-    ) : ScopedLocate()
+        val jarName: String? = null,
+    ) : ScopedLocate() {
+        val originNote: String
+            get() = pinnedModule?.let { ", module: $it" } ?: jarName?.let { ", jar: $it" } ?: ""
+    }
 
     class Failure(val message: String) : ScopedLocate()
+}
+
+/** Index-free lookup for jars outside the project classpath; runs off the read lock. */
+private fun locateInJar(jarPath: String, className: String, module: String?): ScopedLocate {
+    if (module != null) {
+        return ScopedLocate.Failure("jarPath reads the class straight from that jar and bypasses classpath resolution; drop module=.")
+    }
+    val jar = File(jarPath.trim().replace('\\', '/'))
+    if (!jar.isFile) return ScopedLocate.Failure("jarPath does not exist or is not a file: $jarPath")
+    return when (val lookup = ClassFileLocator.readClassEntry(jar, className)) {
+        is ClassFileLocator.JarClassLookup.Found ->
+            ScopedLocate.Success(ClassFileLocator.LocateResult.Found(lookup.bytes), null, null, jar.name)
+        is ClassFileLocator.JarClassLookup.NotFound -> ScopedLocate.Failure(
+            buildString {
+                append("No class $className in ${jar.name}. Use the dot FQCN (Outer.Inner or Outer\$Inner for nested classes). ")
+                if (lookup.similarEntries.isNotEmpty()) {
+                    append("Entries with a similar name: ${lookup.similarEntries.joinToString(", ")}. ")
+                }
+                append("mixin_list_jar_entries(jarPath=\"$jarPath\", includeClasses=true, fileMask=\"<name>\") lists the classes.")
+            },
+        )
+        is ClassFileLocator.JarClassLookup.Unreadable ->
+            ScopedLocate.Failure("Could not read ${jar.name}: ${lookup.message}")
+    }
 }
 
 @RequiresReadLock
@@ -73,12 +104,14 @@ private fun locateScoped(project: Project, className: String, module: String?): 
         )
         ClassFileLocator.LocateResult.Unresolved -> ScopedLocate.Failure(
             if (pinnedModule != null && FqcnResolver.resolveNested(project, className) != null) {
-                "Class $className exists on the classpath but not in the dependency scope of " +
-                    "module '$pinnedModule'; drop module= to search the whole project, or pin a different module."
+                "Class $className exists on the classpath but not in the compile scope of module '$pinnedModule' " +
+                    "(declared runtimeOnly or test-only there, or only on another module), so that module cannot " +
+                    "compile against it; drop module= to search the whole project, or pin a different module."
             } else {
                 "Class not found: $className" +
                     (if (pinnedModule != null) " (module: $pinnedModule)" else "") +
-                    ". " + FqcnResolver.CLASS_NOT_FOUND_HINT
+                    ". " + FqcnResolver.CLASS_NOT_FOUND_HINT +
+                    " For a jar that is not on the classpath, pass jarPath."
             },
         )
     }
@@ -120,13 +153,14 @@ class BytecodeInspectionToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Returns bytecode-level class overview including synthetic methods, lambda targets, method descriptors, and access flags. Use this tool when decompiled source hides the real method names you need for mixin targets. filter: all (default), synthetic (only compiler-generated: lambdas, bridges, access methods), methods, fields. includeInstructions: javap -c style bytecode per method (large output). Use filter=synthetic to discover lambda mixin target names (e.g. lambda\$tick\$0). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). For method-level bytecode use mixin_method_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
+    @McpDescription("Returns bytecode-level class overview including synthetic methods, lambda targets, method descriptors, and access flags. Use this tool when decompiled source hides the real method names you need for mixin targets. filter: all (default), synthetic (only compiler-generated: lambdas, bridges, access methods), methods, fields. includeInstructions: javap -c style bytecode per method (large output). Use filter=synthetic to discover lambda mixin target names (e.g. lambda\$tick\$0). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). jarPath: read the class straight from any jar on disk instead of the classpath (a mod in a modpack folder; no build change needed); className is still the dot FQCN, and module must be omitted. For method-level bytecode use mixin_method_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing (jarPath lookups never wait).")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_class_bytecode(
         className: String,
         filter: String = "all",
         includeInstructions: Boolean = false,
         module: String? = null,
+        jarPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
@@ -136,11 +170,15 @@ class BytecodeInspectionToolset : McpToolset {
             )
         }
 
-        val scoped: ScopedLocate.Success =
-            when (val outcome = smartReadAction(project) { locateScoped(project, className, module) }) {
-                is ScopedLocate.Success -> outcome
-                is ScopedLocate.Failure -> return McpToolCallResult.error(outcome.message)
-            }
+        val outcome: ScopedLocate = if (!jarPath.isNullOrBlank()) {
+            withContext(Dispatchers.IO) { locateInJar(jarPath, className, module) }
+        } else {
+            smartReadAction(project) { locateScoped(project, className, module) }
+        }
+        val scoped: ScopedLocate.Success = when (outcome) {
+            is ScopedLocate.Success -> outcome
+            is ScopedLocate.Failure -> return McpToolCallResult.error(outcome.message)
+        }
         val located: ClassFileLocator.LocateResult.Found = scoped.found
         val classBytes: ByteArray = located.bytes
 
@@ -153,8 +191,7 @@ class BytecodeInspectionToolset : McpToolset {
 
         val result: String = buildString {
             append(staleWarning(located))
-            val pinnedNote: String = scoped.pinnedModule?.let { ", module: $it" } ?: ""
-            appendLine("=== ${analysis.name} (bytecode$pinnedNote) ===")
+            appendLine("=== ${analysis.name} (bytecode${scoped.originNote}) ===")
             appendLine()
             appendLine("Version: ${analysis.version}")
             appendLine("Access: ${BytecodeAnalyzer.accessFlagsToString(analysis.access)}")
@@ -242,21 +279,26 @@ class BytecodeInspectionToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor — use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor in JVM format to disambiguate overloads (e.g. (Lnet/minecraft/world/entity/Entity;)V, or ()V for no-arg methods). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). For class-level bytecode overview use mixin_class_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
+    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor; use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor in JVM format to disambiguate overloads (e.g. (Lnet/minecraft/world/entity/Entity;)V, or ()V for no-arg methods). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). jarPath: read the class straight from any jar on disk instead of the classpath (a mod in a modpack folder); module must be omitted. For class-level bytecode overview use mixin_class_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing (jarPath lookups never wait).")
     @Suppress("unused")
     suspend fun mixin_method_bytecode(
         className: String,
         methodName: String,
         methodDescriptor: String? = null,
         module: String? = null,
+        jarPath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val scoped: ScopedLocate.Success =
-            when (val outcome = smartReadAction(project) { locateScoped(project, className, module) }) {
-                is ScopedLocate.Success -> outcome
-                is ScopedLocate.Failure -> return McpToolCallResult.error(outcome.message)
-            }
+        val outcome: ScopedLocate = if (!jarPath.isNullOrBlank()) {
+            withContext(Dispatchers.IO) { locateInJar(jarPath, className, module) }
+        } else {
+            smartReadAction(project) { locateScoped(project, className, module) }
+        }
+        val scoped: ScopedLocate.Success = when (outcome) {
+            is ScopedLocate.Success -> outcome
+            is ScopedLocate.Failure -> return McpToolCallResult.error(outcome.message)
+        }
         val located: ClassFileLocator.LocateResult.Found = scoped.found
         val classBytes: ByteArray = located.bytes
 
@@ -269,8 +311,7 @@ class BytecodeInspectionToolset : McpToolset {
         if (result != null) {
             return McpToolCallResult.text(buildString {
                 append(staleWarning(located))
-                val pinnedNote: String = scoped.pinnedModule?.let { ", module: $it" } ?: ""
-                appendLine("=== $className#$methodName (bytecode$pinnedNote) ===")
+                appendLine("=== $className#$methodName (bytecode${scoped.originNote}) ===")
                 appendLine()
                 append(result)
                 methodVariantNote(scoped.report, methodName, methodDescriptor)?.let { note ->

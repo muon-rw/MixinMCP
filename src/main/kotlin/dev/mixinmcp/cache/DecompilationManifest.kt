@@ -22,11 +22,11 @@ data class DecompilationManifest(
     val pluginVersion: String? = null,
 ) {
     /**
-     * Load manifest from cacheRoot/manifest.json.
+     * Load manifest from cacheRoot/[fileName].
      * Returns empty manifest if file does not exist or is invalid.
      */
-    fun load(cacheRoot: Path): DecompilationManifest {
-        val manifestPath = cacheRoot.resolve(MANIFEST_FILE)
+    fun load(cacheRoot: Path, fileName: String = MANIFEST_FILE): DecompilationManifest {
+        val manifestPath = cacheRoot.resolve(fileName)
         if (!Files.exists(manifestPath)) {
             LOG.info("MixinMCP: manifest not found at $manifestPath")
             return DecompilationManifest()

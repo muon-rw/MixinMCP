@@ -45,10 +45,11 @@ abstract class CleanCacheTask : DefaultTask() {
 
     private fun cleanProject() {
         val manifestPath = projectManifestRoot
-        val manifest = DecompilationManifest().load(manifestPath)
+        val entries = DecompilationManifest().load(manifestPath).entries +
+            DecompilationManifest().load(manifestPath, DecompilationManifest.ADHOC_MANIFEST_FILE).entries
 
         var deletedEntries = 0
-        for ((hash, entry) in manifest.entries) {
+        for ((hash, entry) in entries) {
             val cacheDir = globalCacheRoot.resolve(hash).toFile()
             if (cacheDir.isDirectory) {
                 deleteRecursively(cacheDir)
@@ -57,16 +58,7 @@ abstract class CleanCacheTask : DefaultTask() {
             }
         }
 
-        // Delete the project manifest and unresolved marker
-        val manifestFile = manifestPath.resolve("manifest.json").toFile()
-        val unresolvedFile = manifestPath.resolve(MixinDecompileTask.UNRESOLVED_MARKER_FILE).toFile()
-        if (manifestFile.exists()) {
-            manifestFile.delete()
-            logger.lifecycle("Deleted project manifest: ${manifestFile.path}")
-        }
-        if (unresolvedFile.exists()) {
-            unresolvedFile.delete()
-        }
+        deleteManifests(manifestPath)
 
         logger.lifecycle("MixinMCP: cleaned $deletedEntries cache entries for this project.")
         logger.lifecycle("Run ./gradlew genDependencySources to re-decompile.")
@@ -82,18 +74,20 @@ abstract class CleanCacheTask : DefaultTask() {
             logger.lifecycle("MixinMCP: no global cache found at ${cacheRoot.path}")
         }
 
-        // Also delete the project manifest
-        val manifestFile = projectManifestRoot.resolve("manifest.json").toFile()
-        val unresolvedFile = projectManifestRoot.resolve(MixinDecompileTask.UNRESOLVED_MARKER_FILE).toFile()
-        if (manifestFile.exists()) {
-            manifestFile.delete()
-            logger.lifecycle("Deleted project manifest: ${manifestFile.path}")
-        }
-        if (unresolvedFile.exists()) {
-            unresolvedFile.delete()
-        }
+        deleteManifests(projectManifestRoot)
 
         logger.lifecycle("Run ./gradlew genDependencySources to re-decompile.")
+    }
+
+    private fun deleteManifests(manifestRoot: Path) {
+        for (name in listOf(DecompilationManifest.MANIFEST_FILE, DecompilationManifest.ADHOC_MANIFEST_FILE)) {
+            val file = manifestRoot.resolve(name).toFile()
+            if (file.exists()) {
+                file.delete()
+                logger.lifecycle("Deleted project manifest: ${file.path}")
+            }
+        }
+        manifestRoot.resolve(MixinDecompileTask.UNRESOLVED_MARKER_FILE).toFile().delete()
     }
 
     private fun deleteRecursively(file: File) {

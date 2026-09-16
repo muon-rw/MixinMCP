@@ -25,11 +25,14 @@ import java.io.File
 class MixinDecompilePlugin : Plugin<Project> {
 
     override fun apply(project: Project) {
+        val extension = project.extensions.create("mixinmcp", MixinMcpExtension::class.java)
+
         val taskProvider = project.tasks.register("genDependencySources", MixinDecompileTask::class.java) {
             it.group = "mixinmcp"
             it.description = "Decompile jars without sources and mirror published -sources.jar into ~/.cache/mixinmcp/decompiled/"
             it.projectDir = project.projectDir
             it.gradleUserHome = project.gradle.gradleUserHomeDir
+            it.extraJarFiles = project.provider { extension.extraJars.files }
 
             val configs = findClasspathConfigurations(project)
             if (configs.isNotEmpty()) {

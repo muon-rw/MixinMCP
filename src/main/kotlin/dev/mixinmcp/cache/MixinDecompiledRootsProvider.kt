@@ -13,6 +13,7 @@ import com.intellij.openapi.vfs.VirtualFile
 import dev.mixinmcp.settings.MixinMcpSettings
 import dev.mixinmcp.tools.source.BUILDSCRIPT_LABEL_PREFIX
 import dev.mixinmcp.tools.source.LabeledSyntheticRootsProvider
+import dev.mixinmcp.tools.source.decompiledCacheLabel
 
 /**
  * Exposes decompiled library sources as SyntheticLibrary roots.
@@ -26,7 +27,7 @@ class MixinDecompiledRootsProvider : AdditionalLibraryRootsProvider(), LabeledSy
         return if (buildscriptName != null) {
             "$BUILDSCRIPT_LABEL_PREFIX (decompiled cache): $buildscriptName"
         } else {
-            "Decompiled cache (MixinMCP)"
+            decompiledCacheLabel(project, root)
         }
     }
 

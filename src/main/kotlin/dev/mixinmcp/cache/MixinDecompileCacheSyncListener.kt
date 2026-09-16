@@ -20,7 +20,9 @@ class MixinDecompileCacheSyncListener : ExternalSystemTaskNotificationListener {
 
     override fun onSuccess(projectPath: String, id: ExternalSystemTaskId) {
         if (id.type != ExternalSystemTaskType.RESOLVE_PROJECT) return
-        val project = resolveProject(projectPath) ?: return
+        // The task id names the IDE project; the external path can be a subproject or a
+        // non-canonical form and must not be compared to Project.basePath.
+        val project: Project = id.findProject()?.takeUnless { it.isDisposed } ?: return
 
         val service = DecompilationCacheService.getInstance(project)
         service.refreshVfs()
@@ -76,12 +78,6 @@ class MixinDecompileCacheSyncListener : ExternalSystemTaskNotificationListener {
                 )
                 .notify(project)
         }
-    }
-
-    private fun resolveProject(projectPath: String): Project? {
-        return com.intellij.openapi.project.ProjectManager.getInstance()
-            .openProjects
-            .find { it.basePath == projectPath }
     }
 
     companion object {

@@ -68,7 +68,7 @@ class SymbolRefactorToolset : McpToolset {
             "Method overrides count as blocking usages and are tagged [override] so you can see what would break. " +
             "References inside mixin config JSON, mods.toml, ServiceLoader files, etc. are picked up automatically " +
             "when the relevant IntelliJ language plugins (Minecraft Development, Forge/Fabric support) contribute PSI references. " +
-            "By default refuses to delete if usages exist; pass force=true to delete anyway (will leave broken references), " +
+            "By default refuses to delete if usages exist; pass ignoreConflicts=true (force is accepted as an alias) to delete anyway (will leave broken references), " +
             "or dryRun=true to only report usages without modifying anything. Modifies source files when deletion succeeds.",
     )
     @Suppress("unused")
@@ -78,7 +78,7 @@ class SymbolRefactorToolset : McpToolset {
         fieldName: String? = null,
         parameterTypes: List<String>? = null,
         methodDescriptor: String? = null,
-        force: Boolean = false,
+        ignoreConflicts: Boolean = false,
         dryRun: Boolean = false,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
@@ -101,11 +101,11 @@ class SymbolRefactorToolset : McpToolset {
             is PreparationResult.Ok -> r.preparation
         }
 
-        if (dryRun || (prep.usages.isNotEmpty() && !force)) {
-            return McpToolCallResult.text(formatBlocked(prep, dryRun, force))
+        if (dryRun || (prep.usages.isNotEmpty() && !ignoreConflicts)) {
+            return McpToolCallResult.text(formatBlocked(prep, dryRun, ignoreConflicts))
         }
 
-        return performDelete(project, prep, force)
+        return performDelete(project, prep, ignoreConflicts)
     }
 
     @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
@@ -440,7 +440,7 @@ class SymbolRefactorToolset : McpToolset {
                 }
                 appendLine()
                 if (!dryRun && !force) {
-                    appendLine("Re-run with force=true to delete anyway (this will leave broken references).")
+                    appendLine("Re-run with ignoreConflicts=true to delete anyway (this will leave broken references).")
                 }
             }
         }

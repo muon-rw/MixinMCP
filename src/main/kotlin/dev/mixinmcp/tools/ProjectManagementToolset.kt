@@ -14,11 +14,44 @@ import com.intellij.openapi.externalSystem.service.execution.ProgressExecutionMo
 import com.intellij.openapi.externalSystem.util.ExternalSystemApiUtil
 import com.intellij.openapi.externalSystem.util.ExternalSystemUtil
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.project.DumbService
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.io.FileUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtil
+import dev.mixinmcp.sync.IdeSyncState
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.coroutines.coroutineContext
+
+/** Platform id string, not `GradleConstants.SYSTEM_ID`: the Gradle plugin is an optional dependency. */
+private val GRADLE_SYSTEM_ID: ProjectSystemId = ProjectSystemId("GRADLE")
+
+private const val START_WAIT_MS: Long = 10_000
+private const val MAX_SYNC_TIMEOUT_MS: Long = 600_000
+
+internal fun normalizeDiskPath(path: String): String =
+    FileUtil.toSystemIndependentName(FileUtil.toCanonicalPath(path.trim())).trimEnd('/')
+
+internal fun linkedGradleRoots(project: Project): List<String> = runCatching {
+    ExternalSystemApiUtil.getSettings(project, GRADLE_SYSTEM_ID)
+        .linkedProjectsSettings
+        .map { normalizeDiskPath(it.externalProjectPath) }
+        .sorted()
+}.getOrDefault(emptyList())
+
+/**
+ * The linked Gradle root that [requested] names: an exact match, the deepest linked root
+ * containing it, the sole linked root under the IDE project directory, or null.
+ */
+internal fun resolveGradleRoot(requested: String, linked: List<String>, basePath: String): String? {
+    linked.firstOrNull { FileUtil.pathsEqual(it, requested) }?.let { return it }
+    linked.filter { FileUtil.isAncestor(it, requested, false) }.maxByOrNull { it.length }?.let { return it }
+    if (FileUtil.pathsEqual(requested, basePath)) {
+        linked.singleOrNull { FileUtil.isAncestor(requested, it, false) }?.let { return it }
+    }
+    return null
+}
 
 @Suppress("FunctionName") // @McpTool functions are snake_case by MCP convention
 class ProjectManagementToolset : McpToolset {
@@ -27,55 +60,130 @@ class ProjectManagementToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = FALSE, destructiveHint = FALSE, idempotentHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Trigger Gradle/Maven project sync to refresh dependencies and decompilation cache. Call after changing build.gradle or pom.xml. Runs in background.")
+    @McpDescription(
+        "Trigger a Gradle project sync (re-import) so dependency, source-root, and decompilation-cache changes reach " +
+            "the IDE; call it after editing build files or running genDependencySources. projectPath: the Gradle root " +
+            "to sync; defaults to the IDE project directory, accepts either separator form, and must be a linked " +
+            "Gradle root or a directory inside one (the error lists the linked roots). wait (default true) blocks " +
+            "until the resolve and the project-data import that follows it finish, up to timeoutMs (default 90000, " +
+            "max 600000), then reports success, failure with the error text, cancellation, or timeout; wait=false " +
+            "returns as soon as the resolve has started and the sync continues in the background (poll " +
+            "mixin_ide_status). Maven projects are not supported by this tool; use the IDE's Maven reload.",
+    )
     @Suppress("unused")
     suspend fun mixin_sync_project(
         projectPath: String? = null,
+        wait: Boolean = true,
+        timeoutMs: Long = 90_000,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val basePath: String = project.basePath ?: return McpToolCallResult.error(
-            "Project has no base path",
-        )
+        val basePath: String = project.basePath ?: return McpToolCallResult.error("Project has no base path")
+        if (timeoutMs < 1000 || timeoutMs > MAX_SYNC_TIMEOUT_MS) {
+            return McpToolCallResult.error("timeoutMs must be between 1000 and $MAX_SYNC_TIMEOUT_MS (got $timeoutMs)")
+        }
 
-        val externalPath: String = projectPath ?: basePath
+        val requested: String = normalizeDiskPath(projectPath ?: basePath)
+        val linked: List<String> = linkedGradleRoots(project)
+        val gradleRoot: String = resolveGradleRoot(requested, linked, normalizeDiskPath(basePath))
+            ?: return McpToolCallResult.error(
+                buildString {
+                    append("No linked Gradle project matches `$requested`. ")
+                    if (linked.isEmpty()) {
+                        append("This IDE project has no linked Gradle root")
+                        if (File(basePath, "pom.xml").isFile) {
+                            append("; it looks like a Maven project, which this tool cannot sync (use the IDE's Maven reload)")
+                        }
+                        append(".")
+                    } else {
+                        append("Linked Gradle roots: ${linked.joinToString(", ")}. Pass one of them as projectPath.")
+                    }
+                },
+            )
 
-        // External System refresh must run on EDT; use invokeLater to avoid blocking. No explicit VFS
-        // flush here: the async write completes in milliseconds, well within the delay before this
-        // START_IN_FOREGROUND_ASYNC import actually spawns Gradle and reads the build scripts off disk.
+        val syncState: IdeSyncState = IdeSyncState.getInstance(project)
+        val generationBefore: Long = syncState.snapshot.generation
+
+        // External System refresh must run on EDT; the resolve itself runs in the background.
         ApplicationManager.getApplication().invokeLater {
+            if (project.isDisposed) return@invokeLater
             FileDocumentManager.getInstance().saveAllDocuments()
-            val gradleId: ProjectSystemId = ProjectSystemId("GRADLE")
-            val spec: ImportSpecBuilder = ImportSpecBuilder(project, gradleId)
-                .use(ProgressExecutionMode.START_IN_FOREGROUND_ASYNC)
+            val spec = ImportSpecBuilder(project, GRADLE_SYSTEM_ID).use(ProgressExecutionMode.START_IN_FOREGROUND_ASYNC)
             try {
-                ExternalSystemUtil.refreshProject(externalPath, spec.build())
-            } catch (_: Exception) {
-                // Project may not be Gradle; Maven uses "Maven" as system ID
-                try {
-                    val mavenSpec: ImportSpecBuilder =
-                        ImportSpecBuilder(project, ProjectSystemId("Maven"))
-                            .use(ProgressExecutionMode.START_IN_FOREGROUND_ASYNC)
-                    ExternalSystemUtil.refreshProject(externalPath, mavenSpec.build())
-                } catch (_: Exception) {
-                    // Ignore — project may not be Gradle/Maven
-                }
+                ExternalSystemUtil.refreshProject(gradleRoot, spec.build())
+            } catch (e: Exception) {
+                syncState.recordTriggerFailure(e.message ?: e.toString())
             }
         }
 
-        val gradleLinked: Boolean = runCatching {
-            ExternalSystemApiUtil.getSettings(project, ProjectSystemId("GRADLE"))
-                .getLinkedProjectSettings(externalPath) != null
-        }.getOrDefault(false)
-        val mavenBuildFilePresent: Boolean = File(externalPath, "pom.xml").isFile
-        val caveat: String = if (gradleLinked || mavenBuildFilePresent) "" else {
-            " No Gradle project is linked at this path and no pom.xml is present; the request may be a no-op."
+        val started: IdeSyncState.Snapshot = withTimeoutOrNull(START_WAIT_MS) { syncState.awaitStarted(generationBefore) }
+            ?: return McpToolCallResult.error(
+                "Sync requested for $gradleRoot but no Gradle resolve started within ${START_WAIT_MS / 1000}s. " +
+                    "The IDE may have refused the import (untrusted project, Gradle plugin disabled) or another sync " +
+                    "is queued; check mixin_ide_status and the Build tool window.",
+            )
+        started.triggerFailure?.let { failure ->
+            return McpToolCallResult.error("Sync could not be started for $gradleRoot: $failure")
+        }
+        if (!wait) {
+            return McpToolCallResult.text(
+                "Sync started for $gradleRoot (generation ${started.generation}); it continues in the background. " +
+                    "Poll mixin_ide_status, or call mixin_sync_project again with wait=true to block until it finishes.",
+            )
         }
 
-        return McpToolCallResult.text(
-            "Sync requested for $externalPath; it runs in the background and this call does not confirm " +
-                "completion.$caveat Verify afterwards with mixin_list_source_roots.",
-        )
+        val finished: IdeSyncState.Snapshot? = withTimeoutOrNull(timeoutMs) { syncState.awaitIdle() }
+        val current: IdeSyncState.Snapshot = finished ?: syncState.snapshot
+        val elapsedS: Long = current.resolveStartedAt?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0
+        if (finished == null) {
+            return McpToolCallResult.error(
+                "Sync for $gradleRoot is still running after ${timeoutMs / 1000}s (${IdeBusyGuardingTool.describeBusyState(project)}). " +
+                    "It continues in the background; poll mixin_ide_status or call again with a larger timeoutMs.",
+            )
+        }
+        return when (current.lastOutcome) {
+            IdeSyncState.Outcome.SUCCESS -> McpToolCallResult.text(
+                "Sync finished for $gradleRoot in ${elapsedS}s: resolve succeeded and the project-data import completed. " +
+                    "Source roots, dependencies, and the decompiled cache are current; indexing may still be running " +
+                    "(other tools wait for it).",
+            )
+            IdeSyncState.Outcome.FAILURE -> McpToolCallResult.error(
+                "Sync FAILED for $gradleRoot after ${elapsedS}s: ${current.lastError ?: "no error text"}. " +
+                    "The IDE model was not updated; fix the build script and retry.",
+            )
+            IdeSyncState.Outcome.CANCELLED -> McpToolCallResult.error("Sync for $gradleRoot was cancelled after ${elapsedS}s.")
+            null -> McpToolCallResult.text("Sync for $gradleRoot ended after ${elapsedS}s without a recorded outcome.")
+        }
+    }
+
+    @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
+    @McpTool
+    @McpDescription(
+        "Reports whether the IDE can answer classpath questions right now: dumb mode (indexing), a Gradle resolve or " +
+            "project-data import in flight and how long ago it started, the last sync outcome with its error text, and " +
+            "the linked Gradle roots that mixin_sync_project accepts as projectPath. Other mixin_* tools wait up to " +
+            "30s for a busy IDE and then return an error asking you to retry; call this to see what they are waiting on.",
+    )
+    @Suppress("unused")
+    suspend fun mixin_ide_status(): McpToolCallResult {
+        val project = coroutineContext.requireProject { return it }
+        val snapshot: IdeSyncState.Snapshot = IdeSyncState.getInstance(project).snapshot
+        val now: Long = System.currentTimeMillis()
+        fun ago(epochMs: Long?): String = epochMs?.let { "${(now - it) / 1000}s ago" } ?: "never"
+        val text: String = buildString {
+            appendLine("=== IDE status: ${project.name} ===")
+            appendLine("Project directory: ${project.basePath}")
+            appendLine("Busy: ${IdeBusyGuardingTool.describeBusyState(project)}")
+            appendLine("Indexing (dumb mode): ${DumbService.isDumb(project)}")
+            appendLine("Resolve tasks in flight: ${snapshot.resolveInFlight}; last resolve started ${ago(snapshot.resolveStartedAt)}")
+            appendLine("Project-data import in flight: ${snapshot.importInFlight}")
+            appendLine("Last sync outcome: ${snapshot.lastOutcome ?: "none recorded since the IDE opened"} (${ago(snapshot.lastOutcomeAt)})")
+            snapshot.lastError?.let { appendLine("Last sync error: $it") }
+            snapshot.triggerFailure?.let { appendLine("Last sync trigger failure: $it") }
+            val linked: List<String> = linkedGradleRoots(project)
+            appendLine("Linked Gradle roots (${linked.size}): ${if (linked.isEmpty()) "(none)" else linked.joinToString(", ")}")
+        }
+        return McpToolCallResult.text(text)
     }
 
     @McpToolHints(readOnlyHint = FALSE, destructiveHint = FALSE, idempotentHint = TRUE, openWorldHint = FALSE)
@@ -83,19 +191,19 @@ class ProjectManagementToolset : McpToolset {
     @McpDescription(
         "Force-refresh IntelliJ's Virtual File System (VFS) so on-disk changes made by external tools " +
             "(Gradle, shell scripts, code generators, etc.) become visible to the IDE and to subsequent " +
-            "MCP tool calls. Optional `path` scopes the refresh; if omitted, the project root is refreshed " +
-            "recursively. When `path` is a file, its parent directory is refreshed so content changes, " +
-            "sibling creates, and deletes are all detected in one call. When `path` no longer exists on " +
+            "MCP tool calls. Optional `filePath` scopes the refresh; if omitted, the project root is refreshed " +
+            "recursively. When `filePath` is a file, its parent directory is refreshed so content changes, " +
+            "sibling creates, and deletes are all detected in one call. When `filePath` no longer exists on " +
             "disk, the nearest existing ancestor is refreshed so the deletion is picked up. Returns only " +
-            "after the refresh finishes.",
+            "after the refresh finishes. (`path` is accepted as an alias of `filePath`.)",
     )
     @Suppress("unused")
     suspend fun mixin_refresh_vfs(
-        path: String? = null,
+        filePath: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val requestedPath: String = path ?: project.basePath ?: return McpToolCallResult.error(
+        val requestedPath: String = filePath ?: project.basePath ?: return McpToolCallResult.error(
             "Project has no base path",
         )
         val requested = File(requestedPath)

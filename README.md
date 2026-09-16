@@ -202,17 +202,20 @@ To have Claude Code prompt every teammate to install the plugin when they trust 
 ## Tool reference
 
 <details>
-<summary>All 25 tools (click to expand)</summary>
+<summary>All 27 tools (click to expand)</summary>
+
+Undeclared parameter names are rejected before the call runs: common synonyms are accepted outright when they can only mean one thing on that tool (`limit` for `maxResults`, `class` for `className`), anything else gets a suggestion in the error. Three renamed parameters keep their old names: `path` on `mixin_refresh_vfs`, `force` on `mixin_safe_delete`, `methodName` on `mixin_extract_method`.
 
 ### Source Navigation
 
 | Tool | Description |
 |------|-------------|
-| `mixin_find_class` | Look up any class by FQCN across project, libraries, JDK, and the Gradle buildscript classpath. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. |
+| `mixin_find_class` | Look up any class by FQCN across project, libraries, JDK, and the Gradle buildscript classpath. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. A `Modules:` line names the modules whose classpath provides the class, tagging every non-compile scope; `module=` pins resolution and doubles as a compile-visibility check for that module. |
 | `mixin_search_symbols` | Find classes, methods, or fields by name substring across project and all dependencies. |
-| `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath, JDK `src.zip` and buildscript classpath included. Pass `contextLines` to capture short method bodies inline; `roots="buildscript"` limits the scan to build-plugin sources. |
-| `mixin_get_dep_source` | Read source from dependency jars or decompiled cache. Pass `url` (from search results) or `path` (e.g. io/redspace/.../Utils.java); pick lines with a `lineNumber` window or an explicit `startLine`/`endLine` range. |
-| `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources. |
+| `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath, JDK `src.zip` and buildscript classpath included. Pass `contextLines` to capture short method bodies inline; `roots` narrows the scan to `library`, `game`, `decompiled`, `jdk`, or `buildscript`. The default order scans game roots first and the JDK second to last, so vanilla and mod hits lead. |
+| `mixin_get_dep_source` | Read source and text resources from dependency jars, the decompiled cache, or any jar on disk. Address the file with `url` (from search results), `jarPath` + `entry`, `className`, or `path` (e.g. io/redspace/.../Utils.java); pick lines with a `lineNumber` window or an explicit `startLine`/`endLine` range. Reads `mods.toml`, `fabric.mod.json`, lang files, recipes, and mixin configs as readily as `.java`. |
+| `mixin_list_jar_entries` | List the entries inside a jar with their sizes, to find the entry name to read. `jarPath` takes any jar on disk, on the classpath or not; `jar` takes a substring of a classpath jar's file name or coordinates. Narrow with `pathPrefix` / `fileMask`; `.class` entries need `includeClasses=true`. |
+| `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources, or pass `filter` (a substring or glob over label, jar name, coordinates, and URL) to answer "is jar X attached" in one call. |
 
 ### Semantic Navigation
 
@@ -230,8 +233,8 @@ To have Claude Code prompt every teammate to install the plugin when they trust 
 
 | Tool | Description |
 |------|-------------|
-| `mixin_class_bytecode` | Bytecode-level class overview including synthetic methods. Use `filter="synthetic"` for lambda/bridge mixin targets. |
-| `mixin_method_bytecode` | Full bytecode instructions for a specific method. INVOKE* instructions show the real owner class for `@At(target)`. |
+| `mixin_class_bytecode` | Bytecode-level class overview including synthetic methods. Use `filter="synthetic"` for lambda/bridge mixin targets. `jarPath` reads the class straight from a jar on disk, with no classpath and no indexing wait. |
+| `mixin_method_bytecode` | Full bytecode instructions for a specific method. INVOKE* instructions show the real owner class for `@At(target)`. `jarPath` works here too. |
 
 ### Mappings
 
@@ -241,22 +244,25 @@ To have Claude Code prompt every teammate to install the plugin when they trust 
 
 ### Project Management
 
+Every other `mixin_*` tool waits up to 30 seconds for a busy IDE (indexing, a Gradle resolve, or the project-data import) and then returns an error naming what it is waiting on, instead of hanging. The three tools below and `mixin_mappings_lookup` are exempt.
+
 | Tool | Description |
 |------|-------------|
-| `mixin_sync_project` | Trigger Gradle sync. The decompilation cache is re-read automatically after sync. |
-| `mixin_refresh_vfs` | Force-refresh IntelliJ's VFS so on-disk changes from external tools become visible. Optional `path` scopes the refresh; file paths refresh the parent directory (catching edits, creates, and deletes), deleted paths walk up to the nearest existing ancestor, and directory paths refresh recursively. Defaults to the project root. |
+| `mixin_sync_project` | Trigger a Gradle sync and, by default, wait for the resolve and the project-data import that follows it, reporting success, failure with the error text, cancellation, or timeout (`timeoutMs`, default 90000, max 600000). `wait=false` returns once the resolve has started. `projectPath` accepts either separator form and must be a linked Gradle root or a directory inside one; the error lists the linked roots. Maven is not supported; use the IDE's Maven reload. The decompilation cache is re-read automatically after sync. |
+| `mixin_ide_status` | Reports whether the IDE can answer classpath questions right now: indexing, a Gradle resolve or project-data import in flight, the last sync outcome with its error text, and the linked Gradle roots. |
+| `mixin_refresh_vfs` | Force-refresh IntelliJ's VFS so on-disk changes from external tools become visible. Optional `filePath` (alias `path`) scopes the refresh; file paths refresh the parent directory (catching edits, creates, and deletes), deleted paths walk up to the nearest existing ancestor, and directory paths refresh recursively. Defaults to the project root. |
 
 ### Refactoring
 
-Reference-aware: each tool checks or updates every reference project-wide, including string references in mixin config JSON, `mods.toml`, and ServiceLoader files where language plugins contribute PSI references. Shared contract: `dryRun=true` reports the resolved target, usages, and conflicts without changing anything; conflicts are tagged `[library]` (usually a stale build jar) or `[source]`, and `ignoreConflicts=true` proceeds anyway. Two exceptions: `mixin_safe_delete` uses `force=true` instead, and `mixin_move_file` takes neither flag, running all its checks up front. The signature, extract, introduce, inline, and move-members tools operate on Java sources only.
+Reference-aware: each tool checks or updates every reference project-wide, including string references in mixin config JSON, `mods.toml`, and ServiceLoader files where language plugins contribute PSI references. Shared contract: `dryRun=true` reports the resolved target, usages, and conflicts without changing anything; conflicts are tagged `[library]` (usually a stale build jar) or `[source]`, and `ignoreConflicts=true` proceeds anyway. One exception: `mixin_move_file` takes neither flag, running all its checks up front. The signature, extract, introduce, inline, and move-members tools operate on Java sources only.
 
 | Tool | Description |
 |------|-------------|
 | `mixin_rename` | Rename a class, method, field, parameter, or local variable, updating every reference project-wide. Renaming an override renames the source super method and all overriders together. Reports conflicts instead of silently discarding them. Local-variable renames are Java sources only. |
-| `mixin_safe_delete` | Delete a class, method, or field after checking for usages across project and dependencies. Resolves by FQCN; pass `methodName` (with `parameterTypes`/`methodDescriptor` for overloads) or `fieldName` to narrow to a member. Method overrides count as blocking usages and are tagged `[override]`. `force=true` deletes despite usages; `dryRun=true` only reports. |
+| `mixin_safe_delete` | Delete a class, method, or field after checking for usages across project and dependencies. Resolves by FQCN; pass `methodName` (with `parameterTypes`/`methodDescriptor` for overloads) or `fieldName` to narrow to a member. Method overrides count as blocking usages and are tagged `[override]`. `ignoreConflicts=true` (`force` is accepted as an alias) deletes despite usages; `dryRun=true` only reports. |
 | `mixin_move_file` | Move a class to a new package, updating its package declaration and every import/reference across the project. Resolves the source by FQCN; Kotlin files with multiple top-level declarations move together. Non-Java string references are also rewritten, so mixin configs and ServiceLoader entries follow along. Errors if a file with the same name already exists in the target package. |
 | `mixin_change_signature` | Change a method's signature atomically: rename, return type, visibility, and add/remove/reorder/retype parameters, with every call site and override updated. New parameters take a `defaultValue` expression inserted at existing call sites. |
-| `mixin_extract_method` | Extract a statement range or sub-expression into a new method; IntelliJ's control-flow analysis derives parameters, return value, and thrown exceptions. |
+| `mixin_extract_method` | Extract a statement range or sub-expression into a new method named by `newMethodName` (`methodName` is accepted as an alias); IntelliJ's control-flow analysis derives parameters, return value, and thrown exceptions. |
 | `mixin_introduce_variable` | Introduce a local variable for an expression, optionally replacing all other occurrences in scope. |
 | `mixin_inline` | Inline a method into every call site, a constant field into every read, or a local variable into its usages. Refuses recursive methods and non-final fields with writes. |
 | `mixin_move_members` | Move members between classes: pull up into a superclass or interface, push down into every direct subclass, or move static members to any class. Moving members into a `@Mixin` class flags external references as blocking `[mixin]` conflicts. |
@@ -275,6 +281,9 @@ Reference-aware: each tool checks or updates every reference project-wide, inclu
 - Dependencies that **do** publish `-sources.jar` still get those jars unpacked into the
   same cache. Gradle/IntelliJ often use a remapped/transformed classes JAR on the classpath
   without attaching sources; mirroring fixes search and MCP tools for those libraries.
+- Local jar dependencies declared with `files(...)` are decompiled too, named by
+  their file name. Project (subproject) dependencies are skipped; their sources are
+  already in the build.
 - Each missing-sources JAR is decompiled to `~/.cache/mixinmcp/decompiled/<hash>/`.
 - A manifest (`manifest.json`) tracks artifact identity so unchanged JARs are
   never re-decompiled (incremental).
@@ -319,10 +328,41 @@ On large modded projects (50+ dependencies, some JARs over 100MB), you might nee
 
 The task saves progress after each JAR, so if things do crash, just resync Gradle or run the task manually and Decompile will pick up where it left off.
 
+### Jars outside the classpath
+
+To search a mod that is on no classpath at all (one sitting in a modpack folder),
+name it explicitly:
+
+```bash
+# Repeatable; relative paths resolve against the project directory
+./gradlew genDependencySources --jar ../pack/mods/jade.jar --jar ../pack/mods/jei.jar
+```
+
+Or keep the list in the build script:
+
+```kotlin
+mixinmcp {
+    extraJars.from(file("../pack/mods/jade.jar"))
+}
+```
+
+These entries are recorded in `.gradle/mixinmcp/adhoc-manifest.json`, separate from the
+classpath manifest: every run that names extra jars rebuilds it, a run that names none
+leaves it alone, and it is never pruned against the classpath. `mixin_list_source_roots`
+marks those roots `[ad hoc jar]`. Stale entries fall to the same 30 day eviction as the
+rest of the cache.
+
+Both need a Gradle plugin version that ships the option; bump `dev.mixinmcp.decompile` if
+`--jar` is unrecognised.
+
+For a one-off look there is no need to decompile at all: `mixin_list_jar_entries`,
+`mixin_get_dep_source(jarPath=..., entry=...)`, and `jarPath` on the bytecode tools read
+any jar on disk directly.
+
 ### Clearing the cache
 
 ```bash
-# Delete this project's cache entries and manifest
+# Delete this project's cache entries and both manifests (classpath and ad hoc)
 ./gradlew cleanSourcesCache
 
 # Delete the entire cache, for all projects

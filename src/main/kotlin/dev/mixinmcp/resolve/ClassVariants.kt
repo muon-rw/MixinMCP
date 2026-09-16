@@ -4,6 +4,9 @@ import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.DependencyScope
+import com.intellij.openapi.roots.ExportableOrderEntry
+import com.intellij.openapi.roots.OrderEntry
 import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.JavaPsiFacade
@@ -344,14 +347,25 @@ object ClassVariants {
         return if (vf.extension == "class") vf.name else "module output"
     }
 
-    private fun ownerModules(project: Project, vf: VirtualFile?): List<String> {
+    /**
+     * Owner modules of [vf] with the dependency scope of the providing order entry, e.g.
+     * `neoforge.main` (compile scope, the default) or `common.main (RUNTIME)`. A module listed
+     * with a non-compile scope cannot compile against the class through Gradle.
+     */
+    @RequiresReadLock
+    fun ownerModules(project: Project, vf: VirtualFile?): List<String> {
         if (vf == null) return emptyList()
         val fromIndex: List<String> = ProjectFileIndex.getInstance(project)
             .getOrderEntriesForFile(vf)
-            .map { it.ownerModule.name }
+            .map { it.ownerModule.name + scopeSuffix(it) }
             .distinct()
             .sorted()
         if (fromIndex.isNotEmpty()) return fromIndex
         return if (isBuildscriptClasspathFile(project, vf)) listOf("(buildscript classpath)") else emptyList()
+    }
+
+    private fun scopeSuffix(entry: OrderEntry): String {
+        val scope: DependencyScope = (entry as? ExportableOrderEntry)?.scope ?: return ""
+        return if (scope == DependencyScope.COMPILE) "" else " (${scope.name})"
     }
 }

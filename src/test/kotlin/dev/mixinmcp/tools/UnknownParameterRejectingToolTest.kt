@@ -114,8 +114,65 @@ class UnknownParameterRejectingToolTest {
     @Test
     fun noSuggestionWithoutANearMiss() {
         assertFalse(
-            unknownParameterError("mixin_demo", listOf("offset"), listOf("path", "lineNumber")).contains("Did you mean"),
+            unknownParameterError("mixin_demo", listOf("colour"), listOf("path", "lineNumber")).contains("Did you mean"),
         )
+    }
+
+    @Test
+    fun synonymSuggestsTheDeclaredName() {
+        assertTrue(
+            unknownParameterError("mixin_demo", listOf("offset"), listOf("path", "lineNumber"))
+                .contains("Did you mean `lineNumber` instead of `offset`?"),
+        )
+    }
+
+    @Test
+    fun unambiguousSynonymReachesDelegateUnderTheDeclaredName() {
+        runBlocking {
+            val delegate = RecordingTool()
+            val result: McpToolCallResult = UnknownParameterRejectingTool(delegate) { "projectPath" }.call(
+                buildJsonObject {
+                    put("path", "a/B.java")
+                    put("line", 7)
+                },
+            )
+            assertFalse(result.isError)
+            assertEquals(
+                buildJsonObject {
+                    put("path", "a/B.java")
+                    put("lineNumber", 7)
+                },
+                delegate.received,
+            )
+        }
+    }
+
+    @Test
+    fun aliasIsRewrittenBeforeDispatch() {
+        runBlocking {
+            val delegate = RecordingTool()
+            val tool = UnknownParameterRejectingTool(delegate, mapOf("file" to "path")) { "projectPath" }
+            val result: McpToolCallResult = tool.call(buildJsonObject { put("file", "a/B.java") })
+            assertFalse(result.isError)
+            assertEquals(buildJsonObject { put("path", "a/B.java") }, delegate.received)
+        }
+    }
+
+    @Test
+    fun aliasAndCanonicalTogetherAreRejected() {
+        runBlocking {
+            val delegate = RecordingTool()
+            val tool = UnknownParameterRejectingTool(delegate, mapOf("file" to "path")) { "projectPath" }
+            val result: McpToolCallResult = tool.call(
+                buildJsonObject {
+                    put("file", "a/B.java")
+                    put("path", "c/D.java")
+                },
+            )
+            assertTrue(result.isError)
+            assertNull(delegate.received)
+            assertTrue(text(result).contains("`file` and `path` mean the same thing"))
+        }
     }
 
     @Test

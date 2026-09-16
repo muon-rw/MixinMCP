@@ -96,14 +96,15 @@ class ExtractToolset : McpToolset {
             "makeStatic=false refuses a static result, omitted lets the analysis decide. Name clashes in the " +
             "target class are reported as conflicts tagged [library] or [source]; ignoreConflicts=true " +
             "proceeds anyway. Java sources only. dryRun=true reports the derived signature and target class " +
-            "without modifying anything.",
+            "without modifying anything. newMethodName is the name of the method to create (methodName is " +
+            "accepted as an alias).",
     )
     @Suppress("unused")
     suspend fun mixin_extract_method(
         filePath: String,
         startLine: Int,
         endLine: Int,
-        methodName: String,
+        newMethodName: String,
         expression: String? = null,
         occurrenceIndex: Int? = null,
         visibility: String = "private",
@@ -113,8 +114,8 @@ class ExtractToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        if (!RefactorSupport.IDENTIFIER.matches(methodName)) {
-            return McpToolCallResult.error("methodName '$methodName' is not a valid Java identifier.")
+        if (!RefactorSupport.IDENTIFIER.matches(newMethodName)) {
+            return McpToolCallResult.error("newMethodName '$newMethodName' is not a valid Java identifier.")
         }
         if (occurrenceIndex != null && expression == null) {
             return McpToolCallResult.error("occurrenceIndex only applies together with expression.")
@@ -127,7 +128,7 @@ class ExtractToolset : McpToolset {
 
         val prepared: ExtractPrep = smartReadAction(project) {
             prepareExtract(
-                project, filePath, startLine, endLine, methodName, expression, occurrenceIndex,
+                project, filePath, startLine, endLine, newMethodName, expression, occurrenceIndex,
                 visibilityModifier, makeStatic,
             )
         }
@@ -154,7 +155,7 @@ class ExtractToolset : McpToolset {
         }
         if (prep.conflicts.isNotEmpty() && !ignoreConflicts) {
             return McpToolCallResult.error(
-                "Cannot extract '$methodName' into ${prep.targetClassName}.\n" +
+                "Cannot extract '$newMethodName' into ${prep.targetClassName}.\n" +
                     RefactorSupport.formatConflicts(prep.conflicts),
             )
         }

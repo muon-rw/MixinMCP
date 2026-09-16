@@ -23,6 +23,8 @@
             implementation="dev.mixinmcp.cache.MixinDecompiledRootsProvider"/>
         <externalSystemTaskNotificationListener
             implementation="dev.mixinmcp.cache.MixinDecompileCacheSyncListener"/>
+        <externalSystemTaskNotificationListener
+            implementation="dev.mixinmcp.sync.IdeSyncStateListener"/>
         <postStartupActivity
             implementation="dev.mixinmcp.cache.MixinDecompileCacheStartupActivity"/>
         <postStartupActivity

@@ -12,17 +12,20 @@ import dev.mixinmcp.tools.refactor.InlineToolset
 import dev.mixinmcp.tools.refactor.MemberMoveToolset
 import dev.mixinmcp.tools.refactor.SymbolRefactorToolset
 import dev.mixinmcp.tools.semantic.SemanticNavigationToolset
+import dev.mixinmcp.tools.source.JarEntriesToolset
 import dev.mixinmcp.tools.source.SourceNavigationToolset
 
 /**
  * Registers every MixinMCP toolset through `mcpToolsProvider` instead of `mcpToolset`, so each reflected
- * tool can be wrapped in [UnknownParameterRejectingTool]. The built-in `ReflectionToolsProvider` offers no
- * hook between argument decoding and dispatch.
+ * tool can be wrapped in [UnknownParameterRejectingTool] (argument check, runs first) and
+ * [IdeBusyGuardingTool] (bounded wait for indexing and sync). The built-in `ReflectionToolsProvider`
+ * offers no hook between argument decoding and dispatch.
  */
 class MixinMcpToolsProvider : McpToolsProvider {
 
     private val toolsets: List<McpToolset> = listOf(
         SourceNavigationToolset(),
+        JarEntriesToolset(),
         SemanticNavigationToolset(),
         BytecodeInspectionToolset(),
         ProjectManagementToolset(),
@@ -37,7 +40,7 @@ class MixinMcpToolsProvider : McpToolsProvider {
     private val reflectedTools: List<McpTool> by lazy {
         toolsets.flatMap { toolset ->
             try {
-                toolset.asTools().map(::UnknownParameterRejectingTool)
+                toolset.asTools().map { UnknownParameterRejectingTool(IdeBusyGuardingTool(it)) }
             } catch (e: Exception) {
                 LOG.warn("Failed to reflect MCP tools from ${toolset::class.java.name}", e)
                 emptyList()

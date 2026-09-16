@@ -60,6 +60,32 @@ class DepSearchCollectorTest : LightJavaCodeInsightFixtureTestCase() {
         assertEquals(1, scanned)
     }
 
+    fun testBinaryEntriesAreSkipped() {
+        myFixture.addFileToProject("deps7/com/example/Foo.java", "int marker;")
+        myFixture.addFileToProject("deps7/assets/example/icon.png", "int marker;")
+        val (hits, scanned) = scan(myFixture.findFileInTempDir("deps7"), "marker", null)
+        assertEquals(1, hits.size)
+        assertEquals("com/example/Foo.java", hits.single().filePath)
+        assertEquals(1, scanned)
+    }
+
+    fun testPathPrefixIsCaseInsensitiveAndPrunesSiblingDirectories() {
+        myFixture.addFileToProject("deps8/net/minecraft/Level.java", "int marker;")
+        myFixture.addFileToProject("deps8/java/util/Map.java", "int marker;")
+        val (hits, scanned) = scan(myFixture.findFileInTempDir("deps8"), "marker", null, pathPrefix = "NET/Minecraft/")
+        assertEquals(1, hits.size)
+        assertEquals("net/minecraft/Level.java", hits.single().filePath)
+        assertEquals(1, scanned)
+    }
+
+    fun testResourcesUnderDataAndAssetsAreSearchable() {
+        myFixture.addFileToProject("deps9/data/example/recipes/sword.json", "{\"marker\": 1}")
+        val (hits, scanned) = scan(myFixture.findFileInTempDir("deps9"), "marker", "*.json", pathPrefix = "data/")
+        assertEquals(1, hits.size)
+        assertEquals("data/example/recipes/sword.json", hits.single().filePath)
+        assertEquals(1, scanned)
+    }
+
     private fun scan(
         root: VirtualFile,
         regex: String,

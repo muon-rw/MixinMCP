@@ -2,6 +2,40 @@
 
 # MixinMCP Changelog
 
+## [1.5.0]
+## UX Improvements! 
+### Added
+
+- New tool `mixin_ide_status`: reports dumb mode, in-progress Gradle resolves or project imports, most recent sync outcome and its error text, and linked Gradle roots
+- New tool `mixin_list_jar_entries`: lists a jar's entries with their sizes, by `jarPath` (any jar on disk) or `jar` (a substring of a classpath jar's file name or coordinates). narrowable using `pathPrefix` / `fileMask`
+- `mixin_sync_project` now waits for the resolve and the project-data import that follows it and reports back with success, build failure, cancellation, or timeout; use `wait=false` to return as soon as the resolve starts and `timeoutMs` (default 90000, max 600000) to cap the wait
+- `mixin_get_dep_source` can address any remote file by `className` or by `jarPath` + `entry`, so any jar on disk (a mod in a modpack folder), any standalone `.class` file (decompiled on demand), and any text resource (`mods.toml`, `fabric.mod.json`, lang files, recipes, mixin configs) can be read
+- `mixin_class_bytecode` and `mixin_method_bytecode` also get `jarPath` to read a class straight from a jar on disk
+- `mixin_search_in_deps`: new `roots` types: `game` and `jdk`, newly separable for minecraft/jdk sources from the existing `all`, `library`, `decompiled`, and `buildscript`
+- `mixin_list_source_roots`: new `filter` "is jar X attached" in one call, matched against each root's label, jar name, Maven coordinates, and URL
+- `mixin_find_class` prints a `Modules:` line naming the modules whose classpath provides the class, tagging every non-compile dependency scope
+- Added several aliases for parameters that could be accepted outright when they only mean one thing on that tool (`pattern` for `regexPattern`, `class` for `className`, `limit` for `maxResults`); the rest are suggested in the unknown-parameter error (`file` for `path`, `offset` for `lineNumber`)
+- Gradle plugin: `genDependencySources --jar <path>` (repeatable) and `mixinmcp { extraJars.from(...) }` decompile jars that are on no classpath, tracked in `.gradle/mixinmcp/adhoc-manifest.json`. These source roots are marked `[ad hoc jar]`
+
+### Changed
+
+- Every tool now waits at most 30 seconds for a busy IDE (indexing, a Gradle resolve, or the project-data import) and returns an error naming what it's waiting on instead of hanging. Exempt: `mixin_sync_project`, `mixin_refresh_vfs`, `mixin_ide_status`, and `mixin_mappings_lookup` 
+- Three parameters renamed for consistency: `path` -> `filePath` on `mixin_refresh_vfs`, `force` -> `ignoreConflicts` on `mixin_safe_delete` (matching other refactor tools), and `methodName` -> `newMethodName` on `mixin_extract_method`. Added old names as aliases
+- `mixin_search_in_deps` scan order is now: 1. game roots -> 2. other libraries `-sources.jar` -> 3. decompiled cache -> 4. JDK `src.zip` -> 5. buildscript. (JDK scans were often first in results before)
+- `mixin_search_in_deps` now reports per root how many files could not be read. On timeout, it names the root where the scan stopped
+- `mixin_list_source_roots` names decompiled-cache roots by Maven coordinates plus jar file name, then condenses them to a name grid (like other library roots)
+- `mixin_sync_project` no longer attempts Maven (this was never actually implemented. might do so later)
+- Jar entries not in any source root are now labeled `Jar entry (not a source root)` instead of `Classes JAR (binary)`
+- Gradle plugin: local `files(...)` jar dependencies are now decompiled, named by their file name, instead of skipped. `cleanSourcesCache` removes both manifests and both sets of cache entries
+
+### Fixed
+
+- `mixin_sync_project` getting passed a Windows backslash erroring with "No Gradle project is linked at this path"
+- `mixin_search_in_deps`: `fileMask` values holding regex metacharacters or backslashes (`{Foo,Bar}*.java`, `com\intellij*`) throwing a raw regex error
+- `mixin_search_in_deps`: `pathPrefix` being case-sensitive, and an issue when passing URL or disk path as `pathPrefix`
+- Decompiled cache and source auto-attach not refreshing after a sync whose Gradle root differed from the IDE project directory, or was passed in a non-canonical form
+- `mixin_find_class` with `module=` reporting a class as missing when it exists on the classpath but outside that module's compile scope
+
 ## [1.4.1]
 
 ### Added
@@ -352,7 +386,8 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.4.0...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.4.1...HEAD
+[1.4.1]: https://github.com/muon-rw/MixinMCP/compare/1.4.0...1.4.1
 [1.4.0]: https://github.com/muon-rw/MixinMCP/compare/1.3.1...1.4.0
 [1.3.1]: https://github.com/muon-rw/MixinMCP/compare/1.3.0...1.3.1
 [1.3.0]: https://github.com/muon-rw/MixinMCP/compare/1.2.1...1.3.0

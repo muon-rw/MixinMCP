@@ -17,11 +17,11 @@ class DecompilationManifest(
     val entries: Map<String, CacheEntry> = emptyMap(),
 ) {
     /**
-     * Load manifest from cacheRoot/manifest.json.
+     * Load manifest from cacheRoot/[fileName].
      * Returns empty manifest if file does not exist or is invalid.
      */
-    fun load(cacheRoot: Path): DecompilationManifest {
-        val manifestPath = cacheRoot.resolve(MANIFEST_FILE)
+    fun load(cacheRoot: Path, fileName: String = MANIFEST_FILE): DecompilationManifest {
+        val manifestPath = cacheRoot.resolve(fileName)
         if (!Files.exists(manifestPath)) return DecompilationManifest()
         return try {
             val content = Files.readString(manifestPath)
@@ -34,12 +34,12 @@ class DecompilationManifest(
     }
 
     /**
-     * Save manifest to cacheRoot/manifest.json. [pluginVersion] lets the IDE warn when
+     * Save manifest to cacheRoot/[fileName]. [pluginVersion] lets the IDE warn when
      * the applied Gradle plugin is older than the IDE plugin requires.
      */
-    fun save(cacheRoot: Path, pluginVersion: String? = null) {
+    fun save(cacheRoot: Path, pluginVersion: String? = null, fileName: String = MANIFEST_FILE) {
         Files.createDirectories(cacheRoot)
-        val manifestPath = cacheRoot.resolve(MANIFEST_FILE)
+        val manifestPath = cacheRoot.resolve(fileName)
         val wrapper = ManifestJson(entries, pluginVersion)
         val content = gson.toJson(wrapper)
         Files.writeString(manifestPath, content)
@@ -51,7 +51,11 @@ class DecompilationManifest(
     )
 
     companion object {
-        private const val MANIFEST_FILE = "manifest.json"
+        const val MANIFEST_FILE = "manifest.json"
+
+        /** Jars named via --jar or the mixinmcp extension; never pruned against a classpath. */
+        const val ADHOC_MANIFEST_FILE = "adhoc-manifest.json"
+
         private const val HASH_MEMO_FILE = "hash-memo.json"
 
         private val gson = GsonBuilder().setPrettyPrinting().create()

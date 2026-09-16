@@ -10,6 +10,7 @@ import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.JarFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.psi.PsiClass
@@ -17,6 +18,7 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiField
 import com.intellij.psi.PsiFile
+import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.ProjectScope
@@ -53,7 +55,7 @@ class SourceNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Loom toolchain artifact (binary under .gradle/loom-cache; genSources provides real sources), Project source (hand-written project code), Buildscript classpath (Gradle plugin or other buildscript dependency), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures, all fields with types, and any nested classes/interfaces/enums/records (with FQCN follow-up calls suggested). For utility classes that organise constants in nested classes (e.g. net.minecraftforge.common.Tags) the Methods/Fields sections may look empty even though the API lives in nested classes — always check the Nested classes section before concluding a class is empty. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration. module: pins ALL resolution to one module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); unknown names list available modules. Without module, when multiple classpath copies of the class differ, a Variants block (bytecode-structural diff per jar) is appended; with module it is suppressed and the pinned module is noted in the header. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
+    @McpDescription("Use when you know the exact fully-qualified class name; prefer mixin_search_symbols when the class name is only partially known. Looks up any class by FQCN — project, dependencies, and JDK. Use dots for inner classes (e.g. net.minecraft.world.item.Item.Properties). Returns package, modifiers, supertypes, source location, and SourceKind: Library SOURCES (published -sources.jar or MDG merged jar after MixinMCP auto-attach), Decompiled cache (MixinMCP Vineflower), MDG merged artifact (binary-only / before attach — includeSource may use Fernflower), Loom toolchain artifact (binary under .gradle/loom-cache; genSources provides real sources), Project source (hand-written project code), Buildscript classpath (Gradle plugin or other buildscript dependency), or Classes JAR (binary — prefer mixin_get_dep_source for better source). includeMembers (default true): all methods with signatures, all fields with types, and any nested classes/interfaces/enums/records (with FQCN follow-up calls suggested). For utility classes that organise constants in nested classes (e.g. net.minecraftforge.common.Tags) the Methods/Fields sections may look empty even though the API lives in nested classes — always check the Nested classes section before concluding a class is empty. includeSource: full source code; can be very large for classes like Block/BlockBehaviour. Prefer methodName for a single method's body, or includeMembers for an API overview. methodName: when set, returns ONLY the source of methods with that name (every overload) plus the class header. Skip the includeSource dump for huge classes. fieldName: same idea for a single field declaration. The header's Modules line lists the modules whose classpath provides the class, each tagged with its dependency scope when that is not COMPILE (e.g. common.main (RUNTIME)); a module with such a tag cannot compile against the class through Gradle. module: pins ALL resolution to one module's compile scope (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); unknown names list available modules. A class found without module= but rejected with it is not compile-visible to that module (declared runtimeOnly or test-only there, or only on another module), so a mixin in that module fails the Gradle build even when inspections pass. Without module, when multiple classpath copies of the class differ, a Variants block (bytecode-structural diff per jar, with the same scope tags) is appended; with module it is suppressed and the pinned module is noted in the header. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_find_class(
         className: String,
@@ -82,8 +84,10 @@ class SourceNavigationToolset : McpToolset {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className, scope)
                 ?: return@smartReadAction McpToolCallResult.error(
                     if (pinnedModule != null && FqcnResolver.resolveNested(project, className) != null) {
-                        "Class $className exists on the classpath but not in the dependency scope of module " +
-                            "'$pinnedModule'; drop module= to search the whole project, or pin a different module."
+                        "Class $className exists on the classpath but not in the compile scope of module " +
+                            "'$pinnedModule' (declared runtimeOnly or test-only there, or only on another module), so " +
+                            "that module cannot compile against it; drop module= to search the whole project, or pin " +
+                            "a different module."
                     } else if (pinnedModule != null) {
                         "Class not found in module '$pinnedModule' or anywhere else on the classpath: $className. " +
                             FqcnResolver.CLASS_NOT_FOUND_HINT
@@ -114,6 +118,12 @@ class SourceNavigationToolset : McpToolset {
                     val sourceKind = classifySourceFile(project, vf)
                     appendLine("Source: ${projectRelativePath(project, vf)}")
                     appendLine("SourceKind: $sourceKind")
+                }
+                val owners: List<String> = ClassVariants.ownerModules(project, psiClass.containingFile?.virtualFile)
+                if (owners.isNotEmpty()) {
+                    val scopeNote: String =
+                        if (owners.any { '(' in it }) " (a module tagged with a non-compile scope cannot compile against this class)" else ""
+                    appendLine("Modules: ${owners.joinToString(", ")}$scopeNote")
                 }
                 appendLine()
 
@@ -489,16 +499,19 @@ class SourceNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search — Library SOURCES (-sources.jar, JDK src.zip, other plugins' synthetic library sources) and MixinMCP decompiled cache. Detects MDG merged JARs under build/moddev/; MixinMCP auto-attaches them as Library SOURCES after Gradle sync so vanilla/Forge/NeoForge .java files are usually searchable. Loom toolchains (Fabric Loom, Architectury Loom, neo-loom) instead get sources from their genSources jar or the decompiled cache; no MDG section appears for them. Diagnoses vanilla (net/minecraft/*), Forge game API (net/minecraftforge/event/*), and NeoForge game API (net/neoforged/neoforge/event/*) plus last auto-attach run. Default output is condensed: Minecraft/game roots, roots with warnings, and decompiled-cache roots show full URL plus sample file paths; other library sources roots collapse to a grouped jar-name list. A Buildscript classpath section lists Gradle plugin / buildSrc / Gradle API sources roots (searched last by mixin_search_in_deps, or alone via roots=buildscript); an empty section usually means the indexBuildscriptClasspath setting is off or the project has not synced, not a failure. verbose: true restores full per-root URL and sample paths for every root. maxSamplesPerRoot: 5 default.")
+    @McpDescription("Lists all source roots that mixin_search_in_deps and mixin_get_dep_source search: Library SOURCES (-sources.jar, JDK src.zip, other plugins' synthetic library sources) and MixinMCP decompiled cache. filter: answer 'is jar X attached?' in one call: a case-insensitive substring (or * ? glob) matched against each root's label, jar name, Maven coordinates, and URL (e.g. 'jade', 'snownee:jade', 'neoforge'); only matching roots are printed, with URL and sample paths, and the diagnostics below are skipped. Detects MDG merged JARs under build/moddev/; MixinMCP auto-attaches them as Library SOURCES after Gradle sync so vanilla/Forge/NeoForge .java files are usually searchable. Loom toolchains (Fabric Loom, Architectury Loom, neo-loom) instead get sources from their genSources jar or the decompiled cache; no MDG section appears for them. Diagnoses vanilla (net/minecraft/*), Forge game API (net/minecraftforge/event/*), and NeoForge game API (net/neoforged/neoforge/event/*) plus last auto-attach run. Default output is condensed: Minecraft/game roots and roots with warnings show full URL plus sample file paths; other library sources roots and decompiled-cache roots collapse to grouped name lists (decompiled roots are named by Maven coordinates and jar file name). A Buildscript classpath section lists Gradle plugin / buildSrc / Gradle API sources roots (searched last by mixin_search_in_deps, or alone via roots=buildscript); an empty section usually means the indexBuildscriptClasspath setting is off or the project has not synced, not a failure. verbose: true restores full per-root URL and sample paths for every root. maxSamplesPerRoot: 5 default.")
     @Suppress("unused")
     suspend fun mixin_list_source_roots(
         maxSamplesPerRoot: Int = 5,
         verbose: Boolean = false,
+        filter: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
+        val filterMask: String? = filter?.trim()?.takeIf { it.isNotEmpty() }
         val result: String = smartReadAction(project) {
             val roots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
+            if (filterMask != null) return@smartReadAction renderFilteredRoots(roots, filterMask, maxSamplesPerRoot)
             buildString {
                 appendLine("=== Source roots (mixin_search_in_deps / mixin_get_dep_source scope) ===")
                 appendLine()
@@ -518,8 +531,8 @@ class SourceNavigationToolset : McpToolset {
                 appendLine("  - Fallback: mixin_find_class(includeSource=true), mixin_search_symbols, or mixin_search_in_deps without pathPrefix.")
                 appendLine()
 
-                val libRoots = roots.filter { it.typeLabel.startsWith("Library SOURCES") }
-                val cacheRoots = roots.filter { it.typeLabel == "Decompiled cache (MixinMCP)" }
+                val libRoots = roots.filter { isLibrarySourcesLabel(it.typeLabel) }
+                val cacheRoots = roots.filter { isDecompiledCacheLabel(it.typeLabel) }
                 val buildscriptRoots = roots.filter { it.typeLabel.startsWith(BUILDSCRIPT_LABEL_PREFIX) }
 
                 val mergedJars = detectMergedJars(project)
@@ -621,6 +634,19 @@ class SourceNavigationToolset : McpToolset {
                     appendLine()
                 }
 
+                fun appendNameGrid(names: List<String>) {
+                    val counted: List<String> = names.groupingBy { it }.eachCount().entries
+                        .sortedBy { it.key.lowercase() }
+                        .map { (n, c) -> if (c > 1) "$n (x$c)" else n }
+                    val cap = 50
+                    for (chunk: List<String> in counted.take(cap).chunked(3)) {
+                        appendLine("  ${chunk.joinToString(", ")}")
+                    }
+                    if (counted.size > cap) {
+                        appendLine("  and ${counted.size - cap} more (verbose=true lists all; filter=<name> finds one)")
+                    }
+                }
+
                 val libEmptyNote = "  (no .java files found or root empty)"
                 if (verbose) {
                     appendLine("=== Library SOURCES roots (${libRoots.size}) ===")
@@ -653,27 +679,33 @@ class SourceNavigationToolset : McpToolset {
                     }
 
                     appendLine("=== Other library sources roots (${genericRoots.size}) ===")
-                    appendLine("  (jar names only; pass verbose=true for per-root URLs and sample paths)")
-                    val nameCounts: Map<String, Int> = genericRoots
-                        .groupingBy { sourceRootDisplayName(it.root) }
-                        .eachCount()
-                    val names: List<String> = nameCounts.entries
-                        .sortedBy { it.key.lowercase() }
-                        .map { (n, c) -> if (c > 1) "$n (x$c)" else n }
-                    val cap = 50
-                    for (chunk: List<String> in names.take(cap).chunked(3)) {
-                        appendLine("  ${chunk.joinToString(", ")}")
-                    }
-                    if (names.size > cap) {
-                        appendLine("  and ${names.size - cap} more (verbose=true lists all)")
-                    }
+                    appendLine("  (jar names only; pass verbose=true for per-root URLs and sample paths, or filter=<name> for one)")
+                    appendNameGrid(genericRoots.map { sourceRootDisplayName(it.root) })
                     appendLine()
                 }
 
-                appendLine("=== Decompiled cache roots (${cacheRoots.size}) ===")
-                appendLine()
-                for ((i, info: SourceRootInfo) in cacheRoots.withIndex()) {
-                    appendRootDetail(i + 1, info, "  (empty — dependency may not have classes or decompilation pending)")
+                val cacheEmptyNote = "  (empty; dependency may not have classes or decompilation pending)"
+                if (verbose) {
+                    appendLine("=== Decompiled cache roots (${cacheRoots.size}) ===")
+                    appendLine()
+                    for ((i, info: SourceRootInfo) in cacheRoots.withIndex()) {
+                        appendRootDetail(i + 1, info, cacheEmptyNote)
+                    }
+                } else {
+                    val (emptyCacheRoots, populatedCacheRoots) = cacheRoots.partition {
+                        collectSamplePaths(it.root, 1).isEmpty()
+                    }
+                    if (emptyCacheRoots.isNotEmpty()) {
+                        appendLine("=== Decompiled cache roots with warnings (${emptyCacheRoots.size}) ===")
+                        appendLine()
+                        for ((i, info: SourceRootInfo) in emptyCacheRoots.withIndex()) {
+                            appendRootDetail(i + 1, info, cacheEmptyNote)
+                        }
+                    }
+                    appendLine("=== Decompiled cache roots (${populatedCacheRoots.size}) ===")
+                    appendLine("  (dependency names only; pass verbose=true for per-root URLs and sample paths, or filter=<name> for one)")
+                    appendNameGrid(populatedCacheRoots.map { cacheRootDisplayName(it) })
+                    if (cacheRoots.isNotEmpty()) appendLine()
                 }
                 val cacheStats = DecompilationCacheService.getInstance(project).lastScanStats
                 val projectRootPath: java.nio.file.Path? = project.basePath?.let { java.nio.file.Path.of(it) }
@@ -742,9 +774,44 @@ class SourceNavigationToolset : McpToolset {
         return McpToolCallResult.text(result)
     }
 
+    private fun renderFilteredRoots(roots: List<SourceRootInfo>, filter: String, maxSamplesPerRoot: Int): String {
+        val matches: (String) -> Boolean = buildFileMaskMatcher(filter)
+        val matched: List<SourceRootInfo> = roots.filter { info ->
+            matches("${info.typeLabel} ${sourceRootDisplayName(info.root)} ${info.root.url}")
+        }
+        return buildString {
+            val library: Int = matched.count { isLibrarySourcesLabel(it.typeLabel) }
+            val cache: Int = matched.count { isDecompiledCacheLabel(it.typeLabel) }
+            val buildscript: Int = matched.count { it.typeLabel.startsWith(BUILDSCRIPT_LABEL_PREFIX) }
+            appendLine(
+                "=== ${matched.size} of ${roots.size} source roots match filter \"$filter\" " +
+                    "(library $library, decompiled $cache, buildscript $buildscript) ===",
+            )
+            appendLine()
+            if (matched.isEmpty()) {
+                appendLine("No root's label, jar name, Maven coordinates, or URL contains \"$filter\" (case-insensitive; * and ? are wildcards).")
+                appendLine("That dependency is not attached as a source root. Run mixin_list_source_roots without filter for the toolchain diagnostics,")
+                appendLine("or ./gradlew genDependencySources then mixin_sync_project if it has no published -sources.jar.")
+                return@buildString
+            }
+            for ((i, info: SourceRootInfo) in matched.withIndex()) {
+                appendLine("--- Root ${i + 1}: ${info.typeLabel} ---")
+                appendLine("  URL: ${info.root.url}")
+                val samples: List<String> = collectSamplePaths(info.root, maxSamplesPerRoot)
+                if (samples.isNotEmpty()) {
+                    appendLine("  Sample paths:")
+                    for (p in samples) appendLine("    $p")
+                } else {
+                    appendLine("  (no .java files found or root empty)")
+                }
+                appendLine()
+            }
+        }
+    }
+
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Searches dependency/library sources with a Java regex pattern — both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath, including JDK src.zip (project SDK) and synthetic library sources contributed by other plugins. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex — prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a glob (e.g. '*minecraft*'). pathPrefix: optional — only search files whose logical path starts with this (use forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or net/neoforged/neoforge/). On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync — try this tool first for vanilla/Forge/NeoForge; on Loom toolchains vanilla comes from the genSources jar or the decompiled cache; empty results append hints (check mixin_list_source_roots auto-attach section). roots: all (default) — search Gradle library -sources.jar, then MixinMCP cache, then buildscript classpath last; later tiers skip paths already matched (no duplicate hits). library — only published -sources.jar roots (incl. JDK src.zip). decompiled — only MixinMCP decompiled cache. buildscript — only Gradle buildscript classpath sources (Loom, ModDevGradle, mod-publish-plugin and other build plugins). timeout: 15s default — set 20000–30000 for broad unfiltered searches. maxResults: 100 default. contextLines: include N lines of context around each match (default 0). Use small values (3–10) to capture short method bodies inline so you don't need a follow-up mixin_get_dep_source call; max 200. Match lines are prefixed with `>`, context lines with two spaces; overlapping windows are merged per file. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
+    @McpDescription("Searches dependency/library sources with a Java regex pattern, both published -sources.jar and auto-decompiled. Use this tool to grep across your entire classpath, including JDK src.zip (project SDK) and synthetic library sources contributed by other plugins. Results are grouped by file: each group shows the file path, a url: line (pass to mixin_get_dep_source), and matching lines with ||markers||. regexPattern: Java regex; prefer simple single-term patterns; make separate calls for multiple patterns. Escape regex metacharacters if you want literal matching (e.g. use 'addEffect\\(' not 'addEffect('). fileMask: filters which files to search. Without wildcards (* ?) it matches as a case-insensitive substring anywhere in the path (e.g. 'LivingEntity' matches net/minecraft/…/LivingEntity.java). With wildcards, treated as a case-insensitive glob (e.g. '*minecraft*'); every other character is literal. pathPrefix: optional; only search files whose logical path inside the root starts with this, case-insensitive (forward slashes, e.g. net/minecraft/ or net/minecraftforge/fml/ or java/util/); it is not a URL or disk path. Decompiled-cache roots also hold the jar's resources (META-INF/mods.toml, fabric.mod.json, assets/…/lang, data/…/recipes, *.mixins.json), so pathPrefix='assets/' or fileMask='mods.toml' searches them; binary entries (.class, images, sounds) are skipped. On MDG, MixinMCP auto-attaches merged game jars as Library SOURCES after sync; try this tool first for vanilla/Forge/NeoForge; on Loom toolchains vanilla comes from the genSources jar or the decompiled cache; empty results append hints (check mixin_list_source_roots auto-attach section). roots=all (default) scans, in order, Minecraft/game roots, other library -sources.jar roots, the MixinMCP decompiled cache, JDK src.zip, then the buildscript classpath; later tiers skip paths already matched (no duplicate hits). roots=library: game and library -sources.jar roots, then JDK src.zip last. roots=game: only Minecraft / loader game source roots. roots=decompiled: only the MixinMCP decompiled cache. roots=jdk: only the project SDK's src.zip. roots=buildscript: only Gradle buildscript classpath sources (Loom, ModDevGradle, mod-publish-plugin and other build plugins). timeout: 15s default; set 20000–30000 for broad unfiltered searches; on timeout the output names the root the scan stopped in. maxResults: 100 default. contextLines: include N lines of context around each match (default 0). Use small values (3–10) to capture short method bodies inline so you don't need a follow-up mixin_get_dep_source call; max 200. Match lines are prefixed with `>`, context lines with two spaces; overlapping windows are merged per file. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
     @Suppress("unused")
     suspend fun mixin_search_in_deps(
         regexPattern: String,
@@ -788,15 +855,22 @@ class SourceNavigationToolset : McpToolset {
         }
 
         val rootsMode: String = roots.trim().lowercase()
-        if (rootsMode !in setOf("all", "library", "decompiled", "buildscript")) {
+        if (rootsMode !in SEARCH_ROOTS_MODES) {
             return McpToolCallResult.error(
-                "Invalid roots: \"$roots\". Use all, library, decompiled, or buildscript.",
+                "Invalid roots: \"$roots\". Use all, library, decompiled, buildscript, jdk, or game.",
             )
         }
 
         val normalizedPathPrefix: String? = pathPrefix?.trim()?.replace('\\', '/')
             ?.removePrefix("/")
             ?.takeIf { it.isNotEmpty() }
+        if (normalizedPathPrefix != null && looksLikeUrlOrDiskPath(normalizedPathPrefix)) {
+            return McpToolCallResult.error(
+                "pathPrefix is a logical path inside a source root (e.g. net/minecraft/ or java/util/), not a URL or " +
+                    "disk path. To read one file, pass its url to mixin_get_dep_source instead; to search one jar, " +
+                    "use fileMask with a fragment of the package path.",
+            )
+        }
 
         val matchesMask: (String) -> Boolean = buildFileMaskMatcher(fileMask)
 
@@ -809,14 +883,14 @@ class SourceNavigationToolset : McpToolset {
             val hits: MutableList<DepSearchHit> = mutableListOf()
             var timedOut: Boolean = false
             val scannedFiles = IntArray(1)
+            val unreadableFiles = IntArray(1)
+            val unreadableByRoot: MutableMap<String, Int> = linkedMapOf()
+            var rootsScanned = 0
+            var stoppedInRoot: String? = null
 
-            val allRoots: List<SourceRootInfo> = collectSourceRootsWithMetadata(project)
-            val libraryRoots: List<SourceRootInfo> =
-                allRoots.filter { it.typeLabel.startsWith("Library SOURCES") }
-            val cacheRoots: List<SourceRootInfo> =
-                allRoots.filter { it.typeLabel == "Decompiled cache (MixinMCP)" }
-            val buildscriptRoots: List<SourceRootInfo> =
-                allRoots.filter { it.typeLabel.startsWith(BUILDSCRIPT_LABEL_PREFIX) }
+            val tiers: SearchTiers = searchTiers(project, collectSourceRootsWithMetadata(project))
+            val plan: List<List<SourceRootInfo>> = tiers.tiersFor(rootsMode)
+            val rootsTotal: Int = plan.sumOf { it.size }
 
             fun scanRoots(rootsToScan: List<SourceRootInfo>, skipPath: (String) -> Boolean) {
                 for (info in rootsToScan) {
@@ -825,6 +899,7 @@ class SourceNavigationToolset : McpToolset {
                         return
                     }
                     if (hits.size >= scanCap) return
+                    val unreadableBefore: Int = unreadableFiles[0]
                     collectRegexHits(
                         info.root,
                         info.root,
@@ -838,27 +913,25 @@ class SourceNavigationToolset : McpToolset {
                         normalizedPathPrefix,
                         skipPath,
                         scannedFiles,
+                        unreadableFiles,
                     )
+                    val unreadableHere: Int = unreadableFiles[0] - unreadableBefore
+                    if (unreadableHere > 0) unreadableByRoot.merge(info.typeLabel, unreadableHere, Int::plus)
+                    if (System.currentTimeMillis() - startTime > timeout) {
+                        timedOut = true
+                        stoppedInRoot = info.typeLabel
+                        return
+                    }
+                    rootsScanned++
                 }
             }
 
-            when (rootsMode) {
-                "library" -> scanRoots(libraryRoots, skipPath = { false })
-                "decompiled" -> scanRoots(cacheRoots, skipPath = { false })
-                "buildscript" -> scanRoots(buildscriptRoots, skipPath = { false })
-                else -> {
-                    scanRoots(libraryRoots, skipPath = { false })
-                    val pathsHitInLibrary: Set<String> = hits.map { it.filePath }.toSet()
-                    if (hits.size < scanCap && !timedOut) {
-                        scanRoots(cacheRoots, skipPath = { it in pathsHitInLibrary })
-                    }
-                    // Buildscript roots scan last: game and mod classpath hits stay first
-                    // and duplicate paths already found are not repeated.
-                    val pathsHit: Set<String> = hits.map { it.filePath }.toSet()
-                    if (hits.size < scanCap && !timedOut) {
-                        scanRoots(buildscriptRoots, skipPath = { it in pathsHit })
-                    }
-                }
+            // Later tiers skip paths already matched so a class present both as -sources.jar
+            // and in the decompiled cache is reported once, from the better root.
+            for (tier: List<SourceRootInfo> in plan) {
+                if (hits.size >= scanCap || timedOut) break
+                val pathsHit: Set<String> = hits.map { it.filePath }.toSet()
+                scanRoots(tier, skipPath = { it in pathsHit })
             }
             if (!timedOut && System.currentTimeMillis() - startTime > timeout) timedOut = true
 
@@ -870,7 +943,7 @@ class SourceNavigationToolset : McpToolset {
                         rootsMode,
                     )
                     val zeroTierNotice: String? = when {
-                        rootsMode == "buildscript" && buildscriptRoots.isEmpty() -> {
+                        rootsMode == "buildscript" && tiers.buildscript.isEmpty() -> {
                             val cause: String =
                                 if (!MixinMcpSettings.getInstance(project).indexBuildscriptClasspath) {
                                     "buildscript indexing is disabled in Settings | Tools | MixinMCP."
@@ -881,12 +954,17 @@ class SourceNavigationToolset : McpToolset {
                                 }
                             "No buildscript classpath roots are available; nothing was searched. $cause"
                         }
-                        rootsMode == "library" && libraryRoots.isEmpty() ->
+                        rootsMode == "library" && rootsTotal == 0 ->
                             "No Library SOURCES roots are attached; nothing was searched for roots=library. " +
                                 "Run mixin_list_source_roots for diagnostics."
-                        rootsMode == "decompiled" && cacheRoots.isEmpty() ->
+                        rootsMode == "decompiled" && tiers.cache.isEmpty() ->
                             "No decompiled cache roots are attached; nothing was searched for roots=decompiled. " +
                                 "Run mixin_list_source_roots for diagnostics."
+                        rootsMode == "jdk" && tiers.jdk.isEmpty() ->
+                            "No JDK source roots are attached (project SDK without src.zip); nothing was searched for roots=jdk."
+                        rootsMode == "game" && tiers.game.isEmpty() ->
+                            "No Minecraft / loader game source roots were detected; nothing was searched for roots=game. " +
+                                "Run mixin_list_source_roots for the toolchain diagnostics."
                         else -> null
                     }
                     if (zeroTierNotice != null) base + zeroTierNotice else base
@@ -899,12 +977,20 @@ class SourceNavigationToolset : McpToolset {
                 noMatchHints = noMatchHints,
                 scannedFiles = scannedFiles[0],
                 sawMore = hits.size > maxResults,
+                unreadableFilesByRoot = unreadableByRoot,
+                rootsScanned = rootsScanned,
+                rootsTotal = rootsTotal,
+                stoppedInRoot = stoppedInRoot,
             )
         }
 
         val elapsed: Long = System.currentTimeMillis() - requestStart
         val hits: List<DepSearchHit> = scanResult.hits
         val timedOut: Boolean = scanResult.timedOut
+        val stoppedNote: String = scanResult.stoppedInRoot?.let { label ->
+            " Scanning stopped in root ${scanResult.rootsScanned + 1} of ${scanResult.rootsTotal} ($label); " +
+                "the roots after it were not searched."
+        } ?: ""
         val result: String = buildString {
             appendLine("=== Regex search in dependencies: $regexPattern ===")
             if (normalizedPathPrefix != null) {
@@ -914,9 +1000,13 @@ class SourceNavigationToolset : McpToolset {
                 appendLine("(roots: $rootsMode)")
             }
             appendLine()
+            describeUnreadableFiles(scanResult.unreadableFilesByRoot)?.let {
+                appendLine(it)
+                appendLine()
+            }
             if (hits.isEmpty()) {
                 if (timedOut) {
-                    appendLine("Search INCOMPLETE (timed out after ${elapsed}ms); not all files were searched, so this is not a confirmed negative.")
+                    appendLine("Search INCOMPLETE (timed out after ${elapsed}ms); not all files were searched, so this is not a confirmed negative.$stoppedNote")
                     appendLine("No matches in the ${scanResult.scannedFiles} files scanned before the cutoff. Retry with a more specific pattern, fileMask, or pathPrefix, or increase timeout.")
                 } else {
                     appendLine("No matches found.")
@@ -927,7 +1017,7 @@ class SourceNavigationToolset : McpToolset {
                 }
             } else {
                 if (timedOut) {
-                    appendLine("Search INCOMPLETE (timed out after ${elapsed}ms); not all files were searched, results below are partial.")
+                    appendLine("Search INCOMPLETE (timed out after ${elapsed}ms); not all files were searched, results below are partial.$stoppedNote")
                     appendLine()
                 }
                 formatGroupedHitsWithContext(this, hits, contextLines)
@@ -944,11 +1034,14 @@ class SourceNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Reads source from dependency jars or decompiled cache. Use this tool to view library code that grep/read_file cannot access. Pass url (exact url: string from mixin_search_in_deps results — may be jar://…!/path/File.java or file://…/path/File.java) or path (package path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java — not a filesystem path). url takes precedence if both given. Two ways to choose lines: a window, lineNumber (default 1) with linesBefore (default 30) and linesAfter (default 70) around it; or an explicit inclusive 1-based range, startLine and/or endLine, which overrides the window (startLine alone reads to end of file, endLine alone reads from line 1). module: restricts the path lookup to source roots on that module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); url lookups only validate the name.")
+    @McpDescription("Reads a file from a dependency jar, the decompiled cache, or any jar on disk. Use this tool to view library code and jar resources that grep/read_file cannot access. Four ways to address the file, in precedence order: url (exact url: string from mixin_search_in_deps results, jar://…!/path/File.java or file://…/File.java; a bare disk path with !/ is accepted too); jarPath + entry (any jar on disk, on the classpath or not, e.g. jarPath='C:/pack/mods/jade.jar', entry='META-INF/neoforge.mods.toml'; use mixin_list_jar_entries to find entry names); className (dot FQCN, resolved to its attached -sources.jar, MDG merged jar, or decompiled-cache .java, the same way mixin_find_class does); path (classpath-relative source path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java, not a filesystem path). Text resources work as well as source: mods.toml, fabric.mod.json, lang, models, recipes, loot tables, mixin configs. A .class entry addressed by url or jarPath is decompiled by the IDE; other binary entries report their size instead of content. Two ways to choose lines: a window, lineNumber (default 1) with linesBefore (default 30) and linesAfter (default 70) around it; or an explicit inclusive 1-based range, startLine and/or endLine, which overrides the window (startLine alone reads to end of file, endLine alone reads from line 1). module: restricts className and path lookups to source roots on that module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); url and jarPath lookups only validate the name.")
     @Suppress("unused")
     suspend fun mixin_get_dep_source(
         url: String? = null,
         path: String? = null,
+        className: String? = null,
+        jarPath: String? = null,
+        entry: String? = null,
         lineNumber: Int = 1,
         linesBefore: Int = 30,
         linesAfter: Int = 70,
@@ -958,9 +1051,21 @@ class SourceNavigationToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        if (url.isNullOrBlank() && path.isNullOrBlank()) {
+        val hasUrl: Boolean = !url.isNullOrBlank()
+        val hasJar: Boolean = !jarPath.isNullOrBlank()
+        val hasClass: Boolean = !className.isNullOrBlank()
+        if (!hasUrl && !hasJar && !hasClass && path.isNullOrBlank()) {
             return McpToolCallResult.error(
-                "Missing required parameter. Pass `url` (the jar:// URL from mixin_search_in_deps results) or `path` (e.g. io/redspace/ironsspellbooks/api/util/Utils.java).",
+                "Missing required parameter. Pass one of: `url` (a jar:// or file:// URL, e.g. from mixin_search_in_deps " +
+                    "results), `jarPath` + `entry` (any jar on disk plus the entry inside it, e.g. META-INF/mods.toml), " +
+                    "`className` (dot FQCN, resolved to its attached or decompiled source), or `path` (classpath-relative " +
+                    "source path, e.g. io/redspace/ironsspellbooks/api/util/Utils.java).",
+            )
+        }
+        if (hasJar && entry.isNullOrBlank()) {
+            return McpToolCallResult.error(
+                "`jarPath` needs `entry`, the path inside the jar (e.g. META-INF/mods.toml or assets/<modid>/lang/en_us.json). " +
+                    "Use mixin_list_jar_entries(jarPath=...) to list the entries.",
             )
         }
 
@@ -975,11 +1080,34 @@ class SourceNavigationToolset : McpToolset {
         val pinned: ModuleScopeResult.Found? = moduleResult as? ModuleScopeResult.Found
 
         val trimmedPath: String? = path?.trim()?.takeIf { it.isNotEmpty() }
-        val fromUrl: VirtualFile? =
-            if (!url.isNullOrBlank()) VirtualFileManager.getInstance().findFileByUrl(url) else null
-        val urlFailed: Boolean = !url.isNullOrBlank() && (fromUrl == null || !fromUrl.isValid)
+        val effectiveUrl: String? = when {
+            url != null && hasUrl -> normalizeSourceUrl(url)
+            jarPath != null && entry != null && hasJar -> jarEntryUrl(jarPath, entry)
+            else -> null
+        }
+        val fromUrl: VirtualFile? = effectiveUrl?.let { findFileByUrlOrMountJar(it) }
+        val urlFailed: Boolean = effectiveUrl != null && (fromUrl == null || !fromUrl.isValid)
+        val classLookup: ClassSourceLookup? =
+            if (className != null && hasClass && (fromUrl == null || !fromUrl.isValid)) {
+                smartReadAction(project) { lookupClassSource(project, className, pinned?.scope) }
+            } else {
+                null
+            }
+        when (classLookup) {
+            is ClassSourceLookup.BinaryOnly -> return McpToolCallResult.error(
+                "No source is attached for ${classLookup.fqcn} (SourceKind: Classes JAR). Use " +
+                    "mixin_find_class(className=\"${classLookup.fqcn}\", includeSource=true) for an IDE-decompiled view, " +
+                    "mixin_class_bytecode for the bytecode, or run ./gradlew genDependencySources then mixin_sync_project.",
+            )
+            is ClassSourceLookup.NotFound -> return McpToolCallResult.error(
+                "Class not found: $className" +
+                    (pinned?.let { " (module: ${it.module.name})" } ?: "") + ". " + FqcnResolver.CLASS_NOT_FOUND_HINT,
+            )
+            else -> {}
+        }
         val vf: VirtualFile? = when {
             fromUrl != null && fromUrl.isValid -> fromUrl
+            classLookup is ClassSourceLookup.Found -> classLookup.file
             trimmedPath != null -> smartReadAction(project) { locateDepSourceByPath(project, trimmedPath, pinned?.scope) }
             else -> null
         }
@@ -1012,24 +1140,47 @@ class SourceNavigationToolset : McpToolset {
             val rootsTotal: Int =
                 if (trimmedPath != null) smartReadAction(project) { collectAllSourceRoots(project).size } else 0
             val hint: String = when {
+                urlFailed && hasJar ->
+                    "`$effectiveUrl` did not resolve: check that the jar exists at `$jarPath` and that `entry` matches an " +
+                        "entry name exactly (case-sensitive, forward slashes). mixin_list_jar_entries(jarPath=\"$jarPath\") lists them."
                 urlFailed && trimmedPath != null ->
                     "url `$url` did not resolve, and path `$trimmedPath` was not found either. " +
                         pathMissHint(trimmedPath, rootsTotal)
                 urlFailed ->
-                    "Pass the exact jar:// URL from mixin_search_in_deps results, or try the `path` parameter (e.g. io/redspace/.../Utils.java)."
+                    "url `$effectiveUrl` did not resolve. Pass the exact url from mixin_search_in_deps results, a " +
+                        "jar://<disk path>!/<entry> URL of a jar that exists on disk, or try `className` / `path` instead."
                 else -> pathMissHint(trimmedPath!!, rootsTotal)
             }
             return McpToolCallResult.error("File not found. $hint")
         }
 
-        val content: String = try {
-            withContext(Dispatchers.IO) { String(vf.contentsToByteArray(), StandardCharsets.UTF_8) }
-        } catch (e: Exception) {
-            return McpToolCallResult.error("Failed to read file: ${e.message}")
+        val isClassEntry: Boolean = vf.extension.equals("class", ignoreCase = true)
+        val content: String = if (isClassEntry) {
+            smartReadAction(project) { runCatching { PsiManager.getInstance(project).findFile(vf)?.text }.getOrNull() }
+                ?: return McpToolCallResult.error(
+                    "`${vf.name}` is a compiled class and the IDE could not decompile it here. Use " +
+                        "mixin_class_bytecode / mixin_method_bytecode (with jarPath for a jar outside the classpath) instead.",
+                )
+        } else {
+            val bytes: ByteArray = try {
+                withContext(Dispatchers.IO) { vf.contentsToByteArray() }
+            } catch (e: Exception) {
+                return McpToolCallResult.error("Failed to read file: ${e.message}")
+            }
+            if (looksBinary(bytes)) {
+                return McpToolCallResult.text(
+                    "=== ${vf.name} [binary entry, ${bytes.size} bytes; content not shown] ===\n" +
+                        "This entry is not text. Use mixin_list_jar_entries to browse the jar; .class entries can be " +
+                        "read through mixin_class_bytecode or by addressing them here with url/jarPath for an IDE decompile.",
+                )
+            }
+            String(bytes, StandardCharsets.UTF_8)
         }
 
-        val sourceKind: String = smartReadAction(project) {
-            classifySourceFile(project, vf)
+        val sourceKind: String = if (isClassEntry) {
+            "IDE-decompiled .class entry"
+        } else {
+            smartReadAction(project) { classifySourceFile(project, vf) }
         }
 
         val lines: List<String> = content.lines()
@@ -1057,5 +1208,12 @@ class SourceNavigationToolset : McpToolset {
         }
 
         return McpToolCallResult.text(result)
+    }
+
+    private fun findFileByUrlOrMountJar(url: String): VirtualFile? {
+        VirtualFileManager.getInstance().findFileByUrl(url)?.let { return it }
+        if (!url.startsWith("jar://")) return null
+        // A jar outside every project root is unknown to the VFS until its local file is refreshed in.
+        return JarFileSystem.getInstance().refreshAndFindFileByPath(url.removePrefix("jar://"))
     }
 }
