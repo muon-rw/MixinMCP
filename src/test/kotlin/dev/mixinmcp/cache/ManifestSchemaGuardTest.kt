@@ -30,8 +30,8 @@ class ManifestSchemaGuardTest {
             CacheEntry.serializer().descriptor.elementNames.toSet(),
         )
         assertEquals(
-            "the floor was reviewed against Gradle plugin 1.3.0 schema; update this assertion together with the field lists",
-            "1.3.0",
+            "the floor was reviewed against Gradle plugin 1.5.0 schema; update this assertion together with the field lists",
+            "1.5.0",
             DecompilationCacheService.REQUIRED_GRADLE_PLUGIN_VERSION,
         )
     }

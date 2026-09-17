@@ -119,7 +119,7 @@ pluginManagement {
 // build.gradle.kts
 plugins {
     // ... your existing plugins ...
-    id("dev.mixinmcp.decompile") version "1.3.0"
+    id("dev.mixinmcp.decompile") version "1.5.0"
 }
 ```
 
@@ -127,7 +127,7 @@ plugins {
 // build.gradle
 plugins {
     // ... your existing plugins ...
-    id 'dev.mixinmcp.decompile' version '1.3.0'
+    id 'dev.mixinmcp.decompile' version '1.5.0'
 }
 ```
 **3. Increase Gradle process memory:** (**Strongly** Recommended)
@@ -210,7 +210,7 @@ Undeclared parameter names are rejected before the call runs: common synonyms ar
 
 | Tool | Description |
 |------|-------------|
-| `mixin_find_class` | Look up any class by FQCN across project, libraries, JDK, and the Gradle buildscript classpath. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. A `Modules:` line names the modules whose classpath provides the class, tagging every non-compile scope; `module=` pins resolution and doubles as a compile-visibility check for that module. |
+| `mixin_find_class` | Look up any class by FQCN across project, libraries, JDK, and the Gradle buildscript classpath. Optionally include members, decompiled source, or just one named method/field via `methodName` / `fieldName`. A `Modules:` line names the modules whose classpath provides the class, tagged `(RUNTIME)` where a module cannot compile against the class or `(TEST)` where only its test sources can; `module=` pins resolution and doubles as a compile-visibility check for that module. |
 | `mixin_search_symbols` | Find classes, methods, or fields by name substring across project and all dependencies. |
 | `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath, JDK `src.zip` and buildscript classpath included. Pass `contextLines` to capture short method bodies inline; `roots` narrows the scan to `library`, `game`, `decompiled`, `jdk`, or `buildscript`. The default order scans game roots first and the JDK second to last, so vanilla and mod hits lead. |
 | `mixin_get_dep_source` | Read source and text resources from dependency jars, the decompiled cache, or any jar on disk. Address the file with `url` (from search results), `jarPath` + `entry`, `className`, or `path` (e.g. io/redspace/.../Utils.java); pick lines with a `lineNumber` window or an explicit `startLine`/`endLine` range. Reads `mods.toml`, `fabric.mod.json`, lang files, recipes, and mixin configs as readily as `.java`. |
@@ -248,7 +248,7 @@ Every other `mixin_*` tool waits up to 30 seconds for a busy IDE (indexing, a Gr
 
 | Tool | Description |
 |------|-------------|
-| `mixin_sync_project` | Trigger a Gradle sync and, by default, wait for the resolve and the project-data import that follows it, reporting success, failure with the error text, cancellation, or timeout (`timeoutMs`, default 90000, max 600000). `wait=false` returns once the resolve has started. `projectPath` accepts either separator form and must be a linked Gradle root or a directory inside one; the error lists the linked roots. Maven is not supported; use the IDE's Maven reload. The decompilation cache is re-read automatically after sync. |
+| `mixin_sync_project` | Trigger a Gradle sync and, by default, wait for the resolve and the project-data import that follows it, reporting success, failure with the error text, cancellation, or timeout (`timeoutMs`, default 90000, max 600000). `wait=false` returns once the resolve has started, or after 30 s if it has not. `projectPath` accepts either separator form and must be a linked Gradle root or a directory inside one; the error lists the linked roots. Maven is not supported; use the IDE's Maven reload. The decompilation cache is re-read automatically after sync. |
 | `mixin_ide_status` | Reports whether the IDE can answer classpath questions right now: indexing, a Gradle resolve or project-data import in flight, the last sync outcome with its error text, and the linked Gradle roots. |
 | `mixin_refresh_vfs` | Force-refresh IntelliJ's VFS so on-disk changes from external tools become visible. Optional `filePath` (alias `path`) scopes the refresh; file paths refresh the parent directory (catching edits, creates, and deletes), deleted paths walk up to the nearest existing ancestor, and directory paths refresh recursively. Defaults to the project root. |
 
@@ -352,8 +352,7 @@ leaves it alone, and it is never pruned against the classpath. `mixin_list_sourc
 marks those roots `[ad hoc jar]`. Stale entries fall to the same 30 day eviction as the
 rest of the cache.
 
-Both need a Gradle plugin version that ships the option; bump `dev.mixinmcp.decompile` if
-`--jar` is unrecognised.
+Both need `dev.mixinmcp.decompile` 1.5.0 or newer.
 
 For a one-off look there is no need to decompile at all: `mixin_list_jar_entries`,
 `mixin_get_dep_source(jarPath=..., entry=...)`, and `jarPath` on the bytecode tools read

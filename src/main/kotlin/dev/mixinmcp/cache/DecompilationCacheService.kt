@@ -189,7 +189,7 @@ class DecompilationCacheService(private val project: Project) {
         private val LOG = Logger.getInstance(DecompilationCacheService::class.java)
 
         /** Oldest Gradle plugin whose manifests cover everything this IDE plugin surfaces. */
-        const val REQUIRED_GRADLE_PLUGIN_VERSION: String = "1.3.0"
+        const val REQUIRED_GRADLE_PLUGIN_VERSION: String = "1.5.0"
 
         /** Per-project manifests: the classpath one and the one for jars named via `--jar` / `extraJars`. */
         val MANIFEST_FILE_NAMES: List<String> = listOf("manifest.json", "adhoc-manifest.json")

@@ -27,7 +27,7 @@ import kotlin.coroutines.coroutineContext
 /** Platform id string, not `GradleConstants.SYSTEM_ID`: the Gradle plugin is an optional dependency. */
 private val GRADLE_SYSTEM_ID: ProjectSystemId = ProjectSystemId("GRADLE")
 
-private const val START_WAIT_MS: Long = 10_000
+private const val NO_WAIT_START_BUDGET_MS: Long = 30_000
 private const val MAX_SYNC_TIMEOUT_MS: Long = 600_000
 
 internal fun normalizeDiskPath(path: String): String =
@@ -66,8 +66,9 @@ class ProjectManagementToolset : McpToolset {
             "to sync; defaults to the IDE project directory, accepts either separator form, and must be a linked " +
             "Gradle root or a directory inside one (the error lists the linked roots). wait (default true) blocks " +
             "until the resolve and the project-data import that follows it finish, up to timeoutMs (default 90000, " +
-            "max 600000), then reports success, failure with the error text, cancellation, or timeout; wait=false " +
-            "returns as soon as the resolve has started and the sync continues in the background (poll " +
+            "max 600000; the resolve can take several seconds to start), then reports success, failure with the error " +
+            "text, cancellation, or timeout; wait=false returns as soon as the resolve has started, or after 30s if it " +
+            "has not, and the sync continues in the background (poll " +
             "mixin_ide_status). Maven projects are not supported by this tool; use the IDE's Maven reload.",
     )
     @Suppress("unused")
@@ -103,6 +104,7 @@ class ProjectManagementToolset : McpToolset {
 
         val syncState: IdeSyncState = IdeSyncState.getInstance(project)
         val generationBefore: Long = syncState.snapshot.generation
+        val requestedAt: Long = System.currentTimeMillis()
 
         // External System refresh must run on EDT; the resolve itself runs in the background.
         ApplicationManager.getApplication().invokeLater {
@@ -116,12 +118,21 @@ class ProjectManagementToolset : McpToolset {
             }
         }
 
-        val started: IdeSyncState.Snapshot = withTimeoutOrNull(START_WAIT_MS) { syncState.awaitStarted(generationBefore) }
-            ?: return McpToolCallResult.error(
-                "Sync requested for $gradleRoot but no Gradle resolve started within ${START_WAIT_MS / 1000}s. " +
-                    "The IDE may have refused the import (untrusted project, Gradle plugin disabled) or another sync " +
-                    "is queued; check mixin_ide_status and the Build tool window.",
-            )
+        val startBudgetMs: Long = if (wait) timeoutMs else minOf(timeoutMs, NO_WAIT_START_BUDGET_MS)
+        val started: IdeSyncState.Snapshot = withTimeoutOrNull(startBudgetMs) { syncState.awaitStarted(generationBefore) }
+            ?: return if (wait) {
+                McpToolCallResult.error(
+                    "Sync requested for $gradleRoot but no Gradle resolve started within ${timeoutMs / 1000}s. " +
+                        "The IDE may have refused the import (untrusted project, Gradle plugin disabled) or queued it " +
+                        "behind another sync; check mixin_ide_status and the Build tool window.",
+                )
+            } else {
+                McpToolCallResult.text(
+                    "Sync requested for $gradleRoot; the resolve had not started after ${startBudgetMs / 1000}s, so it " +
+                        "is queued or was refused. Tools called now may still see the old project model. Poll " +
+                        "mixin_ide_status, or call mixin_sync_project with wait=true to block until it finishes.",
+                )
+            }
         started.triggerFailure?.let { failure ->
             return McpToolCallResult.error("Sync could not be started for $gradleRoot: $failure")
         }
@@ -132,7 +143,8 @@ class ProjectManagementToolset : McpToolset {
             )
         }
 
-        val finished: IdeSyncState.Snapshot? = withTimeoutOrNull(timeoutMs) { syncState.awaitIdle() }
+        val remainingMs: Long = (timeoutMs - (System.currentTimeMillis() - requestedAt)).coerceAtLeast(1)
+        val finished: IdeSyncState.Snapshot? = withTimeoutOrNull(remainingMs) { syncState.awaitIdle() }
         val current: IdeSyncState.Snapshot = finished ?: syncState.snapshot
         val elapsedS: Long = current.resolveStartedAt?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0
         if (finished == null) {

@@ -10,6 +10,8 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.psi.JavaPsiFacade
+import com.intellij.psi.PsiClass
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.util.concurrency.annotations.RequiresReadLock
 import dev.mixinmcp.cache.DecompilationCacheService
@@ -665,15 +667,23 @@ internal sealed class ClassSourceLookup {
     data object NotFound : ClassSourceLookup()
 }
 
-/** The attached or decompiled source file of a class, resolved the way mixin_find_class does. */
+/**
+ * The attached or decompiled source file of a class, resolved the way mixin_find_class does. The
+ * default-resolved copy can be a binary jar (the IDE's bundled copy of a library, say) while another
+ * classpath copy has sources attached, so every copy is tried before reporting binary-only.
+ */
 @RequiresReadLock
 internal fun lookupClassSource(project: Project, className: String, scope: GlobalSearchScope?): ClassSourceLookup {
-    val psiClass = FqcnResolver.resolveNested(project, className, scope ?: GlobalSearchScope.everythingScope(project))
+    val searchScope: GlobalSearchScope = scope ?: GlobalSearchScope.everythingScope(project)
+    val psiClass: PsiClass = FqcnResolver.resolveNested(project, className, searchScope)
         ?: return ClassSourceLookup.NotFound
     val fqcn: String = psiClass.qualifiedName ?: className
-    val vf: VirtualFile = (psiClass.navigationElement.containingFile ?: psiClass.containingFile)?.virtualFile
-        ?: return ClassSourceLookup.BinaryOnly(fqcn)
-    return if (vf.extension.equals("class", ignoreCase = true)) ClassSourceLookup.BinaryOnly(fqcn) else ClassSourceLookup.Found(vf)
+    val copies: Sequence<PsiClass> =
+        sequenceOf(psiClass) + JavaPsiFacade.getInstance(project).findClasses(fqcn, searchScope).asSequence()
+    val source: VirtualFile? = copies
+        .mapNotNull { (it.navigationElement.containingFile ?: it.containingFile)?.virtualFile }
+        .firstOrNull { !it.extension.equals("class", ignoreCase = true) }
+    return source?.let { ClassSourceLookup.Found(it) } ?: ClassSourceLookup.BinaryOnly(fqcn)
 }
 
 /**

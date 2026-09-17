@@ -462,8 +462,9 @@ nested classes with ready-to-copy follow-up calls; `includeSource` appends the f
 without it, a class with several classpath copies gets a Variants block in which
 byte-identical copies are merged and patched copies get a provenance-tagged structural
 diff (`ClassContentDeduper`). A `Modules:` header line names the modules whose classpath
-provides the class, each tagged with its dependency scope when that is not COMPILE
-(`neoforge.main, common.main (RUNTIME)`); the Variants block's `[modules: ...]` carries the
+provides the class, tagged `(RUNTIME)` for a runtime-only entry or `(TEST)` for a test-only one;
+`compileOnly` maps to PROVIDED, which is compile-visible and stays untagged
+(`neoforge.main, common.main (RUNTIME)`). The Variants block's `[modules: ...]` carries the
 same tags. `module` is therefore also a compile-visibility check: a class that resolves
 without it but not with it is declared `runtimeOnly` or test-only in that module, and the
 error says so, because a mixin in that module would fail `compileJava` however clean the
@@ -640,8 +641,9 @@ triggers `ExternalSystemUtil.refreshProject` with
 default) it blocks on `IdeSyncState` until the resolve and the project-data import that
 follows it finish, up to `timeoutMs` (1000 to 600000), and reports SUCCESS, FAILURE with
 the error text, CANCELLED, or a timeout that says the sync continues in the background.
-`wait=false` returns once the resolve has started; a resolve that never starts within 10 s
-is an error naming the likely causes. Maven is not attempted (the old silent Maven retry
+`wait=false` returns once the resolve has started, or after 30 s with a note that it has not;
+with `wait=true` the start and the finish share the `timeoutMs` budget, since a resolve can
+take well over 10 s to start after a plugin version bump. Maven is not attempted (the old silent Maven retry
 was a no-op); the error points at the IDE's Maven reload. When the Gradle plugin is
 applied, sync also re-runs `genDependencySources` (Section 10).
 

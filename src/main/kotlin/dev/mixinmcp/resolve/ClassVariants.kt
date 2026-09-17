@@ -6,7 +6,6 @@ import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.DependencyScope
 import com.intellij.openapi.roots.ExportableOrderEntry
-import com.intellij.openapi.roots.OrderEntry
 import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.JavaPsiFacade
@@ -348,24 +347,33 @@ object ClassVariants {
     }
 
     /**
-     * Owner modules of [vf] with the dependency scope of the providing order entry, e.g.
-     * `neoforge.main` (compile scope, the default) or `common.main (RUNTIME)`. A module listed
-     * with a non-compile scope cannot compile against the class through Gradle.
+     * Owner modules of [vf], tagged `(RUNTIME)` when the providing order entry is runtime-only or
+     * `(TEST)` when only test sources see it. Compile and provided (`compileOnly`) entries stay
+     * untagged: both are compile-visible.
      */
     @RequiresReadLock
     fun ownerModules(project: Project, vf: VirtualFile?): List<String> {
         if (vf == null) return emptyList()
         val fromIndex: List<String> = ProjectFileIndex.getInstance(project)
             .getOrderEntriesForFile(vf)
-            .map { it.ownerModule.name + scopeSuffix(it) }
+            .map { it.ownerModule.name + scopeTag((it as? ExportableOrderEntry)?.scope) }
             .distinct()
             .sorted()
         if (fromIndex.isNotEmpty()) return fromIndex
         return if (isBuildscriptClasspathFile(project, vf)) listOf("(buildscript classpath)") else emptyList()
     }
 
-    private fun scopeSuffix(entry: OrderEntry): String {
-        val scope: DependencyScope = (entry as? ExportableOrderEntry)?.scope ?: return ""
-        return if (scope == DependencyScope.COMPILE) "" else " (${scope.name})"
+    fun scopeTag(scope: DependencyScope?): String = when (scope) {
+        DependencyScope.RUNTIME -> " (RUNTIME)"
+        DependencyScope.TEST -> " (TEST)"
+        else -> ""
+    }
+
+    fun scopeNote(owners: List<String>): String {
+        val notes: List<String> = buildList {
+            if (owners.any { it.endsWith(" (RUNTIME)") }) add("RUNTIME: that module cannot compile against this class")
+            if (owners.any { it.endsWith(" (TEST)") }) add("TEST: only that module's test sources can")
+        }
+        return if (notes.isEmpty()) "" else " (${notes.joinToString("; ")})"
     }
 }

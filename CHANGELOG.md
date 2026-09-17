@@ -2,7 +2,17 @@
 
 # MixinMCP Changelog
 
+## [1.5.1]
+
+### Fixed
+
+- `mixin_find_class` marking `compileOnly` dependencies as not compile-visible in its `Modules:` line
+- `mixin_get_dep_source` with `className` reporting no attached source when another classpath copy of the class has sources
+- `mixin_sync_project` reporting that no resolve started when the resolve took longer than 10 seconds to begin
+- Bumped required gradle plugin version to 1.5.0+
+
 ## [1.5.0]
+
 ### Added
 
 - New tool `mixin_ide_status`: reports dumb mode, in-progress Gradle resolves or project imports, most recent sync outcome and its error text, and linked Gradle roots
@@ -385,7 +395,8 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.4.1...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.5.0...HEAD
+[1.5.0]: https://github.com/muon-rw/MixinMCP/compare/1.4.1...1.5.0
 [1.4.1]: https://github.com/muon-rw/MixinMCP/compare/1.4.0...1.4.1
 [1.4.0]: https://github.com/muon-rw/MixinMCP/compare/1.3.1...1.4.0
 [1.3.1]: https://github.com/muon-rw/MixinMCP/compare/1.3.0...1.3.1
