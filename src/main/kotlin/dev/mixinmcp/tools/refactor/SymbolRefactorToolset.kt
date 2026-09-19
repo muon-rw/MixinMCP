@@ -10,6 +10,7 @@ import com.intellij.mcpserver.annotations.McpToolHints
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.smartReadAction
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.editor.Document
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
@@ -32,6 +33,8 @@ import com.intellij.psi.PsiMethod
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.PsiParameter
 import com.intellij.psi.PsiRecursiveElementWalkingVisitor
+import com.intellij.psi.SmartPointerManager
+import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.psi.search.searches.OverridingMethodsSearch
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.refactoring.ConflictsDialogBase
@@ -68,6 +71,8 @@ class SymbolRefactorToolset : McpToolset {
             "Method overrides count as blocking usages and are tagged [override] so you can see what would break. " +
             "References inside mixin config JSON, mods.toml, ServiceLoader files, etc. are picked up automatically " +
             "when the relevant IntelliJ language plugins (Minecraft Development, Forge/Fabric support) contribute PSI references. " +
+            "Deleting a @Mixin class also removes its entries from the mixins, client, and server arrays of mixin " +
+            "configs, which do not block the delete; dryRun lists them. " +
             "By default refuses to delete if usages exist; pass ignoreConflicts=true (force is accepted as an alias) to delete anyway (will leave broken references), " +
             "or dryRun=true to only report usages without modifying anything. Modifies source files when deletion succeeds.",
     )
@@ -236,7 +241,10 @@ class SymbolRefactorToolset : McpToolset {
         val deletesWholeFile: Boolean,
         val usages: List<UsageRef>,
         val sameFileUsagesSkipped: Int,
+        val configEntries: List<ConfigEntryRef>,
     )
+
+    private class ConfigEntryRef(val usage: UsageRef, val pointer: SmartPsiElementPointer<PsiElement>)
 
     private data class UsageRef(
         val file: String,
@@ -329,7 +337,9 @@ class SymbolRefactorToolset : McpToolset {
             }
 
             val usages: MutableList<UsageRef> = mutableListOf()
-            val sameFileUsagesSkipped: Int = collectUsages(project, target, skipUsageFile, usages)
+            val configEntries: MutableList<ConfigEntryRef>? =
+                if (target is PsiClass && target.hasAnnotation(MIXIN_ANNOTATION)) mutableListOf() else null
+            val sameFileUsagesSkipped: Int = collectUsages(project, target, skipUsageFile, usages, configEntries)
             if (target is PsiMethod) {
                 collectOverrides(project, target, usages)
             }
@@ -343,6 +353,7 @@ class SymbolRefactorToolset : McpToolset {
                     deletesWholeFile = deletesWholeFile,
                     usages = usages.toList(),
                     sameFileUsagesSkipped = sameFileUsagesSkipped,
+                    configEntries = configEntries.orEmpty(),
                 ),
             )
         }
@@ -353,8 +364,10 @@ class SymbolRefactorToolset : McpToolset {
         element: PsiNamedElement,
         skipFile: VirtualFile?,
         sink: MutableList<UsageRef>,
+        configEntries: MutableList<ConfigEntryRef>?,
     ): Int {
         var skipped = 0
+        val seenEntries = HashSet<Pair<VirtualFile, Int>>()
         ReferencesSearch.search(element).forEach { reference ->
             val refElement: PsiElement = reference.element
             val refFile: VirtualFile = refElement.containingFile?.virtualFile ?: return@forEach
@@ -362,9 +375,52 @@ class SymbolRefactorToolset : McpToolset {
                 skipped++
                 return@forEach
             }
+            if (configEntries != null && isMixinConfigEntry(project, refElement)) {
+                if (seenEntries.add(refFile to refElement.textRange.startOffset)) {
+                    val pointer: SmartPsiElementPointer<PsiElement> =
+                        SmartPointerManager.getInstance(project).createSmartPsiElementPointer(refElement)
+                    configEntries.add(ConfigEntryRef(toUsageRef(project, refElement, refFile, tag = null), pointer))
+                }
+                return@forEach
+            }
             sink.add(toUsageRef(project, refElement, refFile, tag = null))
         }
         return skipped
+    }
+
+    private fun isMixinConfigEntry(project: Project, element: PsiElement): Boolean {
+        val file: PsiFile = element.containingFile ?: return false
+        if (!file.name.endsWith(".json", ignoreCase = true)) return false
+        val text: CharSequence = PsiDocumentManager.getInstance(project).getDocument(file)?.charsSequence
+            ?: file.viewProvider.contents
+        val (start: Int, end: Int) = quotedRange(text, element.textRange.startOffset, element.textRange.endOffset)
+            ?: return false
+        return isMixinConfigEntry(text, start, end)
+    }
+
+    /** Deletes the entries back to front per file, so the offsets still to process stay valid. */
+    private fun removeConfigEntries(project: Project, entries: List<ConfigEntryRef>): List<UsageRef> {
+        val documents: PsiDocumentManager = PsiDocumentManager.getInstance(project)
+        val located: List<Triple<Document, Int, UsageRef>> = entries.mapNotNull { entry ->
+            val element: PsiElement = entry.pointer.element ?: return@mapNotNull null
+            val document: Document = element.containingFile?.let { documents.getDocument(it) } ?: return@mapNotNull null
+            Triple(document, element.textRange.startOffset, entry.usage)
+        }
+        val removed: MutableList<UsageRef> = mutableListOf()
+        for ((document: Document, starts: List<Pair<Int, UsageRef>>) in located.groupBy({ it.first }, { it.second to it.third })) {
+            for ((start: Int, usage: UsageRef) in starts.sortedByDescending { it.first }) {
+                val text: CharSequence = document.charsSequence
+                val closing: Int = text.indexOf('"', start + 1)
+                if (closing < 0) continue
+                val (from: Int, to: Int) = quotedRange(text, start, closing + 1) ?: continue
+                if (!isMixinConfigEntry(text, from, to)) continue
+                val (deleteFrom: Int, deleteTo: Int) = entryRemovalRange(text, from, to)
+                document.deleteString(deleteFrom, deleteTo)
+                removed.add(usage)
+            }
+        }
+        documents.commitAllDocuments()
+        return removed
     }
 
     private fun collectOverrides(
@@ -417,8 +473,17 @@ class SymbolRefactorToolset : McpToolset {
             if (prep.deletesWholeFile) {
                 appendLine("  note: deleting this class would remove the file entirely.")
             }
+            if (prep.configEntries.isNotEmpty()) {
+                appendLine("  mixin config entries removed along with it:")
+                for (entry: ConfigEntryRef in prep.configEntries) {
+                    appendLine("    ${entry.usage.file}:${entry.usage.line}  ${entry.usage.snippet}")
+                }
+            }
             appendLine()
-            if (prep.usages.isEmpty()) {
+            if (prep.usages.isEmpty() && prep.configEntries.isNotEmpty()) {
+                appendLine("No other usages found across project and dependencies.")
+                if (dryRun) appendLine("Re-run without dryRun=true to perform the deletion.")
+            } else if (prep.usages.isEmpty()) {
                 if (prep.sameFileUsagesSkipped > 0) {
                     val fileNote: String = if (prep.deletesWholeFile) {
                         "the whole file is deleted with it"
@@ -457,6 +522,7 @@ class SymbolRefactorToolset : McpToolset {
         force: Boolean,
     ): McpToolCallResult {
         var error: String? = null
+        var removedEntries: List<UsageRef> = emptyList()
 
         ApplicationManager.getApplication().invokeAndWait {
             try {
@@ -468,6 +534,7 @@ class SymbolRefactorToolset : McpToolset {
                             error = "Target PSI element is no longer valid (was it modified concurrently?)."
                             return@run
                         }
+                        removedEntries = removeConfigEntries(project, prep.configEntries)
                         prep.element.delete()
                         PsiDocumentManager.getInstance(project).commitAllDocuments()
                         FileDocumentManager.getInstance().saveAllDocuments()
@@ -486,6 +553,16 @@ class SymbolRefactorToolset : McpToolset {
             appendLine("Deleted ${prep.elementKind} ${prep.displayName}")
             appendLine("  from: ${prep.targetFilePath}")
             if (prep.deletesWholeFile) appendLine("  (file removed)")
+            if (removedEntries.isNotEmpty()) {
+                appendLine("  removed mixin config entries:")
+                for (entry: UsageRef in removedEntries) appendLine("    ${entry.file}:${entry.line}  ${entry.snippet}")
+            }
+            if (removedEntries.size < prep.configEntries.size) {
+                appendLine(
+                    "  ${prep.configEntries.size - removedEntries.size} mixin config entry(s) changed since the " +
+                        "usage check and were left in place; check them before launching.",
+                )
+            }
             if (force && prep.usages.isNotEmpty()) {
                 appendLine()
                 appendLine(

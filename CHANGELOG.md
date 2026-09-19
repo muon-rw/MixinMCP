@@ -9,6 +9,7 @@
 - `mixin_list_jar_entries` can grep: `regexPattern` searches the text files of each jar, and `jarPath` accepts a folder of jars. This answers questions like "which mods in this pack depend on X" and reaches runtime-only jars that `mixin_search_in_deps` cannot
 - `mixin_method_bytecode`: `regexPattern` shows only the matching instructions, each with its line and Mixin ordinal. Searching for a lambda's name finds where it is created
 - `mixin_move_file`: `dryRun` and `ignoreConflicts`, matching the other refactor tools
+- `mixin_safe_delete` removes a deleted mixin class's entries from its mixin configs, instead of refusing deletion by considering the json a blocking usage
 - `mixin_search_in_deps` names the jars it could not search (runtime-only, or never decompiled)
 - Class-not-found errors suggest classes with the same simple name, and point out a newly created file the IDE has not picked up yet
 

@@ -772,7 +772,11 @@ unwrapped to their source declaration), then collects `ReferencesSearch` usages 
 methods, `OverridingMethodsSearch` results tagged `[override]`; a top-level class's
 own-file references are excluded, and deleting the sole top-level declaration removes the
 file. `dryRun` reports what would happen; existing usages block deletion unless
-`ignoreConflicts`.
+`ignoreConflicts`. For a `@Mixin` class, references that are elements of a `.json` file's
+`mixins`, `client`, or `server` array (`MixinConfigEntries.kt`, a text check that needs no
+JSON plugin) are set aside instead of blocking: the delete removes each from its array in
+the same command, back to front per file, taking the separating comma and the element's
+line when it sits on its own, since a leftover entry fails mixin application at launch.
 The delete is a direct `PsiElement.delete()` in a named `WriteCommandAction` on the EDT
 (not `SafeDeleteProcessor`), then commits and saves all documents.
 
