@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-09-18
+
 ### Added
 
 - `mixin_list_jar_entries` can grep: `regexPattern` searches the text files of each jar, and `jarPath` accepts a folder of jars. This answers questions like "which mods in this pack depend on X" and reaches runtime-only jars that `mixin_search_in_deps` cannot
@@ -79,6 +81,7 @@
 - `mixin_get_dep_source` now accepts an explicit inclusive range via `startLine` / `endLine`, which overrides the `lineNumber` window; `startLine` alone reads to end of file, `endLine` alone reads from line 1
 - Every `mixin_*` tool now rejects parameter names it does not declare, listing the accepted ones, instead of silently dropping bad args and running on defaults.
 - Re-added `direction="down"` to `mixin_move_members` (now supported by IntelliJ API)
+
 ### Fixed
 
 - Buildscript classpath roots are now served from a snapshot recomputed on project open, after Gradle sync, and when the indexing setting changes. Fixes a VFS refresh related IDE process hang related to File System Synchronization
@@ -422,7 +425,9 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.5.0...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.5.2...HEAD
+[1.5.2]: https://github.com/muon-rw/MixinMCP/compare/1.5.1...1.5.2
+[1.5.1]: https://github.com/muon-rw/MixinMCP/compare/1.5.0...1.5.1
 [1.5.0]: https://github.com/muon-rw/MixinMCP/compare/1.4.1...1.5.0
 [1.4.1]: https://github.com/muon-rw/MixinMCP/compare/1.4.0...1.4.1
 [1.4.0]: https://github.com/muon-rw/MixinMCP/compare/1.3.1...1.4.0
