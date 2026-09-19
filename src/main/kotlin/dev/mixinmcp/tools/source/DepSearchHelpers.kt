@@ -12,6 +12,8 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiClassOwner
+import com.intellij.psi.PsiManager
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.util.concurrency.annotations.RequiresReadLock
 import dev.mixinmcp.cache.DecompilationCacheService
@@ -20,6 +22,7 @@ import dev.mixinmcp.cache.isGradlePluginVersionAtLeast
 import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.startup.declaredGradlePluginVersion
 import dev.mixinmcp.startup.hasGradlePlugin
+import dev.mixinmcp.tools.resolveAgainstBase
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
 
@@ -87,6 +90,7 @@ internal data class DepRegexScanResult(
     val rootsScanned: Int = 0,
     val rootsTotal: Int = 0,
     val stoppedInRoot: String? = null,
+    val unsearchedJars: List<String> = emptyList(),
 )
 
 /**
@@ -227,6 +231,8 @@ internal fun classifySourceFile(project: Project, vf: VirtualFile): String {
     val normPath: String = vf.path.replace('\\', '/')
     val projectPath = project.basePath?.replace('\\', '/')
     val inJar: Boolean = vf.url.startsWith("jar://")
+    val isClass: Boolean = vf.extension.equals("class", ignoreCase = true)
+    if (inJar && !isClass) return "Jar entry (not a source root): ${normPath.substringBefore("!/").substringAfterLast('/')}"
     if (projectPath != null && normPath.startsWith(projectPath)) {
         if (isLoomCacheArtifactPath(normPath, projectPath)) {
             return "Loom toolchain artifact (binary under .gradle/loom-cache; genSources provides real sources)"
@@ -236,7 +242,7 @@ internal fun classifySourceFile(project: Project, vf: VirtualFile): String {
         }
         if (!inJar) return "Project source"
     }
-    return if (vf.extension.equals("class", ignoreCase = true)) "Classes JAR (binary)" else "Jar entry (not a source root)"
+    return if (isClass) "Classes JAR (binary)" else "Jar entry (not a source root)"
 }
 
 /**
@@ -606,23 +612,85 @@ private fun collectSamplePathsRecursive(
 }
 
 /**
- * Locates a dependency source file by path (e.g. io/redspace/.../Utils.java).
- * Searches SOURCES roots and synthetic library roots; returns first match.
- * A non-null [scope] limits the search to roots inside it (module pinning).
+ * Every copy of a classpath-relative [path] (e.g. io/redspace/.../Utils.java or
+ * data/minecraft/enchantment/sharpness.json): exact matches in source roots, then in library
+ * classes jars, where vanilla data and assets live, then the first suffix match walking source
+ * roots. Several jars can ship one resource path (a datapack overriding a vanilla file), so
+ * callers read the first and name the rest. A non-null [scope] limits the search (module pinning).
  */
 @RequiresReadLock
-internal fun locateDepSourceByPath(
+internal fun locateDepFilesByPath(
     project: Project,
     path: String,
     scope: GlobalSearchScope? = null,
-): VirtualFile? {
+): List<VirtualFile> {
     val normalizedPath: String = path.replace('\\', '/').removePrefix("/")
-    for (root in collectAllSourceRoots(project)) {
-        if (scope != null && !scope.contains(root)) continue
-        findFileByPathInTree(root, normalizedPath)?.let { return it }
+    val sourceRoots: List<VirtualFile> = collectAllSourceRoots(project).filter { scope == null || scope.contains(it) }
+    val exact = LinkedHashSet<VirtualFile>()
+    for (root in sourceRoots + libraryClassesRoots(project, scope)) {
+        root.findFileByRelativePath(normalizedPath)?.takeUnless { it.isDirectory }?.let(exact::add)
     }
-    return null
+    if (exact.isNotEmpty()) return exact.toList()
+    for (root in sourceRoots) {
+        findFileByPathInTree(root, normalizedPath)?.let { return listOf(it) }
+    }
+    return emptyList()
 }
+
+@RequiresReadLock
+private fun libraryClassesRoots(project: Project, scope: GlobalSearchScope?): List<VirtualFile> {
+    val roots = LinkedHashSet<VirtualFile>()
+    for (module in ModuleManager.getInstance(project).modules) {
+        for (entry in ModuleRootManager.getInstance(module).orderEntries) {
+            val lib = (entry as? LibraryOrderEntry)?.library ?: continue
+            lib.getFiles(OrderRootType.CLASSES).filterTo(roots) { scope == null || scope.contains(it) }
+        }
+    }
+    return roots.toList()
+}
+
+/**
+ * File names of classpath jars that no text-search root covers: no attached sources and no
+ * decompiled-cache copy. Runtime-only dependencies land here, since genDependencySources only
+ * decompiles the compile classpath.
+ */
+@RequiresReadLock
+internal fun unsearchableClasspathJars(project: Project): List<String> {
+    val covered = HashSet<String>()
+    val names = LinkedHashMap<String, String>()
+    for (module in ModuleManager.getInstance(project).modules) {
+        for (entry in ModuleRootManager.getInstance(module).orderEntries) {
+            val lib = (entry as? LibraryOrderEntry)?.library ?: continue
+            val hasSources: Boolean = lib.getFiles(OrderRootType.SOURCES).isNotEmpty()
+            for (root in lib.getFiles(OrderRootType.CLASSES)) {
+                val disk: String = DecompilationCacheService.normalizeJarDiskPath(root.path)
+                if (!disk.endsWith(".jar")) continue
+                names.putIfAbsent(disk, root.path.replace('\\', '/').substringBefore("!/").substringAfterLast('/'))
+                if (hasSources) covered.add(disk)
+            }
+        }
+    }
+    DecompilationCacheService.getInstance(project).getCachedRoots()
+        .forEach { covered.add(DecompilationCacheService.normalizeJarDiskPath(it.classesJarPath)) }
+    return names.filterKeys { it !in covered }.values.distinct().sorted()
+}
+
+internal fun describeUnsearchableJars(names: List<String>): String? {
+    if (names.isEmpty()) return null
+    val jars: String = if (names.size == 1) "jar has" else "jars have"
+    return "${names.size} classpath $jars no searchable source (runtime-only, or never decompiled), so matches " +
+        "inside them cannot appear here: ${sampleOf(names, 8)}. Grep one directly with " +
+        "mixin_list_jar_entries(jar=\"<name>\", regexPattern=...) or read a class with mixin_get_dep_source(className=...)."
+}
+
+internal fun describeUnsearchedJarsBriefly(names: List<String>): String? {
+    if (names.isEmpty()) return null
+    return "(Not searched: ${names.size} classpath jar(s) without source: ${sampleOf(names, 5)}. Grep them with " +
+        "mixin_list_jar_entries(jar=\"<name>\", regexPattern=...).)"
+}
+
+private fun sampleOf(names: List<String>, limit: Int): String =
+    names.take(limit).joinToString(", ") + if (names.size > limit) ", and ${names.size - limit} more" else ""
 
 private fun findFileByPathInTree(vf: VirtualFile, targetPath: String): VirtualFile? {
     ProgressManager.checkCanceled()
@@ -643,11 +711,21 @@ internal fun cacheRootDisplayName(info: SourceRootInfo): String =
 internal fun looksLikeUrlOrDiskPath(logicalPath: String): Boolean =
     logicalPath.contains("://") || logicalPath.contains("!/") || Regex("^[A-Za-z]:/").containsMatchIn(logicalPath)
 
-/** `jar://` or `file://` form of [raw]; a bare disk path becomes a jar URL when it contains `!/`. */
-internal fun normalizeSourceUrl(raw: String): String {
+/**
+ * `jar://` or `file://` form of [raw]; a bare disk path becomes a jar URL when it contains `!/`,
+ * and a relative disk part resolves against [basePath].
+ */
+internal fun normalizeSourceUrl(raw: String, basePath: String? = null): String {
     val trimmed: String = raw.trim().replace('\\', '/')
-    if (trimmed.contains("://")) return trimmed
-    return if (trimmed.contains("!/")) "jar://$trimmed" else "file://$trimmed"
+    val (scheme: String, rest: String) = when {
+        trimmed.startsWith("jar://") -> "jar://" to trimmed.removePrefix("jar://")
+        trimmed.startsWith("file://") -> "file://" to trimmed.removePrefix("file://")
+        trimmed.contains("://") -> return trimmed
+        trimmed.contains("!/") -> "jar://" to trimmed
+        else -> "file://" to trimmed
+    }
+    val entry: String = if ("!/" in rest) "!/" + rest.substringAfter("!/") else ""
+    return scheme + resolveAgainstBase(basePath, rest.substringBefore("!/")) + entry
 }
 
 internal fun jarEntryUrl(jarPath: String, entry: String): String =
@@ -662,15 +740,15 @@ internal fun looksBinary(bytes: ByteArray): Boolean {
 }
 
 internal sealed class ClassSourceLookup {
+    /** [file] is a .java/.kt source, or the .class itself when no source exists (read through the IDE decompiler). */
     class Found(val file: VirtualFile) : ClassSourceLookup()
-    class BinaryOnly(val fqcn: String) : ClassSourceLookup()
     data object NotFound : ClassSourceLookup()
 }
 
 /**
- * The attached or decompiled source file of a class, resolved the way mixin_find_class does. The
- * default-resolved copy can be a binary jar (the IDE's bundled copy of a library, say) while another
- * classpath copy has sources attached, so every copy is tried before reporting binary-only.
+ * The best readable file for a class, in the order mixin_find_class uses: an attached source on any
+ * classpath copy (the default-resolved copy can be the IDE's bundled binary while another copy has
+ * sources), then the MixinMCP decompiled-cache copy, then the .class for the IDE decompiler.
  */
 @RequiresReadLock
 internal fun lookupClassSource(project: Project, className: String, scope: GlobalSearchScope?): ClassSourceLookup {
@@ -678,12 +756,55 @@ internal fun lookupClassSource(project: Project, className: String, scope: Globa
     val psiClass: PsiClass = FqcnResolver.resolveNested(project, className, searchScope)
         ?: return ClassSourceLookup.NotFound
     val fqcn: String = psiClass.qualifiedName ?: className
-    val copies: Sequence<PsiClass> =
-        sequenceOf(psiClass) + JavaPsiFacade.getInstance(project).findClasses(fqcn, searchScope).asSequence()
-    val source: VirtualFile? = copies
-        .mapNotNull { (it.navigationElement.containingFile ?: it.containingFile)?.virtualFile }
-        .firstOrNull { !it.extension.equals("class", ignoreCase = true) }
-    return source?.let { ClassSourceLookup.Found(it) } ?: ClassSourceLookup.BinaryOnly(fqcn)
+    val copies: List<PsiClass> =
+        (listOf(psiClass) + JavaPsiFacade.getInstance(project).findClasses(fqcn, searchScope)).distinct()
+    val file: VirtualFile = copies.firstNotNullOfOrNull { attachedSource(it) }
+        ?: copies.firstNotNullOfOrNull { decompiledCacheSource(project, it) }
+        ?: psiClass.containingFile?.virtualFile
+        ?: return ClassSourceLookup.NotFound
+    return ClassSourceLookup.Found(file)
+}
+
+internal fun attachedSource(psiClass: PsiClass): VirtualFile? =
+    (psiClass.navigationElement.containingFile ?: psiClass.containingFile)?.virtualFile
+        ?.takeUnless { it.extension.equals("class", ignoreCase = true) }
+
+/**
+ * The decompiled-cache copy of [psiClass]'s top-level source file. IntelliJ never links a classes jar
+ * to a synthetic cache root, so navigationElement stays on the .class; the copy decompiled from the
+ * jar the class resolved from wins over other versions of the same mod.
+ */
+@RequiresReadLock
+internal fun decompiledCacheSource(project: Project, psiClass: PsiClass): VirtualFile? {
+    var top: PsiClass = psiClass
+    while (true) top = top.containingClass ?: break
+    val base: String = top.qualifiedName?.replace('.', '/') ?: return null
+    val classJar: String? = psiClass.containingFile?.virtualFile?.path?.let { DecompilationCacheService.normalizeJarDiskPath(it) }
+    val service: DecompilationCacheService = DecompilationCacheService.getInstance(project)
+    val hits: List<Pair<VirtualFile, VirtualFile>> = collectSourceRootsWithMetadata(project)
+        .filter { isDecompiledCacheLabel(it.typeLabel) || it.typeLabel.startsWith("$BUILDSCRIPT_LABEL_PREFIX (decompiled cache)") }
+        .mapNotNull { info ->
+            val file: VirtualFile? = info.root.findFileByRelativePath("$base.java")
+                ?: info.root.findFileByRelativePath("$base.kt")
+            file?.let { info.root to it }
+        }
+    val sameJar: VirtualFile? = hits.firstOrNull { (root, _) ->
+        val info: DecompilationCacheService.CachedLibraryInfo? = service.cachedRootInfo(root)
+        classJar != null && info != null && DecompilationCacheService.normalizeJarDiskPath(info.classesJarPath) == classJar
+    }?.second
+    return sameJar ?: hits.firstOrNull()?.second
+}
+
+/** [psiClass] as declared in its decompiled-cache source file, for source views whose line numbers match that file. */
+@RequiresReadLock
+internal fun decompiledCacheClass(project: Project, psiClass: PsiClass): PsiClass? {
+    val file: VirtualFile = decompiledCacheSource(project, psiClass) ?: return null
+    val owner: PsiClassOwner = PsiManager.getInstance(project).findFile(file) as? PsiClassOwner ?: return null
+    val chain: List<String> = generateSequence(psiClass) { it.containingClass }.mapNotNull { it.name }.toList().asReversed()
+    if (chain.isEmpty()) return null
+    var current: PsiClass? = owner.classes.firstOrNull { it.name == chain.first() }
+    for (name in chain.drop(1)) current = current?.findInnerClassByName(name, false)
+    return current
 }
 
 /**

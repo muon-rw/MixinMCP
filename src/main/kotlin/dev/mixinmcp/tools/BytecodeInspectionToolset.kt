@@ -47,11 +47,11 @@ private sealed class ScopedLocate {
 }
 
 /** Index-free lookup for jars outside the project classpath; runs off the read lock. */
-private fun locateInJar(jarPath: String, className: String, module: String?): ScopedLocate {
+private fun locateInJar(basePath: String?, jarPath: String, className: String, module: String?): ScopedLocate {
     if (module != null) {
         return ScopedLocate.Failure("jarPath reads the class straight from that jar and bypasses classpath resolution; drop module=.")
     }
-    val jar = File(jarPath.trim().replace('\\', '/'))
+    val jar = File(resolveAgainstBase(basePath, jarPath))
     if (!jar.isFile) return ScopedLocate.Failure("jarPath does not exist or is not a file: $jarPath")
     return when (val lookup = ClassFileLocator.readClassEntry(jar, className)) {
         is ClassFileLocator.JarClassLookup.Found ->
@@ -108,10 +108,11 @@ private fun locateScoped(project: Project, className: String, module: String?): 
                     "(declared runtimeOnly or test-only there, or only on another module), so that module cannot " +
                     "compile against it; drop module= to search the whole project, or pin a different module."
             } else {
-                "Class not found: $className" +
-                    (if (pinnedModule != null) " (module: $pinnedModule)" else "") +
-                    ". " + FqcnResolver.CLASS_NOT_FOUND_HINT +
-                    " For a jar that is not on the classpath, pass jarPath."
+                FqcnResolver.notFoundMessage(
+                    project,
+                    className,
+                    "Class not found: $className" + (if (pinnedModule != null) " (module: $pinnedModule)" else ""),
+                ) + " For a jar that is not on the classpath, pass jarPath."
             },
         )
     }
@@ -153,7 +154,7 @@ class BytecodeInspectionToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Returns bytecode-level class overview including synthetic methods, lambda targets, method descriptors, and access flags. Use this tool when decompiled source hides the real method names you need for mixin targets. filter: all (default), synthetic (only compiler-generated: lambdas, bridges, access methods), methods, fields. includeInstructions: javap -c style bytecode per method (large output). Use filter=synthetic to discover lambda mixin target names (e.g. lambda\$tick\$0). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). jarPath: read the class straight from any jar on disk instead of the classpath (a mod in a modpack folder; no build change needed); className is still the dot FQCN, and module must be omitted. For method-level bytecode use mixin_method_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing (jarPath lookups never wait).")
+    @McpDescription("Returns bytecode-level class overview including synthetic methods, lambda targets, method descriptors, and access flags. Use this tool when decompiled source hides the real method names you need for mixin targets. filter: all (default), synthetic (only compiler-generated: lambdas, bridges, access methods), methods, fields. includeInstructions: javap -c style bytecode per method (large output). Use filter=synthetic to discover lambda mixin target names (e.g. lambda\$tick\$0). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). jarPath: read the class straight from any jar on disk instead of the classpath (a mod in a modpack folder; no build change needed; relative paths resolve against the project directory); className is still the dot FQCN, and module must be omitted. For method-level bytecode use mixin_method_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing (jarPath lookups never wait).")
     @Suppress("unused") // Discovered and invoked by MCP framework via reflection
     suspend fun mixin_class_bytecode(
         className: String,
@@ -171,7 +172,7 @@ class BytecodeInspectionToolset : McpToolset {
         }
 
         val outcome: ScopedLocate = if (!jarPath.isNullOrBlank()) {
-            withContext(Dispatchers.IO) { locateInJar(jarPath, className, module) }
+            withContext(Dispatchers.IO) { locateInJar(project.basePath, jarPath, className, module) }
         } else {
             smartReadAction(project) { locateScoped(project, className, module) }
         }
@@ -279,7 +280,7 @@ class BytecodeInspectionToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor; use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor in JVM format to disambiguate overloads (e.g. (Lnet/minecraft/world/entity/Entity;)V, or ()V for no-arg methods). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). jarPath: read the class straight from any jar on disk instead of the classpath (a mod in a modpack folder); module must be omitted. For class-level bytecode overview use mixin_class_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing (jarPath lookups never wait).")
+    @McpDescription("Returns javap-style bytecode instructions for a single method. Every INVOKE* instruction shows the actual owner class, method name, and descriptor; use this to find the exact @At(target = \"...\") string for mixin injections. Also use for lambda/synthetic targets (e.g. lambda\$tick\$0). Pass methodDescriptor in JVM format to disambiguate overloads (e.g. (Lnet/minecraft/world/entity/Entity;)V, or ()V for no-arg methods). module: pin resolution to one module's classpath when the class has multiple variants; accepts exact or dot-boundary suffix module names (e.g. common.main, MyMod.neoforge.main). jarPath: read the class straight from any jar on disk instead of the classpath (a mod in a modpack folder; relative paths resolve against the project directory); module must be omitted. regexPattern: keep only the instructions whose text matches this Java regex (e.g. 'forEachModifier' or 'INVOKE.*Attribute'), each with its source line and, when the same target occurs more than once in the method, its Mixin ordinal ([ordinal 1 of 2]); an INVOKEDYNAMIC also matches on its bootstrap arguments and prints the handle it binds, so 'lambda\\\$register\\\$3' finds the instruction that creates that lambda. Use it instead of reading a long method's full listing. For class-level bytecode overview use mixin_class_bytecode. Works on project classes after a build. If the IDE is indexing, the call waits for indexing to finish rather than failing (jarPath lookups never wait).")
     @Suppress("unused")
     suspend fun mixin_method_bytecode(
         className: String,
@@ -287,11 +288,18 @@ class BytecodeInspectionToolset : McpToolset {
         methodDescriptor: String? = null,
         module: String? = null,
         jarPath: String? = null,
+        regexPattern: String? = null,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
+        val instructionPattern: Regex? = try {
+            regexPattern?.takeIf { it.isNotBlank() }?.let { Regex(it) }
+        } catch (e: java.util.regex.PatternSyntaxException) {
+            return McpToolCallResult.error("Invalid regexPattern: ${e.message}")
+        }
+
         val outcome: ScopedLocate = if (!jarPath.isNullOrBlank()) {
-            withContext(Dispatchers.IO) { locateInJar(jarPath, className, module) }
+            withContext(Dispatchers.IO) { locateInJar(project.basePath, jarPath, className, module) }
         } else {
             smartReadAction(project) { locateScoped(project, className, module) }
         }
@@ -307,6 +315,29 @@ class BytecodeInspectionToolset : McpToolset {
             methodName,
             methodDescriptor,
         )
+
+        if (result != null && instructionPattern != null) {
+            val filtered: String = filterInstructions(result, instructionPattern)
+                ?: return McpToolCallResult.text(
+                    "=== $className#$methodName (bytecode${scoped.originNote}) ===\n\n" +
+                        "No instruction matches regexPattern \"$regexPattern\" (${countInstructions(result)} " +
+                        "instructions scanned). The pattern is matched against each instruction's text, e.g. " +
+                        "'INVOKEVIRTUAL net/minecraft/world/entity/LivingEntity.hurt'; drop regexPattern for the full listing.",
+                )
+            return McpToolCallResult.text(buildString {
+                append(staleWarning(located))
+                appendLine(
+                    "=== $className#$methodName (bytecode${scoped.originNote}, instructions matching \"$regexPattern\" " +
+                        "of ${countInstructions(result)}) ===",
+                )
+                appendLine()
+                append(filtered)
+                methodVariantNote(scoped.report, methodName, methodDescriptor)?.let { note ->
+                    appendLine()
+                    append(note)
+                }
+            })
+        }
 
         if (result != null) {
             return McpToolCallResult.text(buildString {

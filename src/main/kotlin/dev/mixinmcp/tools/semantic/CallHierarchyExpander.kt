@@ -25,8 +25,10 @@ import dev.mixinmcp.resolve.FqcnResolver
 import dev.mixinmcp.resolve.PsiDescriptors
 import org.jetbrains.uast.UCallExpression
 import org.jetbrains.uast.UCallableReferenceExpression
+import org.jetbrains.uast.UClass
 import org.jetbrains.uast.UElement
 import org.jetbrains.uast.UField
+import org.jetbrains.uast.ULambdaExpression
 import org.jetbrains.uast.UMethod
 import org.jetbrains.uast.UastCallKind
 import org.jetbrains.uast.getUastParentOfType
@@ -158,48 +160,97 @@ internal object CallHierarchyExpander {
 
         val childLevel: Int = depth + 1
         val indent: String = "  ".repeat(depth)
+        val target: BytecodeAnalyzer.InvokeTarget = invokeTargetOf(method)
+        val (groups: List<CallerGroup>, more: Boolean) =
+            collectCallerGroups(method, scope, budget.maxResults - budget.used)
 
-        MethodReferencesSearch.search(method, scope, false).forEach(Processor<PsiReference> { ref ->
-            if (!budget.tryConsume()) return@Processor false
+        for (group: CallerGroup in groups) {
+            ProgressManager.checkCanceled()
+            if (!budget.tryConsume()) break
 
-            val element: PsiElement = ref.element
+            val element: PsiElement = group.refs.first()
             val filePath: String = element.containingFile?.virtualFile
                 ?.let { projectRelativePath(project, it) } ?: "(unknown)"
             val line: Int = lineOf(project, element)
             val raw: String = element.text
             val snippet: String = raw.take(80).let { s -> if (raw.length > 80) "$s..." else s }
 
-            // Java: PSI tree walk finds PsiMethod directly. For Kotlin / other
-            // JVM languages, UAST bridges to a light PsiMethod so one pass
-            // handles every language whose UAST plugin is loaded (Kotlin is
-            // bundled with recent IDEA, so this covers most mod projects).
-            val enclosing: PsiMethod? = PsiTreeUtil.getParentOfType(element, PsiMethod::class.java)
-                ?: element.getUastParentOfType<UMethod>()?.javaPsi
+            val enclosing: PsiMethod? = group.enclosing
             if (enclosing == null) {
                 out.append(indent)
                     .append("[L").append(childLevel).append("] ").append(nonMethodContextOf(element))
                     .append("  at ").append(filePath).append(":").append(line)
                     .append("  : ").append(snippet)
                     .appendLine()
-                return@Processor true
+                continue
             }
 
             val key: String = cycleKeyOf(enclosing)
             val isCycle: Boolean = !visited.add(key)
+            val tags: List<OrdinalTag> = repeatedInvokeTags(project, ordinalsOf(project, enclosing), target, true)
+            val shownLines: Set<Int> = tags.flatMap { tag -> tag.sites.mapNotNull { it.line } }.toSet() + line
+            val otherRefLines: List<Int> = group.refs.drop(1)
+                .map { lineOf(project, it) }
+                .filter { it > 0 && it !in shownLines }
+                .distinct()
 
             out.append(indent)
                 .append("[L").append(childLevel).append("] ")
                 .append(presentableSignature(enclosing))
                 .append("  at ").append(filePath).append(":").append(line)
                 .append("  : ").append(snippet)
+            appendTags(out, tags)
+            if (otherRefLines.isNotEmpty()) {
+                out.append("  (also line").append(if (otherRefLines.size > 1) "s " else " ")
+                    .append(otherRefLines.joinToString(", ")).append(')')
+            }
             if (isCycle) out.append("  [cycle]")
             out.appendLine()
 
             if (!isCycle) {
                 expandCallers(project, enclosing, childLevel, maxDepth, scope, visited, budget, out)
             }
+        }
+        if (more) budget.truncated = true
+    }
+
+    private class CallerGroup(val enclosing: PsiMethod?, val refs: MutableList<PsiElement>)
+
+    /** Groups references by calling method; stops once a group beyond [limit] appears. */
+    private fun collectCallerGroups(
+        method: PsiMethod,
+        scope: GlobalSearchScope,
+        limit: Int,
+    ): Pair<List<CallerGroup>, Boolean> {
+        val groups: LinkedHashMap<PsiElement, CallerGroup> = LinkedHashMap()
+        var more = false
+        MethodReferencesSearch.search(method, scope, true).forEach(Processor<PsiReference> { ref ->
+            ProgressManager.checkCanceled()
+            val element: PsiElement = ref.element
+            val (groupKey: PsiElement, enclosing: PsiMethod?) = enclosingMethodOf(element) ?: (element to null)
+            val existing: CallerGroup? = groups[groupKey]
+            if (existing != null) {
+                existing.refs.add(element)
+                return@Processor true
+            }
+            if (groups.size >= limit) {
+                more = true
+                return@Processor false
+            }
+            groups[groupKey] = CallerGroup(enclosing, mutableListOf(element))
             true
         })
+        return groups.values.toList() to more
+    }
+
+    /**
+     * Java PSI gives the PsiMethod directly; other JVM languages go through UAST, keyed by the
+     * source declaration because UAST wrappers are not stable across lookups.
+     */
+    private fun enclosingMethodOf(element: PsiElement): Pair<PsiElement, PsiMethod>? {
+        PsiTreeUtil.getParentOfType(element, PsiMethod::class.java)?.let { return it to it }
+        val uMethod: UMethod = element.getUastParentOfType<UMethod>() ?: return null
+        return (uMethod.sourcePsi ?: uMethod.javaPsi) to uMethod.javaPsi
     }
 
     // ------------------------------------------------------------------
@@ -260,8 +311,8 @@ internal object CallHierarchyExpander {
         val childLevel: Int = depth + 1
         val indent: String = "  ".repeat(depth)
 
-        val callees: List<BytecodeAnalyzer.CalleeRef>? = loadCallees(project, target)
-        if (callees == null) {
+        val listing: CalleeListing? = loadCallees(project, target)
+        if (listing == null) {
             // Emitted at every depth so deeper leaves read as terminal rather
             // than depth-capped.
             out.append(indent)
@@ -273,22 +324,25 @@ internal object CallHierarchyExpander {
             return
         }
         if (depth == 0 && target.psiMethod?.body == null) {
-            // Non-Java source (Kotlin etc.) flows through UAST; binary-only
-            // classes flow through bytecode. Pick the label that actually
-            // describes where the callees came from.
+            // Non-Java source (Kotlin etc.) flows through UAST; library classes resolve to
+            // compiled PSI, which has no body even when sources are attached, and flow
+            // through bytecode.
             val label: String = if (target.psiMethod?.toUElement(UMethod::class.java)?.uastBody != null) {
-                "  (non-Java source — walking via UAST)"
+                "  (non-Java source, walked via UAST)"
             } else {
-                "  (source body not available — extracting from bytecode)"
+                "  (callees read from bytecode)"
             }
             out.append(indent).append(label).appendLine()
         }
+        val callees: List<BytecodeAnalyzer.CalleeRef> = listing.callees
         if (callees.isEmpty()) {
             if (depth == 0) {
                 out.append(indent).append("  (no outgoing calls)").appendLine()
             }
             return
         }
+        val ordinals: MethodOrdinals? =
+            ordinalsOf(project, target.owner, target.name, target.descriptor, target.psiMethod)
 
         // Dedupe by (owner, name, descriptor), preserving first-seen order.
         val seenInBody: HashSet<String> = HashSet()
@@ -309,6 +363,8 @@ internal object CallHierarchyExpander {
                 .append("[L").append(childLevel).append("] ")
                 .append(c.owner).append('#').append(c.name).append(c.descriptor)
                 .append(tag)
+            val invoked = BytecodeAnalyzer.InvokeTarget(c.owner, c.name, c.descriptor)
+            appendTags(out, repeatedInvokeTags(project, ordinals, invoked, listing.fromSource))
             if (globalCycle) out.append("  [cycle]")
             out.appendLine()
 
@@ -335,17 +391,147 @@ internal object CallHierarchyExpander {
      *     `INVOKEDYNAMIC` via the `LambdaMetafactory` impl handle (something
      *     neither source walker can see).
      */
-    private fun loadCallees(project: Project, target: CalleeTarget): List<BytecodeAnalyzer.CalleeRef>? {
+    private fun loadCallees(project: Project, target: CalleeTarget): CalleeListing? {
         val psi: PsiMethod? = target.psiMethod
-        if (psi?.body != null) return collectSourceCallees(psi.body!!)
+        if (psi?.body != null) return CalleeListing(collectSourceCallees(psi.body!!), fromSource = true)
 
         if (psi != null) {
             val uBody: UElement? = psi.toUElement(UMethod::class.java)?.uastBody
-            if (uBody != null) return collectUastCallees(uBody)
+            if (uBody != null) return CalleeListing(collectUastCallees(uBody), fromSource = true)
         }
 
         val bytes: ByteArray = ClassFileLocator.locate(project, target.owner) ?: return null
         return BytecodeAnalyzer.extractCallees(bytes, target.name, target.descriptor)
+            ?.let { CalleeListing(it, fromSource = false) }
+    }
+
+    /** [fromSource] callees name the declaring class as owner, not the owner written in the INVOKE. */
+    private class CalleeListing(val callees: List<BytecodeAnalyzer.CalleeRef>, val fromSource: Boolean)
+
+    // ------------------------------------------------------------------
+    // Mixin INVOKE ordinals
+    // ------------------------------------------------------------------
+
+    private class MethodOrdinals(
+        val sites: Map<BytecodeAnalyzer.InvokeTarget, List<BytecodeAnalyzer.InvokeSite>>,
+        val fromBytecode: Boolean,
+        val qualifier: String?,
+    )
+
+    internal class OrdinalTag(val sites: List<BytecodeAnalyzer.InvokeSite>, val qualifiers: List<String>)
+
+    private const val MAX_LISTED_SITES: Int = 10
+
+    private fun ordinalsOf(project: Project, method: PsiMethod): MethodOrdinals? {
+        val target: BytecodeAnalyzer.InvokeTarget = invokeTargetOf(method)
+        return ordinalsOf(project, target.owner, target.name, target.descriptor, method)
+    }
+
+    /**
+     * Bytecode when the class file is readable; otherwise source order, which misses compiler-generated
+     * calls (boxing, string switch, enum switch maps) and may order calls differently.
+     */
+    private fun ordinalsOf(
+        project: Project,
+        owner: String,
+        name: String,
+        descriptor: String,
+        psiMethod: PsiMethod?,
+    ): MethodOrdinals? {
+        val found: ClassFileLocator.LocateResult.Found? =
+            psiMethod?.containingClass?.let { ClassFileLocator.locateForClass(it) } as? ClassFileLocator.LocateResult.Found
+                ?: ClassFileLocator.locateDetailed(project, owner) as? ClassFileLocator.LocateResult.Found
+        if (found != null) {
+            val invocations: List<BytecodeAnalyzer.Invocation>? =
+                BytecodeAnalyzer.extractInvocations(found.bytes, name, descriptor)
+            if (invocations != null) {
+                val qualifier: String? = if (found.maybeStale) "build may be stale" else null
+                return MethodOrdinals(BytecodeAnalyzer.invokeOrdinals(invocations), fromBytecode = true, qualifier)
+            }
+        }
+        val source: List<BytecodeAnalyzer.Invocation> = psiMethod?.let { sourceInvocations(project, it) } ?: return null
+        return MethodOrdinals(BytecodeAnalyzer.invokeOrdinals(source), fromBytecode = false, "source order")
+    }
+
+    /**
+     * Calls in evaluation order, skipping lambda bodies and nested classes because their INVOKEs live
+     * in other methods. Method references compile to INVOKEDYNAMIC and are not counted.
+     */
+    private fun sourceInvocations(project: Project, method: PsiMethod): List<BytecodeAnalyzer.Invocation>? {
+        val body: UElement = method.toUElement(UMethod::class.java)?.uastBody ?: return null
+        val invocations: MutableList<BytecodeAnalyzer.Invocation> = mutableListOf()
+        body.accept(object : AbstractUastVisitor() {
+            override fun visitLambdaExpression(node: ULambdaExpression): Boolean = true
+
+            override fun visitClass(node: UClass): Boolean = true
+
+            override fun visitMethod(node: UMethod): Boolean = true
+
+            override fun afterVisitCallExpression(node: UCallExpression) {
+                val resolved: PsiMethod = node.resolve() ?: return
+                val anchor: PsiElement? = node.methodIdentifier?.sourcePsi ?: node.sourcePsi
+                val line: Int? = anchor?.let { lineOf(project, it) }?.takeIf { it > 0 }
+                invocations.add(BytecodeAnalyzer.Invocation(invokeTargetOf(resolved), line))
+            }
+        })
+        return invocations
+    }
+
+    /**
+     * Tags for [invoked] when [ordinals] holds it more than once. With [declaredOwner], [invoked] names
+     * the declaring class, so bytecode calls through a subclass or interface owner are matched too and
+     * tagged with that owner, which is what the @At target must use.
+     */
+    private fun repeatedInvokeTags(
+        project: Project,
+        ordinals: MethodOrdinals?,
+        invoked: BytecodeAnalyzer.InvokeTarget,
+        declaredOwner: Boolean,
+    ): List<OrdinalTag> {
+        if (ordinals == null) return emptyList()
+        val matchOtherOwners: Boolean = declaredOwner && ordinals.fromBytecode
+        return ordinals.sites.entries
+            .filter { (candidate, sites) ->
+                sites.size > 1 && (
+                    candidate == invoked ||
+                        matchOtherOwners &&
+                        candidate.name == invoked.name &&
+                        candidate.descriptor == invoked.descriptor &&
+                        declaringTargetOf(project, candidate) == invoked
+                    )
+            }
+            .map { (candidate, sites) ->
+                val ownerNote: String? = if (candidate == invoked) null else "INVOKE owner ${candidate.owner}"
+                OrdinalTag(sites, listOfNotNull(ownerNote, ordinals.qualifier))
+            }
+    }
+
+    private fun declaringTargetOf(
+        project: Project,
+        invoked: BytecodeAnalyzer.InvokeTarget,
+    ): BytecodeAnalyzer.InvokeTarget? {
+        val owner: PsiClass = FqcnResolver.resolveNested(project, invoked.owner) ?: return null
+        return owner.findMethodsByName(invoked.name, true)
+            .firstOrNull { PsiDescriptors.methodDescriptor(it) == invoked.descriptor }
+            ?.let { invokeTargetOf(it) }
+    }
+
+    private fun invokeTargetOf(method: PsiMethod): BytecodeAnalyzer.InvokeTarget {
+        val ref: BytecodeAnalyzer.CalleeRef = calleeRefFor(method, BytecodeAnalyzer.CalleeKind.METHOD)
+        return BytecodeAnalyzer.InvokeTarget(ref.owner, ref.name, ref.descriptor)
+    }
+
+    private fun appendTags(out: StringBuilder, tags: List<OrdinalTag>) {
+        for (tag: OrdinalTag in tags) out.append("  ").append(formatOrdinalTag(tag))
+    }
+
+    internal fun formatOrdinalTag(tag: OrdinalTag): String {
+        val head: String = (listOf("x${tag.sites.size}") + tag.qualifiers).joinToString(", ")
+        val listed: String = tag.sites.take(MAX_LISTED_SITES).joinToString(", ") { site ->
+            if (site.line != null) "ordinal ${site.ordinal} line ${site.line}" else "ordinal ${site.ordinal}"
+        }
+        val rest: Int = tag.sites.size - MAX_LISTED_SITES
+        return if (rest > 0) "[$head: $listed, +$rest more]" else "[$head: $listed]"
     }
 
     /**

@@ -42,6 +42,12 @@ object BytecodeAnalyzer {
         val kind: CalleeKind,
     )
 
+    data class InvokeTarget(val owner: String, val name: String, val descriptor: String)
+
+    data class Invocation(val target: InvokeTarget, val line: Int?)
+
+    data class InvokeSite(val ordinal: Int, val line: Int?)
+
     data class MethodInfo(
         val access: Int,
         val name: String,
@@ -310,6 +316,57 @@ object BytecodeAnalyzer {
         if (!methodHasCode) return emptyList()
         return callees
     }
+
+    /**
+     * INVOKE* instructions of one method in bytecode order, owner as written in the instruction.
+     * INVOKEDYNAMIC is left out: Mixin's INVOKE point never matches it. Null when the method is absent.
+     */
+    fun extractInvocations(
+        classBytes: ByteArray,
+        methodName: String,
+        methodDescriptor: String,
+    ): List<Invocation>? {
+        var invocations: MutableList<Invocation>? = null
+        ClassReader(classBytes).accept(
+            object : ClassVisitor(Opcodes.ASM9) {
+                override fun visitMethod(
+                    access: Int,
+                    name: String,
+                    descriptor: String,
+                    signature: String?,
+                    exceptions: Array<out String>?,
+                ): MethodVisitor? {
+                    if (name != methodName || descriptor != methodDescriptor) return null
+                    val found: MutableList<Invocation> = mutableListOf()
+                    invocations = found
+                    return object : MethodVisitor(Opcodes.ASM9) {
+                        private var line: Int? = null
+
+                        override fun visitLineNumber(line: Int, start: Label) {
+                            this.line = line
+                        }
+
+                        override fun visitMethodInsn(
+                            opcode: Int,
+                            owner: String,
+                            name: String,
+                            descriptor: String,
+                            isInterface: Boolean,
+                        ) {
+                            found.add(Invocation(InvokeTarget(owner.replace('/', '.'), name, descriptor), line))
+                        }
+                    }
+                }
+            },
+            ClassReader.SKIP_FRAMES,
+        )
+        return invocations
+    }
+
+    fun invokeOrdinals(invocations: List<Invocation>): Map<InvokeTarget, List<InvokeSite>> =
+        invocations
+            .groupBy({ it.target }, { it.line })
+            .mapValues { (_, lines) -> lines.mapIndexed { ordinal, line -> InvokeSite(ordinal, line) } }
 
     /**
      * CRC32 over a canonical encoding of the method's code. Labels are numbered in

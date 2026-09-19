@@ -65,6 +65,13 @@ class ParameterAliasesTest {
     }
 
     @Test
+    fun fileFilterIsRewrittenToFileMask() {
+        val args: JsonObject = buildJsonObject { put("fileFilter", "*.java") }
+        val result = applyParameterAliases(args, emptyMap(), setOf("regexPattern", "fileMask"))
+        assertEquals(setOf("fileMask"), (result as AliasResult.Rewritten).args.keys)
+    }
+
+    @Test
     fun synonymThatMatchesTwoDeclaredNamesIsLeftAlone() {
         val args: JsonObject = buildJsonObject { put("method", "tick") }
         val result = applyParameterAliases(args, emptyMap(), setOf("methodName", "memberName", "kind"))

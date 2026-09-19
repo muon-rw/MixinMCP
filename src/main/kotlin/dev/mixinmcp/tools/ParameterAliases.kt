@@ -61,6 +61,7 @@ internal object ParameterSynonyms {
         "entrypath" to listOf("entry"),
         "mask" to listOf("fileMask"),
         "glob" to listOf("fileMask"),
+        "filefilter" to listOf("fileMask"),
         "prefix" to listOf("pathPrefix"),
         "descriptor" to listOf("methodDescriptor"),
         "params" to listOf("parameterTypes"),

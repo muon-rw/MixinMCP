@@ -2,6 +2,32 @@
 
 # MixinMCP Changelog
 
+## [Unreleased]
+
+### Added
+
+- `mixin_list_jar_entries` can grep: `regexPattern` searches the text files of each jar, and `jarPath` accepts a folder of jars. This answers questions like "which mods in this pack depend on X" and reaches runtime-only jars that `mixin_search_in_deps` cannot
+- `mixin_method_bytecode`: `regexPattern` shows only the matching instructions, each with its line and Mixin ordinal. Searching for a lambda's name finds where it is created
+- `mixin_move_file`: `dryRun` and `ignoreConflicts`, matching the other refactor tools
+- `mixin_search_in_deps` names the jars it could not search (runtime-only, or never decompiled)
+- Class-not-found errors suggest classes with the same simple name, and point out a newly created file the IDE has not picked up yet
+
+### Changed
+
+- `mixin_call_hierarchy` lists each calling method once, with the Mixin ordinal and line of every call when it calls the target more than once
+- `mixin_get_dep_source(path=...)` lists the other jars that ship the same path, such as a datapack overriding a vanilla file
+
+### Fixed
+
+- `mixin_get_dep_source(className=...)` failing on binary-only mods and runtime-only classes
+- `mixin_find_class` line numbers for binary-only mods not matching `mixin_get_dep_source` and `mixin_search_in_deps`
+- `mixin_get_dep_source(path=...)` missing vanilla data and asset files
+- `mixin_move_file` moving a class despite access conflicts, breaking the build
+- `methodDescriptor` picking the wrong overload for methods with generic parameters
+- `mixin_call_hierarchy` including callers of other overloads
+- Relative paths not working in `mixin_refresh_vfs`, `jarPath`, and `jar://` URLs
+- Misleading labels: a repeated scope tag in `mixin_find_class`, data files shown as `.class` artifacts in `mixin_get_dep_source`, and a wrong "source not available" note in `mixin_call_hierarchy`
+
 ## [1.5.1]
 
 ### Fixed

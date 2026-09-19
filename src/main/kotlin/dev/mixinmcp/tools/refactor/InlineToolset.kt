@@ -184,7 +184,7 @@ class InlineToolset : McpToolset {
         val prepared: Prep = smartReadAction(project) {
             val psiClass = FqcnResolver.resolveNested(project, className)
                 ?: return@smartReadAction Prep.Failure(
-                    "Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}",
+                    FqcnResolver.notFoundMessage(project, className),
                 )
             val field: PsiField = psiClass.findFieldByName(memberName, true)
                 ?: return@smartReadAction Prep.Failure(

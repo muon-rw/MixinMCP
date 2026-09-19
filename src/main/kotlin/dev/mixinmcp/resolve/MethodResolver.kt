@@ -3,6 +3,8 @@ package dev.mixinmcp.resolve
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiMethod
+import com.intellij.psi.PsiType
+import com.intellij.psi.util.TypeConversionUtil
 import com.intellij.util.concurrency.annotations.RequiresReadLock
 
 /**
@@ -19,9 +21,9 @@ object MethodResolver {
     }
 
     /**
-     * Resolves a method by JVM descriptor. Tries PSI matching first; if that fails
-     * (e.g. remapped names differ), falls back to bytecode-level match by exact
-     * descriptor and maps back to PSI by parameter count.
+     * Resolves a method by JVM descriptor. Tries the erased PSI descriptor, then type-name
+     * matching (e.g. remapped names differ), then a bytecode-level match mapped back to PSI
+     * when exactly one overload has that parameter count.
      */
     @RequiresReadLock
     fun resolveByDescriptor(
@@ -35,6 +37,7 @@ object MethodResolver {
 
         val methods: List<PsiMethod> = findMethodsByName(psiClass, methodName)
         if (methods.isEmpty()) return null
+        methods.firstOrNull { matchesDescriptor(it, descriptor) }?.let { return it }
 
         val canonicalTypes: List<String> = DescriptorParser.parseParameterTypes(descriptor)
             ?: return null
@@ -51,12 +54,7 @@ object MethodResolver {
         }
         if (bytecodeMatch == null) return null
 
-        val paramCount: Int = canonicalTypes.size
-        val sameParamCount: List<PsiMethod> = methods.filter { it.parameterList.parametersCount == paramCount }
-        if (sameParamCount.size == 1) return sameParamCount.first()
-        if (sameParamCount.isEmpty()) return null
-
-        return sameParamCount.first()
+        return methods.singleOrNull { it.parameterList.parametersCount == canonicalTypes.size }
     }
 
     /**
@@ -77,7 +75,7 @@ object MethodResolver {
         methodDescriptor: String? = null,
     ): Resolution {
         val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
-            ?: return Resolution.Error("Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}")
+            ?: return Resolution.Error(FqcnResolver.notFoundMessage(project, className))
 
         val methods: List<PsiMethod> = findMethodsByName(psiClass, methodName)
 
@@ -114,7 +112,8 @@ object MethodResolver {
             } else null
 
             val matched: List<PsiMethod> = if (canonicalTypes != null) {
-                methods.filter { matchesDescriptorTypes(it, canonicalTypes, effectiveTypes) }
+                methods.filter { matchesDescriptor(it, methodDescriptor.orEmpty()) }
+                    .ifEmpty { methods.filter { matchesDescriptorTypes(it, canonicalTypes, effectiveTypes) } }
             } else {
                 methods.filter { matchesParameterTypes(it, effectiveTypes) }
             }
@@ -182,18 +181,24 @@ object MethodResolver {
         return psiClass.methods.filter { it.name == methodName }
     }
 
+    private fun matchesDescriptor(method: PsiMethod, descriptor: String): Boolean =
+        PsiDescriptors.methodDescriptor(method).substringBefore(')') == descriptor.trim().substringBefore(')')
+
     private fun matchesParameterTypes(method: PsiMethod, parameterTypes: List<String>): Boolean {
         val params = method.parameterList.parameters
         return params.size == parameterTypes.size &&
             params.zip(parameterTypes).all { (param, expectedType) ->
+                val erased: PsiType = TypeConversionUtil.erasure(param.type) ?: param.type
                 param.type.presentableText == expectedType ||
-                    param.type.canonicalText == expectedType
+                    param.type.canonicalText == expectedType ||
+                    erased.presentableText == expectedType ||
+                    erased.canonicalText == expectedType
             }
     }
 
     /**
-     * Matches a PsiMethod against descriptor-derived types. Tries canonical and
-     * simple names since PSI may use either (remapped vs. fully-qualified).
+     * Matches a PsiMethod's erased parameter types against descriptor-derived types. Tries
+     * canonical and simple names since PSI may use either (remapped vs. fully-qualified).
      */
     private fun matchesDescriptorTypes(
         method: PsiMethod,
@@ -204,9 +209,10 @@ object MethodResolver {
         if (params.size != canonicalTypes.size) return false
         return params.zip(canonicalTypes.zip(simpleTypes)).all { (param, expected) ->
             val (canonical, simple) = expected
-            param.type.canonicalText == canonical ||
-                param.type.presentableText == canonical ||
-                param.type.presentableText == simple
+            val erased: PsiType = TypeConversionUtil.erasure(param.type) ?: param.type
+            erased.canonicalText == canonical ||
+                erased.presentableText == canonical ||
+                erased.presentableText == simple
         }
     }
 

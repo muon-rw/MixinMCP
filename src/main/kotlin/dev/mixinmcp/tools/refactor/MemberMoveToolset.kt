@@ -202,7 +202,7 @@ class MemberMoveToolset : McpToolset {
         }
 
         val target: PsiClass = FqcnResolver.resolveNested(project, targetClassName!!)
-            ?: return Prep.Failure("Class not found: $targetClassName. ${FqcnResolver.CLASS_NOT_FOUND_HINT}")
+            ?: return Prep.Failure(FqcnResolver.notFoundMessage(project, targetClassName))
         val targetDisplay: String = target.qualifiedName
             ?: return Prep.Failure("$targetClassName has no qualified name; it cannot be a move target.")
         RefactorSupport.guardJavaSourceTarget(project, target, targetDisplay)?.let { return Prep.Failure(it) }

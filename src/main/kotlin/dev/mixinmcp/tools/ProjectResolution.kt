@@ -7,7 +7,15 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.newvfs.ManagingFS
+import java.io.File
 import kotlin.coroutines.CoroutineContext
+
+/** [path] with `/` separators, resolved against [basePath] unless it is already absolute. */
+internal fun resolveAgainstBase(basePath: String?, path: String): String {
+    val normalized: String = path.trim().replace('\\', '/')
+    if (basePath == null || normalized.startsWith("/") || File(normalized).isAbsolute) return normalized
+    return basePath.replace('\\', '/').trimEnd('/') + "/" + normalized.removePrefix("./")
+}
 
 /**
  * Path of [file] relative to the project root, so tool output does not repeat the long absolute prefix

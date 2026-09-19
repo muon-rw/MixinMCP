@@ -27,6 +27,25 @@ class DepSourceAddressingTest {
     }
 
     @Test
+    fun relativeDiskPartsResolveAgainstTheProject() {
+        assertEquals(
+            "jar://C:/p/mod/libs/x.jar!/META-INF/mods.toml",
+            normalizeSourceUrl("jar://libs/x.jar!/META-INF/mods.toml", "C:/p/mod"),
+        )
+        assertEquals("jar://C:/p/mod/libs/x.jar!/a.json", normalizeSourceUrl("libs\\x.jar!/a.json", "C:\\p\\mod\\"))
+        assertEquals("jar://C:/abs/x.jar!/a.json", normalizeSourceUrl("jar://C:/abs/x.jar!/a.json", "C:/p/mod"))
+        assertEquals("file://C:/p/mod/build.gradle", normalizeSourceUrl("./build.gradle", "C:/p/mod"))
+    }
+
+    @Test
+    fun resolveAgainstBaseKeepsAbsolutePaths() {
+        assertEquals("C:/p/mod/src/A.java", dev.mixinmcp.tools.resolveAgainstBase("C:/p/mod", "src\\A.java"))
+        assertEquals("D:/x/y.jar", dev.mixinmcp.tools.resolveAgainstBase("C:/p/mod", "D:\\x\\y.jar"))
+        assertEquals("/opt/y.jar", dev.mixinmcp.tools.resolveAgainstBase("C:/p/mod", "/opt/y.jar"))
+        assertEquals("rel/y.jar", dev.mixinmcp.tools.resolveAgainstBase(null, "rel\\y.jar"))
+    }
+
+    @Test
     fun jarEntryUrlJoinsWithOneSeparator() {
         assertEquals("jar://C:/m/x.jar!/META-INF/mods.toml", jarEntryUrl("C:\\m\\x.jar", "/META-INF/mods.toml"))
         assertEquals("jar://C:/m/x.jar!/assets/a/lang/en_us.json", jarEntryUrl("C:/m/x.jar/", "assets\\a\\lang\\en_us.json"))

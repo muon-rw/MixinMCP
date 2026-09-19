@@ -138,7 +138,7 @@ class SemanticNavigationToolset : McpToolset {
 
         return when {
             result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Class not found: $className\n${FqcnResolver.CLASS_NOT_FOUND_HINT}")
+            else -> McpToolCallResult.error(smartReadAction(project) { FqcnResolver.notFoundMessage(project, className) })
         }
     }
 
@@ -288,7 +288,7 @@ class SemanticNavigationToolset : McpToolset {
 
         return when {
             result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Class not found: $className\n${FqcnResolver.CLASS_NOT_FOUND_HINT}")
+            else -> McpToolCallResult.error(smartReadAction(project) { FqcnResolver.notFoundMessage(project, className) })
         }
     }
 
@@ -309,7 +309,7 @@ class SemanticNavigationToolset : McpToolset {
         return smartReadAction(project) {
             val targetClass: PsiClass = FqcnResolver.resolveNested(project, className)
                 ?: return@smartReadAction McpToolCallResult.error(
-                    "Class not found: $className (no mixin scan performed)\n${FqcnResolver.CLASS_NOT_FOUND_HINT}",
+                    FqcnResolver.notFoundMessage(project, className, "Class not found: $className (no mixin scan performed)"),
                 )
             val normalizedTarget: String = targetClass.qualifiedName ?: className.replace('/', '.')
             val mixinAnnotationClass: PsiClass? =
@@ -770,7 +770,7 @@ class SemanticNavigationToolset : McpToolset {
 
         return when {
             result != null -> McpToolCallResult.text(result)
-            else -> McpToolCallResult.error("Class not found: $className\n${FqcnResolver.CLASS_NOT_FOUND_HINT}")
+            else -> McpToolCallResult.error(smartReadAction(project) { FqcnResolver.notFoundMessage(project, className) })
         }
     }
 
@@ -821,7 +821,7 @@ class SemanticNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Finds callers or callees of a method, recursively up to maxDepth levels. Use this tool to trace execution flow when writing mixins. direction: callers (default) — expands each caller into its own callers; callees — walks the method body for outgoing calls, recursing into each callee's body. Callees cover direct method calls, constructor invocations (new Foo(...)), and method references (Foo::bar, Foo::new); synthetic lambda targets are resolved through INVOKEDYNAMIC bootstrap handles so the real lambda\$X\$N target is reported (tagged [lambda]), with constructors tagged [ctor]. Output is owner#name(descriptor) in JVM format (ready to paste into @At(target=\"...\")), indented per depth with [L1], [L2] tags; cycles and already-expanded nodes are marked inline with [cycle]. Callees falls back to bytecode INVOKE analysis when a method body is not available (binary merged JAR classes). maxDepth: default 3 (1 = direct callers/callees only, matching legacy behavior); must be between 1 and 10. maxResults: default 50, shared global budget across all depths and branches; raise for wide hierarchies. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\".")
+    @McpDescription("Finds callers or callees of a method, recursively up to maxDepth levels. Use this tool to trace execution flow when writing mixins. direction: callers (default) — expands each caller into its own callers; callees — walks the method body for outgoing calls, recursing into each callee's body. Callees cover direct method calls, constructor invocations (new Foo(...)), and method references (Foo::bar, Foo::new); synthetic lambda targets are resolved through INVOKEDYNAMIC bootstrap handles so the real lambda\$X\$N target is reported (tagged [lambda]), with constructors tagged [ctor]. Output is owner#name(descriptor) in JVM format (ready to paste into @At(target=\"...\")), indented per depth with [L1], [L2] tags; cycles and already-expanded nodes are marked inline with [cycle]. When one method invokes the target more than once, its caller or callee line gets [xN: ordinal 0 line L, ...] with each call's Mixin INVOKE ordinal, read from bytecode, or marked source order when the class is not built. Callees falls back to bytecode INVOKE analysis when a method body is not available (binary merged JAR classes). maxDepth: default 3 (1 = direct callers/callees only, matching legacy behavior); must be between 1 and 10. maxResults: default 50, shared global budget across all depths and branches; raise for wide hierarchies. For overloaded methods, pass parameterTypes or methodDescriptor to disambiguate. methodDescriptor accepts JVM format (e.g. (Lnet/minecraft/...;)V) — same as in mixin @Inject annotations. For parameterless methods: parameterTypes: [] or methodDescriptor: \"()V\".")
     @Suppress("unused")
     suspend fun mixin_call_hierarchy(
         className: String,

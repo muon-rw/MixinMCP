@@ -369,11 +369,11 @@ object ClassVariants {
         else -> ""
     }
 
-    fun scopeNote(owners: List<String>): String {
-        val notes: List<String> = buildList {
-            if (owners.any { it.endsWith(" (RUNTIME)") }) add("RUNTIME: that module cannot compile against this class")
-            if (owners.any { it.endsWith(" (TEST)") }) add("TEST: only that module's test sources can")
+    fun explainScopeTags(owners: List<String>): List<String> = owners.map { owner ->
+        when {
+            owner.endsWith(" (RUNTIME)") -> owner.removeSuffix(" (RUNTIME)") + " (RUNTIME, cannot compile against this class)"
+            owner.endsWith(" (TEST)") -> owner.removeSuffix(" (TEST)") + " (TEST, test sources only)"
+            else -> owner
         }
-        return if (notes.isEmpty()) "" else " (${notes.joinToString("; ")})"
     }
 }

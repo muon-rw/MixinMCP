@@ -118,12 +118,18 @@ class SymbolRefactorToolset : McpToolset {
             "ServiceLoader files, etc. are updated automatically when the relevant IntelliJ language plugins " +
             "(Minecraft Development, Forge/Fabric support) contribute PSI references; plain-string occurrences in " +
             "non-Java files are also rewritten. Errors instead of overwriting if a file with the same name already " +
-            "exists in the target package, or if the source file is outside any source root.",
+            "exists in the target package, or if the source file is outside any source root. On conflicts (e.g. " +
+            "package-private members that would no longer be accessible), each is reported with its file and " +
+            "tagged [library] or [source], and nothing is moved; ignoreConflicts=true proceeds anyway, same as the " +
+            "IDE conflict dialog's Continue button. dryRun=true reports the target path, per-file usage counts, " +
+            "and conflicts without modifying anything.",
     )
     @Suppress("unused")
     suspend fun mixin_move_file(
         className: String,
         targetPackage: String,
+        ignoreConflicts: Boolean = false,
+        dryRun: Boolean = false,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
@@ -140,7 +146,7 @@ class SymbolRefactorToolset : McpToolset {
             is PreparationResult.Ok -> r.preparation
         }
 
-        return performMove(project, prep)
+        return runMove(project, prep, ignoreConflicts, dryRun)
     }
 
     @McpToolHints(readOnlyHint = FALSE, destructiveHint = TRUE, openWorldHint = FALSE)
@@ -251,7 +257,7 @@ class SymbolRefactorToolset : McpToolset {
         return smartReadAction(project) {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
                 ?: return@smartReadAction PreparationResult.Failure(
-                    "Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}",
+                    FqcnResolver.notFoundMessage(project, className),
                 )
 
             val target: PsiNamedElement
@@ -492,12 +498,14 @@ class SymbolRefactorToolset : McpToolset {
 
     // ───────────────────────────────────── Move file internals ─────────────────────────────────────
 
-    private data class MovePreparation(
+    internal data class MovePreparation(
         val psiFile: PsiFile,
         val targetDir: PsiDirectory,
+        val targetPackage: String,
         val sourceFqn: String,
         val sourceRelative: String,
         val targetRelative: String,
+        val createdDir: VirtualFile?,
         val moveMessage: String?,
     )
 
@@ -518,7 +526,7 @@ class SymbolRefactorToolset : McpToolset {
         val srcInfo: PreparationResult<SourceInfo> = smartReadAction(project) {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
                 ?: return@smartReadAction PreparationResult.Failure(
-                    "Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}",
+                    FqcnResolver.notFoundMessage(project, className),
                 )
             if (psiClass.containingClass != null) {
                 return@smartReadAction PreparationResult.Failure(
@@ -562,6 +570,7 @@ class SymbolRefactorToolset : McpToolset {
         val sourceRelative: String = RefactorSupport.projectRelative(project, info.virtualFile)
         val fileName: String = info.virtualFile.name
         var targetDir: VirtualFile? = null
+        var createdDir: VirtualFile? = null
         var conflict: String? = null
         var ioError: String? = null
 
@@ -571,11 +580,13 @@ class SymbolRefactorToolset : McpToolset {
                     .withName("MixinMCP Prepare Move Target: $targetPackage")
                     .withGroupId("MixinMCP")
                     .run<Throwable> {
+                        val firstMissing: String? = firstMissingDirectory(info.sourceRoot, packageRelative)
                         val dir: VirtualFile = VfsUtil.createDirectoryIfMissing(info.sourceRoot, packageRelative)
                             ?: throw IllegalStateException(
                                 "Could not create target directory under source root ${info.sourceRoot.path}/$packageRelative",
                             )
                         targetDir = dir
+                        createdDir = firstMissing?.let { info.sourceRoot.findFileByRelativePath(it) }
                         val existing: VirtualFile? = dir.findChild(fileName)
                         if (existing != null) {
                             conflict = "Target package '$targetPackage' already contains a file named '$fileName' " +
@@ -612,61 +623,136 @@ class SymbolRefactorToolset : McpToolset {
                 MovePreparation(
                     psiFile = info.psiFile,
                     targetDir = targetPsiDir,
+                    targetPackage = targetPackage,
                     sourceFqn = info.psiClass.qualifiedName ?: className,
                     sourceRelative = sourceRelative,
                     targetRelative = "${RefactorSupport.projectRelative(project, resolvedTargetDir)}/$fileName",
+                    createdDir = createdDir,
                     moveMessage = moveMessage,
                 ),
             )
         }
 
+        if (finalPrep is PreparationResult.Failure) deleteIfEmpty(project, createdDir)
         return finalPrep
     }
 
-    private fun performMove(project: Project, prep: MovePreparation): McpToolCallResult {
-        var error: String? = null
-        var pushedConflicts: List<RefactorSupport.ConflictRef> = emptyList()
+    private fun firstMissingDirectory(root: VirtualFile, relativePath: String): String? {
+        val segments: List<String> = relativePath.split('/')
+        var current: VirtualFile = root
+        for ((index, segment) in segments.withIndex()) {
+            current = current.findChild(segment) ?: return segments.take(index + 1).joinToString("/")
+        }
+        return null
+    }
 
+    private fun deleteIfEmpty(project: Project, dir: VirtualFile?) {
+        if (dir == null) return
         ApplicationManager.getApplication().invokeAndWait {
-            try {
-                if (!prep.psiFile.isValid || !prep.targetDir.isValid) {
-                    error = "Source file or target directory became invalid before the move ran."
-                    return@invokeAndWait
-                }
-                val processor = HeadlessMoveFilesProcessor(
-                    project = project,
-                    elements = arrayOf<PsiElement>(prep.psiFile),
-                    newParent = prep.targetDir,
-                    searchForReferences = true,
-                    searchInComments = false,
-                    searchInNonJavaFiles = true,
-                    moveCallback = null,
-                    prepareSuccessfulCallback = null,
-                )
-                @Suppress("UsePropertyAccessSyntax") // setter is public, getter is protected
-                processor.setPreviewUsages(false)
-                processor.run()
-                pushedConflicts = processor.pushedConflicts
-                PsiDocumentManager.getInstance(project).commitAllDocuments()
-                FileDocumentManager.getInstance().saveAllDocuments()
-            } catch (t: Throwable) {
-                error = t.message ?: t.javaClass.simpleName
+            runCatching {
+                WriteCommandAction.writeCommandAction(project)
+                    .withName("MixinMCP Remove Unused Move Target")
+                    .withGroupId("MixinMCP")
+                    .run<Throwable> {
+                        if (dir.isValid && VfsUtil.collectChildrenRecursively(dir).all { it.isDirectory }) {
+                            dir.delete(this)
+                        }
+                    }
             }
         }
+    }
 
-        if (error != null) {
-            return McpToolCallResult.error("Move failed: $error")
+    private data class MoveAnalysis(
+        val conflicts: List<RefactorSupport.ConflictRef>,
+        val usagesByFile: Map<String, Int>,
+    )
+
+    internal fun runMove(
+        project: Project,
+        prep: MovePreparation,
+        ignoreConflicts: Boolean,
+        dryRun: Boolean,
+    ): McpToolCallResult {
+        val fileName: String = prep.psiFile.name
+        var analysis: MoveAnalysis? = null
+        val error: String? = RefactorSupport.runRefactoringOnEdt(project) {
+            check(prep.psiFile.isValid && prep.targetDir.isValid) { RefactorSupport.STALE_TARGET }
+            HeadlessMoveFilesProcessor(project, prep.psiFile, prep.targetDir) { conflicts, usages ->
+                val found: MoveAnalysis = ApplicationManager.getApplication().runReadAction<MoveAnalysis> {
+                    analyzeMove(project, conflicts, usages)
+                }
+                analysis = found
+                !dryRun && (found.conflicts.isEmpty() || ignoreConflicts)
+            }.run()
         }
-        flushVfsToDisk()
+        val moved: Boolean = ApplicationManager.getApplication().runReadAction<Boolean> {
+            prep.targetDir.isValid && prep.targetDir.virtualFile.findChild(fileName) != null
+        }
+        if (!moved) deleteIfEmpty(project, prep.createdDir)
 
-        return McpToolCallResult.text(buildString {
+        if (error != null) return McpToolCallResult.error("${if (dryRun) "Dry run" else "Move"} failed: $error")
+        val result: MoveAnalysis = analysis
+            ?: return McpToolCallResult.error(if (dryRun) RefactorSupport.DRY_RUN_BAIL_OUT else RefactorSupport.BAIL_OUT)
+        if (dryRun) return McpToolCallResult.text(dryRunMoveText(prep, result))
+        if (result.conflicts.isNotEmpty() && !ignoreConflicts) {
+            return McpToolCallResult.error(
+                "Cannot move ${prep.sourceFqn} to package '${prep.targetPackage}'.\n" +
+                    RefactorSupport.formatConflicts(result.conflicts),
+            )
+        }
+        if (!moved) return McpToolCallResult.error(RefactorSupport.BAIL_OUT)
+        return McpToolCallResult.text(movedText(prep, result.conflicts))
+    }
+
+    private fun analyzeMove(
+        project: Project,
+        conflicts: MultiMap<PsiElement, String>,
+        usages: Array<out UsageInfo>?,
+    ): MoveAnalysis = MoveAnalysis(
+        conflicts = RefactorSupport.renderConflicts(project, conflicts),
+        usagesByFile = usages.orEmpty()
+            .mapNotNull { usage -> usage.virtualFile?.let { RefactorSupport.projectRelative(project, it) } }
+            .groupingBy { it }
+            .eachCount(),
+    )
+
+    private fun StringBuilder.appendMovePaths(prep: MovePreparation) {
+        appendLine("  from: ${prep.sourceRelative}")
+        appendLine("  to:   ${prep.targetRelative}")
+        prep.moveMessage?.let { appendLine("  $it") }
+    }
+
+    private fun dryRunMoveText(prep: MovePreparation, analysis: MoveAnalysis): String = buildString {
+        appendLine("Dry run for move of ${prep.sourceFqn} to package '${prep.targetPackage}'")
+        appendMovePaths(prep)
+        if (prep.createdDir != null) appendLine("  Note: the target directory does not exist yet; the move creates it.")
+        appendLine()
+        if (analysis.usagesByFile.isEmpty()) {
+            appendLine("No usages found in the project.")
+        } else {
+            appendLine(
+                "Found ${analysis.usagesByFile.values.sum()} usage(s) in ${analysis.usagesByFile.size} file(s):",
+            )
+            for ((file, count) in analysis.usagesByFile.entries.sortedByDescending { it.value }) {
+                appendLine("  $file  ($count)")
+            }
+        }
+        appendLine()
+        if (analysis.conflicts.isEmpty()) {
+            appendLine("No conflicts detected.")
+        } else {
+            append(RefactorSupport.formatConflicts(analysis.conflicts))
+        }
+        appendLine("Re-run without dryRun=true to perform the move.")
+    }
+
+    private fun movedText(prep: MovePreparation, pushedConflicts: List<RefactorSupport.ConflictRef>): String =
+        buildString {
             appendLine("Moved ${prep.sourceFqn}")
-            appendLine("  from: ${prep.sourceRelative}")
-            appendLine("  to:   ${prep.targetRelative}")
-            prep.moveMessage?.let { appendLine("  $it") }
+            appendMovePaths(prep)
             appendLine()
             if (pushedConflicts.isNotEmpty()) {
-                appendLine("Move completed; proceeded despite ${pushedConflicts.size} conflict(s):")
+                appendLine("Proceeded despite ${pushedConflicts.size} conflict(s); the project may not compile:")
                 for (c: RefactorSupport.ConflictRef in pushedConflicts) {
                     appendLine("  [${c.tag}] ${c.file}  ${c.message}")
                 }
@@ -677,8 +763,7 @@ class SymbolRefactorToolset : McpToolset {
                     "TOML, ServiceLoader files etc. are updated when their language plugins contribute PSI " +
                     "references; verify with `mixin_find_references` if in doubt.",
             )
-        })
-    }
+        }
 
     // ───────────────────────────────────── Rename internals ─────────────────────────────────────
 
@@ -703,7 +788,7 @@ class SymbolRefactorToolset : McpToolset {
         return smartReadAction(project) {
             val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
                 ?: return@smartReadAction PreparationResult.Failure(
-                    "Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}",
+                    FqcnResolver.notFoundMessage(project, className),
                 )
 
             val resolved: PsiNamedElement
@@ -1114,38 +1199,23 @@ class SymbolRefactorToolset : McpToolset {
 
     private fun containingJarName(file: VirtualFile): String = VfsUtilCore.getRootFile(file).name
 
-    /**
-     * MoveFilesOrDirectoriesProcessor variant that suppresses the conflict dialog so
-     * the move runs headlessly. Platform-detected conflicts are pushed through, but
-     * rendered here while their PSI is still valid; performMove reports them in the
-     * result text.
-     */
-    private class HeadlessMoveFilesProcessor(
+    // The inherited showConflicts proceeds silently when no prepareSuccessfulCallback is set,
+    // so the gate must live here. MoveJavaFileHandler feeds it package-private access conflicts.
+    internal class HeadlessMoveFilesProcessor(
         project: Project,
-        elements: Array<PsiElement>,
-        newParent: PsiDirectory,
-        searchForReferences: Boolean,
-        searchInComments: Boolean,
-        searchInNonJavaFiles: Boolean,
-        moveCallback: com.intellij.refactoring.move.MoveCallback?,
-        prepareSuccessfulCallback: Runnable?,
+        file: PsiFile,
+        targetDir: PsiDirectory,
+        private val onConflicts: (MultiMap<PsiElement, String>, Array<out UsageInfo>?) -> Boolean,
     ) : MoveFilesOrDirectoriesProcessor(
-        project, elements, newParent,
-        searchForReferences, searchInComments, searchInNonJavaFiles,
-        moveCallback, prepareSuccessfulCallback,
+        project, arrayOf<PsiElement>(file), targetDir,
+        /* searchForReferences = */ true,
+        /* searchInComments = */ false,
+        /* searchInNonJavaFiles = */ true,
+        null, null,
     ) {
-        var pushedConflicts: List<RefactorSupport.ConflictRef> = emptyList()
-            private set
-
-        override fun showConflicts(conflicts: MultiMap<PsiElement, String>, usages: Array<out UsageInfo>?): Boolean {
-            if (!conflicts.isEmpty) {
-                pushedConflicts = ApplicationManager.getApplication()
-                    .runReadAction<List<RefactorSupport.ConflictRef>> {
-                        RefactorSupport.renderConflicts(myProject, conflicts)
-                    }
-            }
-            return true
-        }
+        override fun isPreviewUsages(usages: Array<UsageInfo>): Boolean = false
+        override fun showConflicts(conflicts: MultiMap<PsiElement, String>, usages: Array<out UsageInfo>?): Boolean =
+            onConflicts(conflicts, usages)
     }
 
     /**

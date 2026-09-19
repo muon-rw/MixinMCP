@@ -203,7 +203,8 @@ class ProjectManagementToolset : McpToolset {
     @McpDescription(
         "Force-refresh IntelliJ's Virtual File System (VFS) so on-disk changes made by external tools " +
             "(Gradle, shell scripts, code generators, etc.) become visible to the IDE and to subsequent " +
-            "MCP tool calls. Optional `filePath` scopes the refresh; if omitted, the project root is refreshed " +
+            "MCP tool calls. Optional `filePath` (absolute, or relative to the project directory) scopes the " +
+            "refresh; if omitted, the project root is refreshed " +
             "recursively. When `filePath` is a file, its parent directory is refreshed so content changes, " +
             "sibling creates, and deletes are all detected in one call. When `filePath` no longer exists on " +
             "disk, the nearest existing ancestor is refreshed so the deletion is picked up. Returns only " +
@@ -215,9 +216,9 @@ class ProjectManagementToolset : McpToolset {
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
 
-        val requestedPath: String = filePath ?: project.basePath ?: return McpToolCallResult.error(
-            "Project has no base path",
-        )
+        val requestedPath: String = filePath?.let { resolveAgainstBase(project.basePath, it) }
+            ?: project.basePath
+            ?: return McpToolCallResult.error("Project has no base path")
         val requested = File(requestedPath)
 
         // Walk up to the nearest entry that still exists on disk — handles the case where

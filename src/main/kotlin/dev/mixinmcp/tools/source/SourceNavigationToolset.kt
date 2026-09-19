@@ -40,6 +40,7 @@ import dev.mixinmcp.resolve.ModuleScopes
 import dev.mixinmcp.tools.ClassContentDeduper
 import dev.mixinmcp.tools.VARIANT_GROUPING_FOOTER
 import dev.mixinmcp.tools.requireProject
+import dev.mixinmcp.tools.resolveAgainstBase
 import kotlin.coroutines.coroutineContext
 import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
@@ -89,10 +90,13 @@ class SourceNavigationToolset : McpToolset {
                             "that module cannot compile against it; drop module= to search the whole project, or pin " +
                             "a different module."
                     } else if (pinnedModule != null) {
-                        "Class not found in module '$pinnedModule' or anywhere else on the classpath: $className. " +
-                            FqcnResolver.CLASS_NOT_FOUND_HINT
+                        FqcnResolver.notFoundMessage(
+                            project,
+                            className,
+                            "Class not found in module '$pinnedModule' or anywhere else on the classpath: $className",
+                        )
                     } else {
-                        "Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}"
+                        FqcnResolver.notFoundMessage(project, className)
                     },
                 )
 
@@ -112,25 +116,36 @@ class SourceNavigationToolset : McpToolset {
                 if (interfaces.isNotEmpty()) {
                     appendLine("Interfaces: ${interfaces.joinToString { it.qualifiedName ?: it.name ?: "?" }}")
                 }
-                // navigationElement maps compiled classes to their attached -sources.jar file
+                // navigationElement maps compiled classes to their attached -sources.jar file. Binary-only
+                // classes fall back to the decompiled-cache copy, so line numbers match mixin_get_dep_source
+                // and mixin_search_in_deps instead of the IDE decompiler's.
                 val navigationFile: PsiFile? = psiClass.navigationElement.containingFile ?: psiClass.containingFile
-                navigationFile?.virtualFile?.let { vf ->
-                    val sourceKind = classifySourceFile(project, vf)
+                val binaryOnly: Boolean = navigationFile?.virtualFile?.extension.equals("class", ignoreCase = true)
+                val cacheClass: PsiClass? = if (binaryOnly) decompiledCacheClass(project, psiClass) else null
+                val sourceFile: PsiFile? = cacheClass?.containingFile ?: navigationFile
+                sourceFile?.virtualFile?.let { vf ->
                     appendLine("Source: ${projectRelativePath(project, vf)}")
-                    appendLine("SourceKind: $sourceKind")
+                    appendLine("SourceKind: ${classifySourceFile(project, vf)}")
+                }
+                if (binaryOnly && cacheClass == null && (focused || includeSource)) {
+                    appendLine(
+                        "Source view: IDE decompiler (no attached or decompiled-cache source); " +
+                            "mixin_get_dep_source(className=...) shows the same text and line numbers",
+                    )
                 }
                 val owners: List<String> = ClassVariants.ownerModules(project, psiClass.containingFile?.virtualFile)
                 if (owners.isNotEmpty()) {
-                    appendLine("Modules: ${owners.joinToString(", ")}${ClassVariants.scopeNote(owners)}")
+                    appendLine("Modules: ${ClassVariants.explainScopeTags(owners).joinToString(", ")}")
                 }
                 appendLine()
 
                 if (focused) {
+                    val sourceClass: PsiClass = cacheClass ?: psiClass
                     if (!methodName.isNullOrBlank()) {
-                        appendMethodSource(project, psiClass, methodName)
+                        appendMethodSource(project, sourceClass, methodName)
                     }
                     if (!fieldName.isNullOrBlank()) {
-                        appendFieldSource(project, psiClass, fieldName)
+                        appendFieldSource(project, sourceClass, fieldName)
                     }
                     return@buildString
                 }
@@ -179,7 +194,7 @@ class SourceNavigationToolset : McpToolset {
 
                 if (includeSource) {
                     appendLine("--- Source ---")
-                    navigationFile?.text?.let { appendLine(it) }
+                    sourceFile?.text?.let { appendLine(it) }
                 }
             }
 
@@ -855,7 +870,8 @@ class SourceNavigationToolset : McpToolset {
         val rootsMode: String = roots.trim().lowercase()
         if (rootsMode !in SEARCH_ROOTS_MODES) {
             return McpToolCallResult.error(
-                "Invalid roots: \"$roots\". Use all, library, decompiled, buildscript, jdk, or game.",
+                "Invalid roots: \"$roots\". Use all, library, decompiled, buildscript, jdk, or game. To grep jars " +
+                    "on disk, such as a pack's mods folder, use mixin_list_jar_entries(jarPath=..., regexPattern=...).",
             )
         }
 
@@ -933,6 +949,8 @@ class SourceNavigationToolset : McpToolset {
             }
             if (!timedOut && System.currentTimeMillis() - startTime > timeout) timedOut = true
 
+            val unsearchedJars: List<String> =
+                if (rootsMode in setOf("all", "library", "decompiled")) unsearchableClasspathJars(project) else emptyList()
             val noMatchHints: List<String> =
                 if (hits.isEmpty() && !timedOut) {
                     val base: List<String> = buildNoMatchHintsForDepSearch(
@@ -965,7 +983,7 @@ class SourceNavigationToolset : McpToolset {
                                 "Run mixin_list_source_roots for the toolchain diagnostics."
                         else -> null
                     }
-                    if (zeroTierNotice != null) base + zeroTierNotice else base
+                    base + listOfNotNull(zeroTierNotice, describeUnsearchableJars(unsearchedJars))
                 } else {
                     emptyList()
                 }
@@ -979,6 +997,7 @@ class SourceNavigationToolset : McpToolset {
                 rootsScanned = rootsScanned,
                 rootsTotal = rootsTotal,
                 stoppedInRoot = stoppedInRoot,
+                unsearchedJars = unsearchedJars,
             )
         }
 
@@ -1024,6 +1043,10 @@ class SourceNavigationToolset : McpToolset {
                 } else if (timedOut && hits.size >= maxResults) {
                     appendLine("  ... (stopped at $maxResults matches; unscanned files may hold more)")
                 }
+                describeUnsearchedJarsBriefly(scanResult.unsearchedJars)?.let {
+                    appendLine()
+                    appendLine(it)
+                }
             }
         }
 
@@ -1032,7 +1055,7 @@ class SourceNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Reads a file from a dependency jar, the decompiled cache, or any jar on disk. Use this tool to view library code and jar resources that grep/read_file cannot access. Four ways to address the file, in precedence order: url (exact url: string from mixin_search_in_deps results, jar://…!/path/File.java or file://…/File.java; a bare disk path with !/ is accepted too); jarPath + entry (any jar on disk, on the classpath or not, e.g. jarPath='C:/pack/mods/jade.jar', entry='META-INF/neoforge.mods.toml'; use mixin_list_jar_entries to find entry names); className (dot FQCN, resolved to its attached -sources.jar, MDG merged jar, or decompiled-cache .java, the same way mixin_find_class does); path (classpath-relative source path with / separators and .java extension, e.g. net/minecraft/world/entity/LivingEntity.java, not a filesystem path). Text resources work as well as source: mods.toml, fabric.mod.json, lang, models, recipes, loot tables, mixin configs. A .class entry addressed by url or jarPath is decompiled by the IDE; other binary entries report their size instead of content. Two ways to choose lines: a window, lineNumber (default 1) with linesBefore (default 30) and linesAfter (default 70) around it; or an explicit inclusive 1-based range, startLine and/or endLine, which overrides the window (startLine alone reads to end of file, endLine alone reads from line 1). module: restricts className and path lookups to source roots on that module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); url and jarPath lookups only validate the name.")
+    @McpDescription("Reads a file from a dependency jar, the decompiled cache, or any jar on disk. Use this tool to view library code and jar resources that grep/read_file cannot access. Four ways to address the file, in precedence order: url (exact url: string from mixin_search_in_deps results, jar://…!/path/File.java or file://…/File.java; a bare disk path with !/ is accepted too); jarPath + entry (any jar on disk, on the classpath or not, e.g. jarPath='C:/pack/mods/jade.jar', entry='META-INF/neoforge.mods.toml'; use mixin_list_jar_entries to find entry names); className (dot FQCN; resolves to an attached -sources.jar or MDG merged jar, then the MixinMCP decompiled cache, then the IDE decompiler for a class with neither, so any class mixin_find_class resolves can be read, with the same line numbers mixin_find_class(methodName=...) reports); path (classpath-relative path with / separators, e.g. net/minecraft/world/entity/LivingEntity.java or data/minecraft/enchantment/sharpness.json, not a filesystem path; resources inside classes jars are found too, and when several jars ship the same path the first is shown and the others are listed with their urls). Relative jarPath values and relative disk paths inside a url resolve against the project directory. Text resources work as well as source: mods.toml, fabric.mod.json, lang, models, recipes, loot tables, mixin configs. A .class entry is decompiled by the IDE; other binary entries report their size instead of content. To read one method or field, mixin_find_class(className, methodName=...) is shorter. Two ways to choose lines: a window, lineNumber (default 1) with linesBefore (default 30) and linesAfter (default 70) around it; or an explicit inclusive 1-based range, startLine and/or endLine, which overrides the window (startLine alone reads to end of file, endLine alone reads from line 1). module: restricts className and path lookups to source roots on that module's classpath (exact or dot-boundary suffix name, e.g. common.main or MyMod.neoforge.main); url and jarPath lookups only validate the name.")
     @Suppress("unused")
     suspend fun mixin_get_dep_source(
         url: String? = null,
@@ -1078,36 +1101,36 @@ class SourceNavigationToolset : McpToolset {
         val pinned: ModuleScopeResult.Found? = moduleResult as? ModuleScopeResult.Found
 
         val trimmedPath: String? = path?.trim()?.takeIf { it.isNotEmpty() }
+        val resolvedJarPath: String? = jarPath?.takeIf { hasJar }?.let { resolveAgainstBase(project.basePath, it) }
         val effectiveUrl: String? = when {
-            url != null && hasUrl -> normalizeSourceUrl(url)
-            jarPath != null && entry != null && hasJar -> jarEntryUrl(jarPath, entry)
+            url != null && hasUrl -> normalizeSourceUrl(url, project.basePath)
+            resolvedJarPath != null && entry != null -> jarEntryUrl(resolvedJarPath, entry)
             else -> null
         }
         val fromUrl: VirtualFile? = effectiveUrl?.let { findFileByUrlOrMountJar(it) }
-        val urlFailed: Boolean = effectiveUrl != null && (fromUrl == null || !fromUrl.isValid)
+        val urlResolved: Boolean = fromUrl != null && fromUrl.isValid
+        val urlFailed: Boolean = effectiveUrl != null && !urlResolved
         val classLookup: ClassSourceLookup? =
-            if (className != null && hasClass && (fromUrl == null || !fromUrl.isValid)) {
+            if (className != null && hasClass && !urlResolved) {
                 smartReadAction(project) { lookupClassSource(project, className, pinned?.scope) }
             } else {
                 null
             }
-        when (classLookup) {
-            is ClassSourceLookup.BinaryOnly -> return McpToolCallResult.error(
-                "No source is attached for ${classLookup.fqcn} (SourceKind: Classes JAR). Use " +
-                    "mixin_find_class(className=\"${classLookup.fqcn}\", includeSource=true) for an IDE-decompiled view, " +
-                    "mixin_class_bytecode for the bytecode, or run ./gradlew genDependencySources then mixin_sync_project.",
+        if (classLookup is ClassSourceLookup.NotFound) {
+            val prefix: String = "Class not found: $className" + (pinned?.let { " (module: ${it.module.name})" } ?: "")
+            return McpToolCallResult.error(
+                smartReadAction(project) { FqcnResolver.notFoundMessage(project, className.orEmpty(), prefix) },
             )
-            is ClassSourceLookup.NotFound -> return McpToolCallResult.error(
-                "Class not found: $className" +
-                    (pinned?.let { " (module: ${it.module.name})" } ?: "") + ". " + FqcnResolver.CLASS_NOT_FOUND_HINT,
-            )
-            else -> {}
+        }
+        val pathMatches: List<VirtualFile> = if (!urlResolved && classLookup == null && trimmedPath != null) {
+            smartReadAction(project) { locateDepFilesByPath(project, trimmedPath, pinned?.scope) }
+        } else {
+            emptyList()
         }
         val vf: VirtualFile? = when {
-            fromUrl != null && fromUrl.isValid -> fromUrl
+            urlResolved -> fromUrl
             classLookup is ClassSourceLookup.Found -> classLookup.file
-            trimmedPath != null -> smartReadAction(project) { locateDepSourceByPath(project, trimmedPath, pinned?.scope) }
-            else -> null
+            else -> pathMatches.firstOrNull()
         }
         val viaPathFallback: Boolean = urlFailed && vf != null && vf.isValid
 
@@ -1139,8 +1162,8 @@ class SourceNavigationToolset : McpToolset {
                 if (trimmedPath != null) smartReadAction(project) { collectAllSourceRoots(project).size } else 0
             val hint: String = when {
                 urlFailed && hasJar ->
-                    "`$effectiveUrl` did not resolve: check that the jar exists at `$jarPath` and that `entry` matches an " +
-                        "entry name exactly (case-sensitive, forward slashes). mixin_list_jar_entries(jarPath=\"$jarPath\") lists them."
+                    "`$effectiveUrl` did not resolve: check that the jar exists at `$resolvedJarPath` and that `entry` matches an " +
+                        "entry name exactly (case-sensitive, forward slashes). mixin_list_jar_entries(jarPath=\"$resolvedJarPath\") lists them."
                 urlFailed && trimmedPath != null ->
                     "url `$url` did not resolve, and path `$trimmedPath` was not found either. " +
                         pathMissHint(trimmedPath, rootsTotal)
@@ -1175,10 +1198,10 @@ class SourceNavigationToolset : McpToolset {
             String(bytes, StandardCharsets.UTF_8)
         }
 
-        val sourceKind: String = if (isClassEntry) {
-            "IDE-decompiled .class entry"
-        } else {
-            smartReadAction(project) { classifySourceFile(project, vf) }
+        val sourceKind: String = when {
+            isClassEntry && classLookup != null -> "IDE-decompiled .class (no attached or decompiled-cache source)"
+            isClassEntry -> "IDE-decompiled .class entry"
+            else -> smartReadAction(project) { classifySourceFile(project, vf) }
         }
 
         val lines: List<String> = content.lines()
@@ -1195,6 +1218,12 @@ class SourceNavigationToolset : McpToolset {
                 appendLine("(url `$url` did not resolve; located via the `path` parameter instead. The url may be stale; re-run mixin_search_in_deps for a fresh one.)")
             }
             window.note?.let { appendLine("($it)") }
+            val others: List<VirtualFile> = pathMatches.drop(1)
+            if (others.isNotEmpty()) {
+                val shown: String = others.take(3).joinToString("; ") { it.url }
+                val more: String = if (others.size > 3) "; and ${others.size - 3} more" else ""
+                appendLine("(the same path is also in ${others.size} other root(s), pass a url to read one: $shown$more)")
+            }
             val modSuffix: String = pinned?.let { " [pinned module: ${it.module.name}]" } ?: ""
             appendLine("=== ${vf.name} (lines ${window.start}-${window.end}) [sourceKind: $sourceKind]$modSuffix ===")
             appendLine()

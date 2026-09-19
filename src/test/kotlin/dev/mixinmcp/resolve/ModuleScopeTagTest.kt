@@ -20,15 +20,14 @@ class ModuleScopeTagTest {
     }
 
     @Test
-    fun noteExplainsOnlyTheTagsPresent() {
-        assertEquals("", ClassVariants.scopeNote(listOf("MixinMCP.main", "MixinMCP.test")))
+    fun explanationReplacesTheShortTagWithoutRepeatingIt() {
         assertEquals(
-            " (RUNTIME: that module cannot compile against this class)",
-            ClassVariants.scopeNote(listOf("neoforge.main", "common.main (RUNTIME)")),
+            listOf("MixinMCP.main", "MixinMCP.test"),
+            ClassVariants.explainScopeTags(listOf("MixinMCP.main", "MixinMCP.test")),
         )
         assertEquals(
-            " (RUNTIME: that module cannot compile against this class; TEST: only that module's test sources can)",
-            ClassVariants.scopeNote(listOf("a.main (RUNTIME)", "b (TEST)")),
+            listOf("core.main", "core.test (RUNTIME, cannot compile against this class)", "b (TEST, test sources only)"),
+            ClassVariants.explainScopeTags(listOf("core.main", "core.test (RUNTIME)", "b (TEST)")),
         )
     }
 }

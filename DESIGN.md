@@ -436,7 +436,7 @@ old name as an alias (Section 3).
 | `mixin_search_symbols` | `query`, `kind=class`, `scope=all`, `caseSensitive=false`, `maxResults=50` |
 | `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000`, `pathPrefix?`, `roots=all`, `contextLines=0` |
 | `mixin_get_dep_source` | `url?`, `jarPath?` + `entry?`, `className?`, or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70`, `startLine?`, `endLine?`, `module?` |
-| `mixin_list_jar_entries` | `jarPath?` or `jar?`, `pathPrefix?`, `fileMask?`, `includeClasses=false`, `maxResults=200` |
+| `mixin_list_jar_entries` | `jarPath?` or `jar?`, `pathPrefix?`, `fileMask?`, `includeClasses=false`, `regexPattern?`, `maxResults=200` |
 | `mixin_list_source_roots` | `maxSamplesPerRoot=5`, `verbose=false`, `filter?` |
 
 `mixin_search_in_deps` and `mixin_get_dep_source` cover library SOURCES roots (published
@@ -455,14 +455,21 @@ contract holds.
 **`mixin_find_class`** resolves any class by FQCN and reports header info plus a
 `SourceKind` classification (library sources, decompiled cache, project source, binary).
 `methodName`/`fieldName` focus the output to one member's source with line numbers,
-overload counts, inherited-member tags, and similar-name suggestions on a miss; binary
-members get a pointer to the bytecode tools. `includeMembers` lists methods, fields, and
+overload counts, inherited-member tags, and similar-name suggestions on a miss. A
+binary-only class has no navigation source, so its member source, `includeSource`, and
+the `Source:` line come from its decompiled-cache copy when one exists
+(`decompiledCacheClass`, preferring the copy decompiled from the jar the class resolved
+from), keeping line numbers identical to `mixin_get_dep_source` and `mixin_search_in_deps`;
+without a cache copy a `Source view: IDE decompiler` line says the text is the IDE
+decompiler's. An unresolved name lists the classpath classes sharing its simple name
+(`FqcnResolver.notFoundMessage`, also used by the bytecode, semantic, and refactor tools). `includeMembers` lists methods, fields, and
 nested classes with ready-to-copy follow-up calls; `includeSource` appends the full file.
 `module` (exact name or dot-boundary suffix) pins resolution to one module's classpath;
 without it, a class with several classpath copies gets a Variants block in which
 byte-identical copies are merged and patched copies get a provenance-tagged structural
 diff (`ClassContentDeduper`). A `Modules:` header line names the modules whose classpath
-provides the class, tagged `(RUNTIME)` for a runtime-only entry or `(TEST)` for a test-only one;
+provides the class, tagged `(RUNTIME, cannot compile against this class)` for a runtime-only
+entry or `(TEST, test sources only)` for a test-only one;
 `compileOnly` maps to PROVIDED, which is compile-visible and stays untagged
 (`neoforge.main, common.main (RUNTIME)`). The Variants block's `[modules: ...]` carries the
 same tags. `module` is therefore also a compile-visibility check: a class that resolves
@@ -495,8 +502,14 @@ and a timeout names the root the scan stopped in.
 **`mixin_get_dep_source`** addresses a file four ways, in precedence order: `url` (from
 search output, or a bare disk path containing `!/`, which is normalized to a `jar://` URL),
 `jarPath` + `entry` (any jar on disk, on the classpath or not), `className` (a dot FQCN
-resolved to its attached or decompiled source the way `mixin_find_class` does), and `path`
-(a package path like `net/minecraft/world/level/Level.java`, resolved across all roots).
+resolved by `lookupClassSource`: an attached source on any classpath copy, then the
+decompiled-cache copy, then the `.class` for the IDE decompiler, so every resolvable class
+reads), and `path` (a classpath-relative path such as
+`net/minecraft/world/level/Level.java` or `data/minecraft/enchantment/sharpness.json`;
+`locateDepFilesByPath` tries exact matches in source roots, then in library classes jars,
+where vanilla data and assets live, then a suffix walk, and names every other root that
+ships the same path). Relative disk paths in `jarPath` and `url` resolve against the
+project directory (`resolveAgainstBase`).
 Any text entry can be read: `mods.toml`, `fabric.mod.json`, lang files, models, recipes,
 mixin configs. A `.class` entry addressed by `url` or `jarPath` is decompiled by the IDE; other
 binary entries report their size instead of their content, and a jar entry outside every
@@ -518,10 +531,17 @@ condense to a name grid in non-verbose mode like other library roots; empty cach
 stay in full under the warnings section.
 
 **`mixin_list_jar_entries`** lists a jar's entries with their sizes so a caller can name
-one for `mixin_get_dep_source`. `jarPath` takes any jar on disk; `jar` takes a
+one for `mixin_get_dep_source`. `jarPath` takes any jar on disk or a directory, which
+expands to every `*.jar` directly inside it (a pack's mods folder); `jar` takes a
 case-insensitive substring of a classpath or cache jar's file name or coordinates and
 lists every match, up to 10. `pathPrefix` and `fileMask` narrow the listing; `.class`
-entries are excluded unless `includeClasses=true`.
+entries are excluded unless `includeClasses=true`. `regexPattern` switches to a grep of
+the text entries that pass those filters (`grepJar`: binary names and NUL-bearing content
+skipped, entries over 4 MB skipped), printing `entry:line: text` and omitting jars without
+a match. It is the only text search over runtime-only jars: `mixin_search_in_deps` scans
+source roots, and `genDependencySources` decompiles only the compile classpath, so an empty
+`mixin_search_in_deps` result appends the classpath jars no root covers
+(`unsearchableClasspathJars`).
 
 ### Semantic Navigation
 
@@ -571,10 +591,24 @@ static initializers) are terminal `(non-method context)` leaves. Callees: each d
 are labelled abstract; an abstract method whose class bytecode is present simply ends the
 branch. `maxResults` is a single budget shared across all depths and branches; each
 caller or callee line consumes a slot, and exhaustion halts the walk with a truncation
-notice.
+notice. Callers are grouped per enclosing method, so a method referencing the target
+several times is one line, with `(also line N)` for references its ordinal tag does not
+already show.
 Cycle detection keys on the `owner#name(descriptor)` triple with the target pre-seeded,
 so self-recursion is caught immediately; re-encounters emit a `[cycle]` marker without
 recursing. Lines are indented per depth with `[L1]`, `[L2]`, ... tags.
+
+**`mixin_call_hierarchy` ordinals.** When a calling method invokes a target more than
+once, its line gets `[xN: ordinal K line L, ...]` (up to 10 sites, then `+N more`), where
+the ordinal is Mixin's: the index among `INVOKE*` instructions with the same owner, name,
+and descriptor in bytecode order (`BytecodeAnalyzer.extractInvocations` and
+`invokeOrdinals`). The calling method's class file comes from `ClassFileLocator`; a
+possibly stale build output adds `build may be stale`. Without a class file, ordinals come
+from a UAST walk in evaluation order that skips lambda bodies and nested classes, tagged
+`source order` because it misses compiler-generated calls. In the callers direction the
+target is named by its declaring class, so bytecode calls through a subclass or
+interface owner also match and are tagged `INVOKE owner X`, the owner an `@At` target
+must use.
 
 **`mixin_find_references`** searches class references when `memberName` is absent. With
 `memberName`, a matching field wins outright when no type filters were passed; otherwise
@@ -606,7 +640,7 @@ only when the annotation search finds nothing, returning FQCN and path only.
 | Tool | Parameters |
 |------|-----------|
 | `mixin_class_bytecode` | `className`, `filter=all`, `includeInstructions=false`, `module?`, `jarPath?` |
-| `mixin_method_bytecode` | `className`, `methodName`, `methodDescriptor?`, `module?`, `jarPath?` |
+| `mixin_method_bytecode` | `className`, `methodName`, `methodDescriptor?`, `module?`, `jarPath?`, `regexPattern?` |
 
 `filter` accepts `all`, `synthetic`, `methods`, `fields`; `synthetic` restricts both
 methods and fields to synthetic members (including fields like `this$0` and `$VALUES`).
@@ -616,6 +650,15 @@ filter, tagging each as lambda (with source method), bridge, or synthetic.
 `jarPath` reads the class straight from a jar on disk: the entry is located by internal
 name inside the zip, with no classpath, no index, and no wait for indexing, which is how an
 off-classpath mod is inspected without a build change. `module` must be omitted with it.
+
+`regexPattern` on `mixin_method_bytecode` keeps only the instructions whose Textifier text
+matches (`filterInstructions`, `InstructionFilter.kt`), each prefixed with its
+`LINENUMBER` and, when the same operand occurs more than once in that method, its Mixin
+ordinal: the index among instructions with the same owner, name, and descriptor (INVOKE)
+or the same text (other opcodes), in bytecode order, restarting per overload. An
+`INVOKEDYNAMIC` is folded with its bootstrap block: the regex runs over the whole block, and
+the line prints the method handles among its arguments (`-> owner.lambda$name$N(...)`), or
+the plain arguments, such as a string-concat recipe, when none is a handle.
 
 Both tools work on the project's own classes after a build: `ClassFileLocator` reads
 compiler output, returns a build-and-retry error when output is missing (`NotBuilt`), and
@@ -681,18 +724,16 @@ modifying anything. Conflicts are rendered one per line with a project-relative 
 a `[library]` or `[source]` tag (`[library]` usually means a stale build jar; member
 moves into a `@Mixin` class add `[mixin]`) and block execution unless
 `ignoreConflicts=true`, the headless equivalent of the IDE conflict dialog's Continue.
-One exception: `mixin_move_file` takes neither flag, refusing everything it can detect at
-validation time. Mutations run on the EDT; most tools go through `runRefactoringOnEdt`,
+Mutations run on the EDT; most tools go through `runRefactoringOnEdt`,
 which commits and saves all documents,
 while SymbolRefactorToolset inlines the same invokeAndWait-plus-commit pattern and
 extract mutates through `DuplicatesMethodExtractor` first, using `runRefactoringOnEdt`
 only to save. The processor-driven tools replace the conflict dialog with a stub that
 captures the conflict MultiMap instead of opening a modal that would deadlock the MCP
-call (pull-up conflicts are precomputed via `PullUpConflictsUtil`; `mixin_move_file`
-instead proceeds past late processor conflicts after its own validation). Because
+call (pull-up conflicts are precomputed via `PullUpConflictsUtil`). Because
 `BaseRefactoringProcessor.doRun` can bail out silently (preview escalation, dumb mode,
 canceled progress), post-run read actions verify the change actually applied and return
-an explicit error otherwise; `mixin_move_file` is again the exception. The signature,
+an explicit error otherwise. The signature,
 extract, introduce, inline, and move-members tools are Java sources only:
 `guardJavaSourceTarget` (for the range-addressed tools, `resolveFileRange`) refuses
 compiled, library, Kotlin, and non-writable targets.
@@ -705,7 +746,7 @@ whole-line range resolution (`resolveRange`), and sub-expression picking
 |------|-----------|
 | `mixin_rename` | `className`, `newName`, `memberName?`, `memberKind?`, `variableName?`, `parameterTypes?`, `methodDescriptor?`, `ignoreConflicts=false`, `dryRun=false` |
 | `mixin_safe_delete` | `className`, `methodName?`, `fieldName?`, `parameterTypes?`, `methodDescriptor?`, `ignoreConflicts=false`, `dryRun=false` |
-| `mixin_move_file` | `className`, `targetPackage` |
+| `mixin_move_file` | `className`, `targetPackage`, `ignoreConflicts=false`, `dryRun=false` |
 | `mixin_change_signature` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?`, `newName?`, `newVisibility?`, `newReturnType?`, `parametersJson?`, `ignoreConflicts=false`, `dryRun=false` |
 | `mixin_extract_method` | `filePath`, `startLine`, `endLine`, `newMethodName`, `expression?`, `occurrenceIndex?`, `visibility="private"`, `makeStatic?`, `ignoreConflicts=false`, `dryRun=false` |
 | `mixin_introduce_variable` | `filePath`, `startLine`, `endLine`, `name?`, `expression?`, `occurrenceIndex?`, `replaceAllOccurrences=false`, `ignoreConflicts=false`, `dryRun=false` |
@@ -737,10 +778,15 @@ The delete is a direct `PsiElement.delete()` in a named `WriteCommandAction` on 
 
 **`mixin_move_file`** moves a top-level class to another package under the same source
 root (inner classes are rejected; target directories are created; same-name collisions
-refuse). The move runs through a `MoveFilesOrDirectoriesProcessor` subclass that
-suppresses the modal conflict dialog (which would deadlock an MCP call) with
-`searchForReferences = true` and `searchInNonJavaFiles = true`, so string references in
-mixin configs and service files update where language plugins contribute PSI references.
+refuse). The move runs through `HeadlessMoveFilesProcessor`, a
+`MoveFilesOrDirectoriesProcessor` subclass with `searchForReferences = true` and
+`searchInNonJavaFiles = true`, so string references in mixin configs and service files
+update where language plugins contribute PSI references. Its `showConflicts` hands the
+processor's conflicts to the tool instead of opening the modal dialog; for Java files these
+come from `MoveJavaFileHandler.detectConflicts`, the same package-private access checks a
+class move runs. The tool refuses unless `ignoreConflicts=true`, and `dryRun=true` reports
+the target, per-file usage counts, and conflicts. A post-run check confirms the file
+arrived, and a target directory the tool created is removed again when nothing moved.
 Files with several top-level classes move as a unit.
 
 **`mixin_change_signature`** applies a rename, visibility change, return-type change, and

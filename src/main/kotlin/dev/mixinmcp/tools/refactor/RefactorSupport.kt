@@ -468,7 +468,7 @@ internal object RefactorSupport {
         if (memberSpecs.isEmpty()) return MemberResolution.Failure("No members given; pass at least one member name.")
         val psiClass: PsiClass = FqcnResolver.resolveNested(project, className)
             ?: return MemberResolution.Failure(
-                "Class not found: $className. ${FqcnResolver.CLASS_NOT_FOUND_HINT}",
+                FqcnResolver.notFoundMessage(project, className),
             )
         val classDisplay: String = psiClass.qualifiedName ?: className
         guardJavaSourceTarget(project, psiClass, classDisplay)?.let { return MemberResolution.Failure(it) }
