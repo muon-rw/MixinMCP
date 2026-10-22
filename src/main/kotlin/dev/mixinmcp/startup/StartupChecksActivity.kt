@@ -44,6 +44,7 @@ class StartupChecksActivity : ProjectActivity {
             if (!isMinecraftProject(projectRoot)) return@withContext
 
             warnMissingClaudePlugin(project)
+            warnMissingAntigravityPlugin(projectRoot, project)
 
             if (settings.warnMissingGradlePlugin) {
                 if (!hasGradlePlugin(projectRoot)) {
@@ -200,7 +201,7 @@ class StartupChecksActivity : ProjectActivity {
             .getNotificationGroup("MixinMCP")
             .createNotification(
                 "MixinMCP",
-                "Agent skills now ship via the MixinMCP Claude Code plugin, so ${removed.size} previously " +
+                "Agent skills now ship via the MixinMCP Claude Code and Antigravity plugins, so ${removed.size} previously " +
                     "injected file(s) were removed from this project: ${removed.joinToString(", ")}. " +
                     "Copies were saved to <code>$backupRoot</code>.",
                 NotificationType.INFORMATION,
@@ -288,6 +289,48 @@ class StartupChecksActivity : ProjectActivity {
             LOG.warn("MixinMCP: failed to scan the Claude Code plugin cache: ${e.cause?.message}")
         }
         return versions
+    }
+
+    /**
+     * Presence and version check for Google Antigravity (`~/.gemini/antigravity-cli` or `~/.gemini/config`).
+     * Scans global (`~/.gemini/config/plugins/mixinmcp`) and workspace (`.agents/plugins/mixinmcp`, etc.)
+     * plugin directories for `plugin.json` and compares any semver `version` field against the IDE plugin.
+     */
+    private fun warnMissingAntigravityPlugin(projectRoot: Path, project: Project) {
+        if (!MixinMcpAppSettings.getInstance().warnMissingAntigravityPlugin) return
+        val geminiHome = Path.of(System.getProperty("user.home")).resolve(".gemini")
+        if (!isAntigravityPresent(geminiHome)) return
+        val ideVersion = pluginVersion() ?: return
+        val scan = scanAntigravityPluginInstall(geminiHome, projectRoot)
+        val newest = scan.versions.filter { SEMVER_LIKE.matches(it) }.maxWithOrNull(::compareGradlePluginVersions)
+        val (gateValue, message) = when {
+            !scan.installed -> "missing@$ideVersion" to
+                ("Antigravity is installed, but the MixinMCP Antigravity plugin is not. It ships the agent " +
+                    "skills and rules that teach Antigravity when and how to use the mixin_* tools. Run " +
+                    "<code>agy plugin install https://github.com/muon-rw/MixinMCP/tree/2026.2+/antigravity-plugin</code> " +
+                    "(or <code>agy plugin import claude</code> if already installed in Claude Code).")
+            newest != null && !isGradlePluginVersionAtLeast(newest, ideVersion) -> "$newest<$ideVersion" to
+                ("The MixinMCP Antigravity plugin is outdated (installed $newest, expected $ideVersion). " +
+                    "To update, run <code>agy plugin install https://github.com/muon-rw/MixinMCP/tree/2026.2+/antigravity-plugin</code> " +
+                    "(or <code>agy plugin import claude</code>).")
+            else -> return
+        }
+        val props = PropertiesComponent.getInstance()
+        if (props.getValue(ANTIGRAVITY_PLUGIN_WARNED_KEY) == gateValue) return
+        props.setValue(ANTIGRAVITY_PLUGIN_WARNED_KEY, gateValue)
+        NotificationGroupManager.getInstance()
+            .getNotificationGroup("MixinMCP")
+            .createNotification("MixinMCP", message, NotificationType.WARNING)
+            .addAction(object : com.intellij.notification.NotificationAction("Don't warn again") {
+                override fun actionPerformed(
+                    e: com.intellij.openapi.actionSystem.AnActionEvent,
+                    notification: com.intellij.notification.Notification,
+                ) {
+                    MixinMcpAppSettings.getInstance().warnMissingAntigravityPlugin = false
+                    notification.expire()
+                }
+            })
+            .notify(project)
     }
 
     private fun showGradlePluginWarning(project: Project, settings: MixinMcpSettings) {
@@ -391,6 +434,7 @@ class StartupChecksActivity : ProjectActivity {
         private const val STAMP_SUFFIX = "-->"
         private const val OUTDATED_GRADLE_PLUGIN_NOTIFIED_KEY = "mixinmcp.outdatedGradlePluginNotified"
         private const val CLAUDE_PLUGIN_WARNED_KEY = "mixinmcp.claudePluginWarned"
+        private const val ANTIGRAVITY_PLUGIN_WARNED_KEY = "mixinmcp.antigravityPluginWarned"
         private const val MANIFEST_KEY = "mixinmcp.injectedFileManifest"
         private const val CLEANUP_DONE_KEY = "mixinmcp.legacyCleanupDone"
     }
@@ -561,3 +605,67 @@ private fun hasMcPluginInBuildFile(buildFile: Path): Boolean {
         false
     }
 }
+
+private const val ANTIGRAVITY_PLUGIN_NAME = "mixinmcp"
+
+private val ANTIGRAVITY_WORKSPACE_ROOTS = listOf(".agents", ".agent", "_agents", "_agent")
+
+private val ANTIGRAVITY_MANIFEST_PATHS = listOf(
+    "plugin.json",
+    ".antigravity-plugin/plugin.json",
+    ".gemini-plugin/plugin.json",
+)
+
+internal data class AntigravityPluginScanResult(
+    val installed: Boolean,
+    val versions: List<String>,
+)
+
+internal fun isAntigravityPresent(geminiHome: Path): Boolean =
+    Files.isDirectory(geminiHome.resolve("antigravity-cli")) ||
+        Files.isDirectory(geminiHome.resolve("config"))
+
+internal fun scanAntigravityPluginInstall(geminiHome: Path, projectRoot: Path): AntigravityPluginScanResult {
+    val rootDirs = buildList {
+        add(geminiHome.resolve("config"))
+        for (ws in ANTIGRAVITY_WORKSPACE_ROOTS) {
+            add(projectRoot.resolve(ws))
+        }
+    }
+
+    var found = false
+    val versions = mutableListOf<String>()
+
+    for (rootDir in rootDirs) {
+        val pluginDir = rootDir.resolve("plugins").resolve(ANTIGRAVITY_PLUGIN_NAME)
+        for (manifestRel in ANTIGRAVITY_MANIFEST_PATHS) {
+            val manifest = pluginDir.resolve(manifestRel)
+            if (!Files.isRegularFile(manifest)) continue
+            found = true
+            try {
+                parsePluginJsonVersion(Files.readString(manifest))?.let { versions += it }
+            } catch (_: IOException) {
+            }
+        }
+        if (Files.isRegularFile(rootDir.resolve("skills/mixinmcp-tools/SKILL.md"))) {
+            found = true
+        }
+        for (configName in listOf("plugins.json", "skills.json")) {
+            val configFile = rootDir.resolve(configName)
+            if (!Files.isRegularFile(configFile)) continue
+            try {
+                val text = Files.readString(configFile)
+                if ("mixinmcp" in text || "antigravity-plugin" in text) {
+                    found = true
+                }
+            } catch (_: IOException) {
+            }
+        }
+    }
+
+    return AntigravityPluginScanResult(installed = found, versions = versions)
+}
+
+internal fun parsePluginJsonVersion(jsonContent: String): String? =
+    Regex(""""version"\s*:\s*"([^"]+)"""").find(jsonContent)?.groupValues?.get(1)
+

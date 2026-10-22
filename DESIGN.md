@@ -17,7 +17,7 @@
 9. [Mappings Subsystem](#9-mappings-subsystem-devmixinmcpmappings)
 10. [Decompilation Cache](#10-decompilation-cache)
 11. [Source Auto-Attach](#11-source-auto-attach)
-12. [Agent Skills Distribution (Claude Code Plugin)](#12-agent-skills-distribution-claude-code-plugin)
+12. [Agent Skills Distribution (Claude Code & Antigravity Plugins)](#12-agent-skills-distribution-claude-code--antigravity-plugins)
 13. [Settings](#13-settings)
 14. [Testing](#14-testing)
 15. [Known Pitfalls & Edge Cases](#15-known-pitfalls--edge-cases)
@@ -256,6 +256,11 @@ MixinMCP/
 │   ├── .claude-plugin/plugin.json
 │   ├── README.md
 │   └── skills/{mixinmcp-tools, mixin-writing}/
+├── antigravity-plugin/                # Google Antigravity plugin (Section 12)
+│   ├── plugin.json
+│   ├── README.md
+│   ├── rules/AGENTS.md
+│   └── skills/{mixinmcp-tools, mixin-writing}/
 ├── src/test/kotlin/dev/mixinmcp/      # unit tests (Section 14)
 └── mixinmcp-gradle/                   # Gradle plugin (Section 10)
     └── src/main/kotlin/dev/mixinmcp/gradle/
@@ -294,8 +299,8 @@ consumer of the cache the Gradle plugin populates.
 - The Marketplace description is extracted from README.md between the plugin-description
   markers; change notes render from CHANGELOG.md via the changelog plugin. Signing and
   publishing credentials come from environment variables.
-- `mixinmcp-gradle` builds in the same Gradle project, shares the version from the
-  Claude plugin manifest (Section 12),
+- `mixinmcp-gradle` builds in the same Gradle project, shares `pluginVersion` from
+  `gradle.properties` (Section 12),
   and publishes plugin id `dev.mixinmcp.decompile` to `https://maven.muon.rip/releases`
   via `maven-publish`. Its dependencies are Vineflower and Gson.
 
@@ -1101,7 +1106,7 @@ classes.
 
 ---
 
-## 12. Agent Skills Distribution (Claude Code Plugin)
+## 12. Agent Skills Distribution (Claude Code & Antigravity Plugins)
 
 Skills ship as a Claude Code plugin rooted at `claude-plugin/`
 (`.claude-plugin/plugin.json` plus `skills/mixinmcp-tools` and `skills/mixin-writing`).
@@ -1110,10 +1115,9 @@ at the root, so `/plugin marketplace add muon-rw/MixinMCP` followed by
 `/plugin install mixinmcp@mixinmcp` installs straight from GitHub. The plugin is also
 submitted to the official community marketplace (clau.de/plugin-directory-submission),
 whose catalog pins commit SHAs and auto-bumps them as commits land.
-`claude-plugin/.claude-plugin/plugin.json` is the single version source for the whole
-build: Claude Code and the community marketplace read the committed JSON directly, so
-both Gradle modules parse their version out of it instead of a `pluginVersion` property,
-and a release is versioned by bumping that one field.
+`pluginVersion` in `gradle.properties` is the single version source for the whole
+build. Because Claude Code and Google Antigravity clone the repository directly, the
+`syncAgentPluginVersions` Gradle task (wired into `patchPluginXml`, `patchChangelog`, `test`, and the plugin validation tasks) propagates `pluginVersion` into both committed manifests: `claude-plugin/.claude-plugin/plugin.json` and `antigravity-plugin/plugin.json` (which carries the companion Google Antigravity plugin with `rules/AGENTS.md` and Antigravity-specific `skills/`).
 
 Releases are one task: `publishPlugin` also depends on `publishClaudePlugin` (strict
 `claude plugin validate` of plugin and marketplace, then `claude plugin tag --push`,
@@ -1142,7 +1146,7 @@ is present (`~/.claude` exists) but the plugin is missing from
 `~/.claude/plugins/cache/<marketplace>/mixinmcp/<version>/`, or when the newest
 semver-like cached version trails the IDE plugin version. SHA-named community-marketplace
 cache directories are excluded from the version comparison, and Claude Code auto-updates
-its own installs, so the version warning is best-effort. The Gradle plugin
+its own installs, so the version warning is best-effort. Similarly, when Google Antigravity is present (`~/.gemini/antigravity-cli` or `~/.gemini/config` exists), the activity scans `~/.gemini/config/plugins/mixinmcp` and workspace `.agents/plugins/mixinmcp` manifests and warns when the MixinMCP Antigravity plugin is missing or outdated. The Gradle plugin
 missing/outdated warnings are unchanged.
 
 ---
@@ -1152,8 +1156,8 @@ missing/outdated warnings are unchanged.
 `MixinMcpSettings` is a project-level `PersistentStateComponent` (storage
 `mixinmcp.xml`) holding `warnMissingGradlePlugin` and `indexBuildscriptClasspath`, both
 defaulting to true. `MixinMcpAppSettings` is its application-level twin holding
-`warnMissingClaudePlugin` (default true). `MixinMcpSettingsConfigurable` (Kotlin UI DSL
-`BoundConfigurable`) exposes all three at Settings > Tools > MixinMCP.
+`warnMissingClaudePlugin` and `warnMissingAntigravityPlugin` (both default true). `MixinMcpSettingsConfigurable` (Kotlin UI DSL
+`BoundConfigurable`) exposes all four at Settings > Tools > MixinMCP.
 
 ---
 

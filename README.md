@@ -35,8 +35,8 @@ While other tools might be able to read individual files in Minecraft sources, l
 - Update non-compiled references: mixin config JSON entries, `mods.toml`, ServiceLoader files, and javadoc links
 - Conflicts are reported per file instead of just discarded. Most tools support a dry-run preview
 
-### 4. Agent Skills for enhanced Mixin Writing (companion Claude Code plugin):
-- Install once in Claude Code: `/plugin marketplace add muon-rw/MixinMCP`, then `/plugin install mixinmcp@mixinmcp`
+### 4. Agent Skills for enhanced Mixin Writing (companion Claude Code & Antigravity plugins):
+- Install once in Claude Code (`/plugin marketplace add muon-rw/MixinMCP`, then `/plugin install mixinmcp@mixinmcp`) or Google Antigravity (`agy plugin install https://github.com/muon-rw/MixinMCP/tree/2026.2+/antigravity-plugin`)
 - Improve compatibility of written mixins by favoring MixinExtras injectors which LLMs often hallucinate or fail to use in the first place
 - Favor precise modification for the exact target for the task without workarounds, slices, or shift by's, thanks to MixinExtras' robust `@Expression` annotation
 
@@ -66,14 +66,20 @@ MixinMCP has two parts. You need **both** for full-classpath search to work:
 
 ### 3. Connect your MCP client
 
-Use IntelliJ's **Auto-Configure** option for your client (or configure manually using the ip address), then restart the client. The auto-configured server name is usually **`user-jetbrains`**
+Use IntelliJ's **Auto-Configure** option for your client (or configure manually using the ip address), then restart the client. The auto-configured server name is usually **`user-jetbrains`**.
+
+For **Google Antigravity** (`agy` CLI, Antigravity IDE, or Antigravity 2.0), run:
+```bash
+agy mcp add jetbrains http://127.0.0.1:64342/stream
+```
+*(Or add `"jetbrains": { "url": "http://127.0.0.1:64342/stream" }` under `"mcpServers"` in `~/.gemini/config/mcp_config.json`, using the port shown in **Settings → Tools → MCP Server**.)*
 
 > [!CAUTION]
 > MixinMCP exposes full project and dependency source, classpath metadata, and most importantly, *file editing and refactoring tools*, to whatever connects to the MCP server. These tools aren't hardened for remote access. 
 > 
 > IntelliJ binds the server to localhost only by default, and you should leave it that way unless you have a specific reason and you know the risks. 
 
-For better agent adherence, also install the Claude Code plugin; see [Agent Skills](#agent-skills-claude-code-plugin).
+For better agent adherence, also install the companion Claude Code or Antigravity plugin; see [Agent Skills](#agent-skills-claude-code--antigravity-plugins).
 
 ### 4. Set up the Gradle plugin
 
@@ -165,28 +171,36 @@ For local development against an unpublished build, see [Decompilation cache det
 
 Ask the model to list MCP tools from the JetBrains server.  The `mixin_*` tools should appear. If they don't: (1) confirm MixinMCP is installed, (2) confirm the MCP Server plugin is enabled, (3) confirm your client is connected (most common failure)
 
-## Agent Skills (Claude Code plugin)
+## Agent Skills (Claude Code & Antigravity plugins)
 
-MixinMCP's agent skills ship as a [Claude Code plugin](https://code.claude.com/docs/en/plugins), installed once per machine instead of copied into every project:
+MixinMCP's agent skills ship as dedicated plugins for [Claude Code](https://code.claude.com/docs/en/plugins) (`claude-plugin/`) and [Google Antigravity](https://antigravity.google/docs/plugins) (`antigravity-plugin/`), installed once per machine instead of copied into every project:
 
 - **mixinmcp-tools**: why, when, and how to use each `mixin_*` tool, common pitfalls, and the query patterns that cost the least context.
 - **mixin-writing**: injector selection, `@At` targeting, the MixinExtras `@Expression` reference, and a mixin workflow checklist.
+- **rules/AGENTS.md** *(Antigravity plugin)*: an always-on rule that steers Antigravity toward `mixin_*` tools for classpath lookups and activates the skills when needed.
 
-Install in Claude Code:
+**Install in Claude Code:**
 
 ```
 /plugin marketplace add muon-rw/MixinMCP
 /plugin install mixinmcp@mixinmcp
 ```
 
-The IntelliJ plugin warns on opening a Minecraft project when Claude Code is present but the plugin is missing or outdated; toggle this in **Settings → Tools → MixinMCP**.
+**Install in Google Antigravity:**
+
+```bash
+agy plugin install https://github.com/muon-rw/MixinMCP/tree/2026.2+/antigravity-plugin
+```
+*(Or `agy plugin import claude` to import from an existing Claude Code installation.)*
+
+The IntelliJ plugin warns on opening a Minecraft project when Claude Code or Antigravity is present on your machine but its MixinMCP plugin is missing or outdated; toggle these warnings independently in **Settings → Tools → MixinMCP**.
 
 Older MixinMCP versions injected these skills into `.cursor/` and `.claude/` and gitignored them. On first project open, files MixinMCP can attribute to itself (via its version stamp, its injection manifest, or its `.gitignore` entries) are moved to a backup folder under the IDE system directory and their `.gitignore` entries are removed; anything it cannot attribute is left alone. Cursor rule/skill injection is discontinued for now.
 
 <details>
 <summary>Team distribution (click to expand)</summary>
 
-To have Claude Code prompt every teammate to install the plugin when they trust your mod repo, commit this to the mod project's `.claude/settings.json`:
+**Claude Code:** To have Claude Code prompt every teammate to install the plugin when they trust your mod repo, commit this to the mod project's `.claude/settings.json`:
 
 ```json
 {
@@ -194,6 +208,16 @@ To have Claude Code prompt every teammate to install the plugin when they trust 
     "mixinmcp": { "source": { "source": "github", "repo": "muon-rw/MixinMCP" } }
   },
   "enabledPlugins": { "mixinmcp@mixinmcp": true }
+}
+```
+
+**Google Antigravity:** Commit `.agents/plugins.json` in your mod repository pointing to a shared or vendored plugins directory:
+
+```json
+{
+  "entries": [
+    { "path": "path/to/shared/plugins" }
+  ]
 }
 ```
 
@@ -428,6 +452,17 @@ claude --plugin-dir /path/to/MixinMCP/claude-plugin
 # Or install from the local checkout as a marketplace:
 claude plugin marketplace add /path/to/MixinMCP
 claude plugin install mixinmcp@mixinmcp
+```
+
+### Testing the Antigravity plugin locally:
+
+```bash
+# Validate the Antigravity plugin manifest, rules, and skills:
+agy plugin validate /path/to/MixinMCP/antigravity-plugin --strict
+# (or via Gradle: ./gradlew validateAntigravityPlugin)
+
+# Install into ~/.gemini/config/plugins/mixinmcp:
+agy plugin install /path/to/MixinMCP/antigravity-plugin
 ```
 </details>
 

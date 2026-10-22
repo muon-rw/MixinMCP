@@ -6,15 +6,8 @@ plugins {
 
 group = "dev.mixinmcp"
 
-// Same single version source as the root build: the committed Claude plugin manifest.
-version = providers
-    .fileContents(layout.settingsDirectory.file("claude-plugin/.claude-plugin/plugin.json"))
-    .asText
-    .map { text ->
-        Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
-            ?: throw GradleException("No version field in claude-plugin/.claude-plugin/plugin.json")
-    }
-    .get()
+// Shared single version source from root gradle.properties.
+version = providers.gradleProperty("pluginVersion").get()
 
 repositories {
     mavenCentral()

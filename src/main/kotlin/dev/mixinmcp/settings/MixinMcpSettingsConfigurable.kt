@@ -25,6 +25,19 @@ class MixinMcpSettingsConfigurable(private val project: Project) : BoundConfigur
                 )
             }
         }
+        group("Antigravity Plugin") {
+            row {
+                checkBox("Warn when the MixinMCP Antigravity plugin is missing or outdated")
+                    .bindSelected(MixinMcpAppSettings.getInstance()::warnMissingAntigravityPlugin)
+            }
+            row {
+                comment(
+                    "Agent skills and rules for Google Antigravity ship in antigravity-plugin/. " +
+                        "Install via CLI: agy plugin install https://github.com/muon-rw/MixinMCP/tree/2026.2+/antigravity-plugin " +
+                        "(or agy plugin import claude).",
+                )
+            }
+        }
         group("Gradle Plugin") {
             row {
                 checkBox("Warn when the MixinMCP Gradle plugin is missing or outdated")

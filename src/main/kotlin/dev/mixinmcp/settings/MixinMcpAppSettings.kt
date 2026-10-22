@@ -12,6 +12,7 @@ class MixinMcpAppSettings : PersistentStateComponent<MixinMcpAppSettings.State> 
 
     data class State(
         var warnMissingClaudePlugin: Boolean = true,
+        var warnMissingAntigravityPlugin: Boolean = true,
     )
 
     private var state = State()
@@ -25,6 +26,10 @@ class MixinMcpAppSettings : PersistentStateComponent<MixinMcpAppSettings.State> 
     var warnMissingClaudePlugin: Boolean
         get() = state.warnMissingClaudePlugin
         set(value) { state.warnMissingClaudePlugin = value }
+
+    var warnMissingAntigravityPlugin: Boolean
+        get() = state.warnMissingAntigravityPlugin
+        set(value) { state.warnMissingAntigravityPlugin = value }
 
     companion object {
         fun getInstance(): MixinMcpAppSettings =

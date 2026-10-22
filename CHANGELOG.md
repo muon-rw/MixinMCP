@@ -2,7 +2,9 @@
 
 # MixinMCP Changelog
 
-## [Unreleased]
+## [1.5.3]
+### Added
+- Support for Antigravity
 
 ## [1.5.2] - 2026-09-18
 

@@ -14,17 +14,35 @@ plugins {
 
 group = providers.gradleProperty("pluginGroup").get()
 
-// Single version source: Claude Code and the community marketplace read the committed plugin.json
-// directly, so Gradle derives from it rather than maintaining a second copy to keep in sync.
-val pluginVersion: Provider<String> = providers
-    .fileContents(layout.projectDirectory.file("claude-plugin/.claude-plugin/plugin.json"))
-    .asText
-    .map { text ->
-        Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
-            ?: throw GradleException("No version field in claude-plugin/.claude-plugin/plugin.json")
-    }
+// Single version source in gradle.properties; syncAgentPluginVersions propagates it into the
+// committed Claude Code and Antigravity plugin.json manifests so git-based installs see it too.
+val pluginVersion: Provider<String> = providers.gradleProperty("pluginVersion")
 
 version = pluginVersion.get()
+
+val syncAgentPluginVersions by tasks.registering {
+    val targetVersion = pluginVersion
+    val manifests = listOf(
+        layout.projectDirectory.file("claude-plugin/.claude-plugin/plugin.json").asFile,
+        layout.projectDirectory.file("antigravity-plugin/plugin.json").asFile,
+    )
+    inputs.property("version", targetVersion)
+    outputs.files(manifests)
+    doLast {
+        val ver = targetVersion.get()
+        val versionRegex = Regex("""("version"\s*:\s*)"[^"]+"""")
+        for (manifest in manifests) {
+            val content = manifest.readText()
+            if (!versionRegex.containsMatchIn(content)) {
+                throw GradleException("No version field found in ${manifest.path}")
+            }
+            val updated = versionRegex.replaceFirst(content, "$1\"$ver\"")
+            if (updated != content) {
+                manifest.writeText(updated)
+            }
+        }
+    }
+}
 
 // Set the JVM language level used to build the project.
 kotlin {
@@ -176,6 +194,18 @@ tasks {
         gradleVersion = providers.gradleProperty("gradleVersion").get()
     }
 
+    patchPluginXml {
+        dependsOn(syncAgentPluginVersions)
+    }
+
+    patchChangelog {
+        dependsOn(syncAgentPluginVersions)
+    }
+
+    test {
+        dependsOn(syncAgentPluginVersions)
+    }
+
     publishPlugin {
         dependsOn(patchChangelog)
     }
@@ -228,13 +258,66 @@ fun Exec.requireClaudeCli() {
 }
 
 val validateClaudePlugin by tasks.registering(Exec::class) {
+    dependsOn(syncAgentPluginVersions)
     requireClaudeCli()
     commandLine(claudeCommand("plugin", "validate", "claude-plugin", "--strict"))
 }
 
 val validateClaudeMarketplace by tasks.registering(Exec::class) {
+    dependsOn(syncAgentPluginVersions)
     requireClaudeCli()
     commandLine(claudeCommand("plugin", "validate", ".", "--strict"))
+}
+
+val agyCli: String? = run {
+    val windows = providers.systemProperty("os.name").get().lowercase().contains("windows")
+    val names = if (windows) listOf("agy.cmd", "agy.exe", "agy") else listOf("agy")
+    val override = providers.gradleProperty("agyCli").orNull
+        ?: providers.environmentVariable("AGY_CLI").orNull
+    if (override != null) {
+        return@run override
+    }
+    val home = providers.systemProperty("user.home").get()
+    val pathDirs = providers.environmentVariable("PATH").getOrElse("")
+        .split(File.pathSeparator)
+        .filter { it.isNotBlank() }
+    val installDirs = listOf("$home/.local/bin", "$home/.gemini/antigravity-cli/bin", "/opt/homebrew/bin", "/usr/local/bin")
+    (pathDirs + installDirs).asSequence()
+        .flatMap { dir -> names.asSequence().map { File(dir, it) } }
+        .firstOrNull { it.isFile && it.canExecute() }
+        ?.absolutePath
+}
+
+fun agyCommand(vararg args: String): List<String> {
+    val cli = agyCli ?: "agy"
+    return if (cli.endsWith(".cmd", ignoreCase = true) || cli.endsWith(".bat", ignoreCase = true)) {
+        listOf("cmd", "/c", cli, *args)
+    } else {
+        listOf(cli, *args)
+    }
+}
+
+fun Exec.requireAgyCli() {
+    val resolved = agyCli
+    doFirst {
+        if (resolved == null) {
+            throw GradleException(
+                "Antigravity CLI (agy) not found on PATH or in its usual install locations. " +
+                    "Install it, or pass -PagyCli=/path/to/agy (or set AGY_CLI).",
+            )
+        }
+    }
+}
+
+val isCi: Provider<Boolean> = providers.environmentVariable("CI").map { it.equals("true", ignoreCase = true) }.orElse(false)
+
+val validateAntigravityPlugin by tasks.registering(Exec::class) {
+    dependsOn(syncAgentPluginVersions)
+    val resolved = agyCli
+    val ci = isCi
+    onlyIf { resolved != null || !ci.get() }
+    requireAgyCli()
+    commandLine(agyCommand("plugin", "validate", "antigravity-plugin", "--strict"))
 }
 
 // The repo itself is the Claude Code marketplace, so "publishing" the Claude plugin is strict
@@ -253,10 +336,12 @@ val publishClaudePlugin by tasks.registering(Exec::class) {
     )
 }
 
-// One release task ships all three artifacts: JetBrains Marketplace upload, the Gradle plugin to
-// maven.muon.rip (needs MAVEN_USERNAME/MAVEN_PASSWORD), and the Claude plugin tag.
+// One release task ships all artifacts: JetBrains Marketplace upload, the Gradle plugin to
+// maven.muon.rip (needs MAVEN_USERNAME/MAVEN_PASSWORD), the Claude plugin tag, and Antigravity
+// plugin validation (Antigravity installs directly from the pushed git branch/tag).
 tasks.named("publishPlugin") {
     dependsOn(publishClaudePlugin)
+    dependsOn(validateAntigravityPlugin)
     dependsOn(":mixinmcp-gradle:publish")
 }
 
