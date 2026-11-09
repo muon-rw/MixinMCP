@@ -53,6 +53,7 @@ takes a method or field name on tools that declare no `methodName` / `fieldName`
 | Read a known dependency file | `mixin_get_dep_source` (by `className`, or `path` e.g. `com/google/common/collect/Lists.java`) |
 | Read a jar resource (mods.toml, fabric.mod.json, lang, recipes, mixin config) | `mixin_get_dep_source(jarPath=…, entry=…)`, or the `url` from a search hit |
 | See or grep what is inside jars | `mixin_list_jar_entries` (`jarPath` for any jar or a folder of jars, `jar` for a classpath jar by name or coordinates; `regexPattern` greps text entries) |
+| Find which classes reference a member, class, or string, in jars without source, off the classpath, or nested (jar-in-jar) | `mixin_search_bytecode` (`patterns`, then `jarPath` for a jar or a folder such as a pack's mods, `jar` for a classpath jar by name, or neither for the whole classpath) |
 | Search a mod that is on no classpath | `./gradlew genDependencySources --jar <path>` (or `mixinmcp { extraJars.from(…) }`), then `mixin_sync_project` |
 | Inheritance chain / all subtypes | `mixin_type_hierarchy` |
 | All implementors of an interface | `mixin_find_impls` |
@@ -68,7 +69,7 @@ takes a method or field name on tools that declare no `methodName` / `fieldName`
 | Diagnose missing or empty source roots | `mixin_list_source_roots` |
 | Answer "is jar X attached?" | `mixin_list_source_roots(filter="jade")` (label, jar name, coordinates, URL) |
 | **Minecraft:** synthetic/lambda names, `@At(target)` owner | `mixin_class_bytecode(filter="synthetic")`, `mixin_method_bytecode` |
-| **Minecraft:** cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins` |
+| **Minecraft:** cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins`; add `jarPath="<pack>/mods"` to read every mod in a pack from bytecode, including jar-in-jar and mods on no classpath |
 | **Minecraft:** convert a name between mapping namespaces | `mixin_mappings_lookup` |
 
 ## Examples
@@ -111,9 +112,21 @@ Every tool except `mixin_sync_project`, `mixin_refresh_vfs`, `mixin_ide_status`,
 - The output reports files that could not be read per root (usually a jar that changed on disk: run `mixin_refresh_vfs`), and on timeout names the root the scan stopped in, so you can rerun with `roots=` pinned to it.
 
 **Jars, resources, and off-classpath mods**
+- **Which tools reach which jars.** Six tools take any jar on disk through `jarPath`: `mixin_get_dep_source`, `mixin_list_jar_entries`, `mixin_search_bytecode`, `mixin_find_targeting_mixins`, `mixin_class_bytecode`, and `mixin_method_bytecode` (`mixin_search_bytecode` and `mixin_find_targeting_mixins` also read jar-in-jar). Every other tool (`mixin_search_in_deps`, `mixin_find_class`, `mixin_search_symbols`, references, hierarchies, call graphs, refactors) sees only what the IDE indexes: the project and its classpath. `mixin_search_in_deps` also needs source for each jar, which `genDependencySources` produces for the compile classpath only, so runtime-only jars are skipped by design, not because they lack sources; its "Not searched" note says which case applies. Declaring a jar `compileOnly` makes it searchable there; `mixin_search_bytecode(jar=...)` searches it without that.
 - `mixin_get_dep_source` addresses a file four ways, in precedence order: `url`, `jarPath` + `entry`, `className`, `path`. `className` resolves the same way `mixin_find_class` does, so it is the shortest route to a class whose path you don't know.
 - `mixin_list_jar_entries` then `mixin_get_dep_source(jarPath=…, entry=…)` reads any jar on disk, on the classpath or not, with no build change: the fastest way to check a mod's `mods.toml`, mixin config, or lang file. A `.class` entry addressed by `url` or `jarPath` is decompiled by the IDE; other binary entries report their size only.
 - `mixin_list_jar_entries(jarPath="<pack>/mods", fileMask="mods.toml", regexPattern="(?i)fzzy")` greps every jar in a folder: the way to answer "which pack mods depend on X". The same grep with `jar=` covers runtime-only classpath jars, which `mixin_search_in_deps` never scans; its empty results name those jars.
+- `mixin_search_bytecode(patterns=["actuallyHurt"], jarPath="<pack>/mods")` finds every class in a pack that references or declares that name, including inside nested jars, and labels each hit by role: `declares method` (the class's own member: an override or a mixin handler), `extends`/`implements`, `method ref Owner.name descriptor`, a class ref, a string, or another constant (mixin annotation targets appear here). Add `kinds=["declares"]` to keep only classes that declare or override the member, which cuts a pack-wide search for a commonly called method down to the classes that actually replace it. It is the bytecode counterpart of the grep above: use it to find which mods hook a vanilla method when a conflict has no obvious culprit.
+- `mixin_find_targeting_mixins(className=…, methodName=…, jarPath="<pack>/mods")` lists every mixin in a pack that targets a class, with its injectors (`@Inject(method = …, at = @At(…)) -> handler`), read from bytecode. Pass names as your project uses them: before 26.x they are also matched as Mojang, intermediary, and Yarn names for that version (`mcVersion`, default the project's), because Fabric mods ship mixins in whichever of those they were built with. It finds private targets a caller search misses, such as a mod cancelling `ChunkGenerator.getNearestGeneratedStructure`.
+- **Jar-in-jar** (a mod or library shipped inside another jar, under `META-INF/jarjar/` or, for Fabric and Connector mods, `META-INF/jars/`) is on no classpath, and no tool can open the inner jar: `mixin_search_bytecode` and `mixin_find_targeting_mixins(jarPath=…)` can search it, but `mixin_get_dep_source`, the bytecode tools, and everything index-based cannot read it. To read, index, or write mixins against it, put the nested jars on the compile classpath with `zipTree`, then `mixin_sync_project`. Gradle reads them straight from the outer jar, so nothing is extracted or committed:
+  ```groovy
+  // Burnt Basic ships only inside the Burnt wrapper jar
+  def burnt = file("../pack/mods/burnt-1.10.5.3-neoforge-1.21.1.jar")
+  if (burnt.exists()) {
+      compileOnly(files(zipTree(burnt).matching { include "META-INF/jarjar/burnt_basic-*.jar" }))
+  }
+  ```
+  Keep the outer jar on the runtime classpath (e.g. `localRuntime`) if it must load in dev. The `exists()` guard keeps the build working on machines without that pack folder. Don't extract nested jars by hand or unzip them to inspect them.
 - `mixin_get_dep_source(className=…)` reads any class `mixin_find_class` resolves: attached sources first, then the decompiled cache, then the IDE decompiler, with the same line numbers `mixin_find_class(methodName=…)` reports.
 - `jarPath` on `mixin_class_bytecode` / `mixin_method_bytecode` does the same for bytecode, and never waits for indexing. Omit `module` with it.
 - To make an off-classpath mod searchable rather than readable one file at a time, decompile it: `./gradlew genDependencySources --jar ../pack/mods/jade.jar` (repeatable) or `mixinmcp { extraJars.from(…) }` in the build script, then `mixin_sync_project`. Those roots show as `[ad hoc jar]` in `mixin_list_source_roots`.

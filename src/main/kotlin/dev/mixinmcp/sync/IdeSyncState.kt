@@ -28,7 +28,9 @@ class IdeSyncState(project: Project) : Disposable {
         val lastOutcome: Outcome?,
         val lastOutcomeAt: Long?,
         val lastError: String?,
-        val triggerFailure: String?,
+        /** Monotonic: conflated StateFlow collectors can miss a short importInFlight=true window, never a count. */
+        val importsFinished: Long = 0,
+        val importsFinishedAtResolveStart: Long = 0,
     ) {
         val busy: Boolean get() = resolveInFlight > 0 || importInFlight
     }
@@ -42,7 +44,6 @@ class IdeSyncState(project: Project) : Disposable {
             lastOutcome = null,
             lastOutcomeAt = null,
             lastError = null,
-            triggerFailure = null,
         ),
     )
 
@@ -57,11 +58,13 @@ class IdeSyncState(project: Project) : Disposable {
                 }
 
                 override fun onImportFinished(projectPath: String?) {
-                    state.update { it.copy(importInFlight = false) }
+                    state.update { it.copy(importInFlight = false, importsFinished = it.importsFinished + 1) }
                 }
 
                 override fun onImportFailed(projectPath: String?, t: Throwable) {
-                    state.update { it.copy(importInFlight = false, lastError = t.message ?: it.lastError) }
+                    state.update {
+                        it.copy(importInFlight = false, importsFinished = it.importsFinished + 1, lastError = t.message ?: it.lastError)
+                    }
                 }
 
                 override fun onFinalTasksFinished(projectPath: String?) {
@@ -77,7 +80,7 @@ class IdeSyncState(project: Project) : Disposable {
                 generation = it.generation + 1,
                 resolveInFlight = it.resolveInFlight + 1,
                 resolveStartedAt = System.currentTimeMillis(),
-                triggerFailure = null,
+                importsFinishedAtResolveStart = it.importsFinished,
             )
         }
     }
@@ -90,29 +93,33 @@ class IdeSyncState(project: Project) : Disposable {
         state.update { it.copy(resolveInFlight = (it.resolveInFlight - 1).coerceAtLeast(0)) }
     }
 
-    fun recordTriggerFailure(message: String) {
-        state.update { it.copy(triggerFailure = message) }
-    }
-
-    /** Completes when a resolve newer than [generationBefore] has started, or the trigger itself failed. */
+    /**
+     * Completes when a resolve newer than [generationBefore] has started, a resolve is in flight
+     * (IntelliJ drops a refresh request while one runs, so that resolve is the one to wait for).
+     */
     suspend fun awaitStarted(generationBefore: Long): Snapshot =
-        state.first { it.generation > generationBefore || it.triggerFailure != null }
+        state.first { it.generation > generationBefore || it.resolveInFlight > 0 }
 
     /**
-     * Completes when no resolve is in flight and the data import that follows a successful
-     * resolve has finished. The import starts a moment after the resolve ends, so a short grace
-     * period waits for it to begin before concluding there is none.
+     * Completes when no resolve is in flight and, after a successful resolve, the project-data
+     * import that follows it has finished. The import starts some time after the resolve ends
+     * (later on a busy EDT), so we wait on the import counter rather than a fixed grace period,
+     * falling back to [IMPORT_WAIT_FALLBACK_MS] in case no import is ever reported.
      */
     suspend fun awaitIdle(): Snapshot {
-        state.first { it.resolveInFlight == 0 }
-        withTimeoutOrNull(IMPORT_START_GRACE_MS) { state.first { it.importInFlight } }
+        val resolved: Snapshot = state.first { it.resolveInFlight == 0 }
+        if (resolved.lastOutcome == Outcome.SUCCESS) {
+            withTimeoutOrNull(IMPORT_WAIT_FALLBACK_MS) {
+                state.first { it.importsFinished > it.importsFinishedAtResolveStart }
+            }
+        }
         return state.first { it.resolveInFlight == 0 && !it.importInFlight }
     }
 
     override fun dispose() {}
 
     companion object {
-        private const val IMPORT_START_GRACE_MS: Long = 3_000
+        private const val IMPORT_WAIT_FALLBACK_MS: Long = 30_000
 
         fun getInstance(project: Project): IdeSyncState = project.service()
     }

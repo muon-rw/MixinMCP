@@ -30,7 +30,12 @@ internal fun normalizeParameterName(name: String): String =
 internal object ParameterSynonyms {
 
     private val autoAliases: Map<String, List<String>> = mapOf(
-        "pattern" to listOf("regexPattern"),
+        "pattern" to listOf("regexPattern", "patterns"),
+        "needles" to listOf("patterns"),
+        "kind" to listOf("kinds"),
+        "role" to listOf("kinds"),
+        "roles" to listOf("kinds"),
+        "strings" to listOf("patterns"),
         "regex" to listOf("regexPattern"),
         "regexp" to listOf("regexPattern"),
         "search" to listOf("regexPattern"),

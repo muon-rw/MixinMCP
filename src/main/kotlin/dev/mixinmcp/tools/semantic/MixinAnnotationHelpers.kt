@@ -65,8 +65,10 @@ internal fun projectContentRootPaths(project: Project): List<String> {
 internal fun isOwnBuildOutput(file: VirtualFile?, projectRootPaths: List<String>): Boolean {
     val jarPath: String = file?.path?.substringBefore("!/") ?: return false
     return projectRootPaths.any { root ->
-        jarPath.startsWith("$root/") &&
-            jarPath.removePrefix(root).trimStart('/').lowercase().startsWith("build/") &&
+        if (!jarPath.startsWith("$root/")) return@any false
+        val rel: String = jarPath.removePrefix(root).trimStart('/').lowercase()
+        rel.startsWith("build/") &&
+            !rel.startsWith("build/tmp/") &&
             !isGradleToolchainMergedOrBinaryInBuild(jarPath, root)
     }
 }
@@ -117,7 +119,11 @@ internal fun extractAllInjections(psiClass: PsiClass): List<String> {
     return result
 }
 
-internal fun extractInjectionsForMethod(psiClass: PsiClass, methodName: String): List<String> {
+internal fun extractInjectionsForMethod(
+    psiClass: PsiClass,
+    methodName: String,
+    targetClassName: String? = null,
+): List<String> {
     val result = mutableListOf<String>()
     for (method in psiClass.methods) {
         for (ann in method.modifierList.annotations) {
@@ -128,7 +134,16 @@ internal fun extractInjectionsForMethod(psiClass: PsiClass, methodName: String):
                     method.name == methodName
                 } else {
                     extractMethodAttributeValues(ann.findAttributeValue("method"))
-                        .any { methodTargets(it, methodName) }
+                        .any { methodTargets(it, methodName) } ||
+                        extractAtTargets(ann).any { target ->
+                            atTargetMatches(
+                                target,
+                                matchesOwner = { owner ->
+                                    targetClassName == null || normalizeForMatch(owner) == normalizeForMatch(targetClassName)
+                                },
+                                matchesMember = { member -> methodTargets(member, methodName) },
+                            )
+                        }
                 }
                 if (matches) {
                     result.add(ann.text.trim())
@@ -137,6 +152,21 @@ internal fun extractInjectionsForMethod(psiClass: PsiClass, methodName: String):
         }
     }
     return result
+}
+
+private fun extractNestedAnnotations(value: PsiAnnotationMemberValue?): List<PsiAnnotation> = when (value) {
+    is PsiAnnotation -> listOf(value)
+    is PsiArrayInitializerMemberValue -> value.initializers.flatMap(::extractNestedAnnotations)
+    else -> emptyList()
+}
+
+private fun extractAtTargets(ann: PsiAnnotation): List<String> {
+    val ats: List<PsiAnnotation> = extractNestedAnnotations(ann.findAttributeValue("at")) +
+        extractNestedAnnotations(ann.findAttributeValue("slice")).flatMap { slice ->
+            extractNestedAnnotations(slice.findAttributeValue("from")) +
+                extractNestedAnnotations(slice.findAttributeValue("to"))
+        }
+    return ats.flatMap { extractMethodAttributeValues(it.findAttributeValue("target")) }
 }
 
 private fun extractMethodAttributeValues(value: PsiAnnotationMemberValue?): List<String> {
@@ -148,11 +178,30 @@ private fun extractMethodAttributeValues(value: PsiAnnotationMemberValue?): List
     }
 }
 
-private fun methodTargets(methodStr: String, methodName: String): Boolean {
+internal fun methodTargets(methodStr: String, methodName: String): Boolean {
     return methodStr == methodName ||
         methodStr.startsWith("$methodName(") ||
+        methodStr.startsWith("$methodName:") ||
         methodStr.contains(";$methodName(") ||
+        methodStr.contains(";$methodName:") ||
         methodStr.endsWith(";$methodName")
+}
+
+internal fun atTargetMatches(
+    targetStr: String,
+    matchesOwner: (String) -> Boolean,
+    matchesMember: (String) -> Boolean,
+): Boolean {
+    val descStart: Int = targetStr.indexOfAny(charArrayOf('(', ':')).let { if (it < 0) targetStr.length else it }
+    val head: String = targetStr.substring(0, descStart)
+    val semi: Int = head.indexOf(';')
+    val dot: Int = head.lastIndexOf('.')
+    val (owner: String?, member: String) = when {
+        semi >= 0 -> head.substring(0, semi).removePrefix("L") to targetStr.substring(semi + 1)
+        dot >= 0 -> head.substring(0, dot).removePrefix("L") to targetStr.substring(dot + 1)
+        else -> null to targetStr
+    }
+    return (owner == null || matchesOwner(owner)) && matchesMember(member)
 }
 
 @RequiresReadLock

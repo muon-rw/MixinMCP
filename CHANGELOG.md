@@ -2,6 +2,29 @@
 
 # MixinMCP Changelog
 
+## [1.6.0]
+### Added
+
+- New tool `mixin_search_bytecode`: search compiled classes in any jar, a mods folder, or the classpath, jar-in-jar included. Hits are labeled by role (declares, extends/implements, refs, strings), `kinds` filters them, and literal patterns accept dotted class names and `Owner.member` / `Owner#member` forms
+- `mixin_find_targeting_mixins` can now pass `jarPath` to read mixins from bytecode in any jar or mods folder, jar-in-jar included; before 26.x it also matches Mojang, intermediary, and Yarn names (`mcVersion`), and `methodName` matches both `method` selectors and `@At(target = ...)` references on the target class
+- Gradle plugin gains `--decompiler-heap` / `mixinmcp { decompilerHeap }`
+
+### Changed
+
+- Gradle plugin: decompiles in a separate JVM, so large jars can no longer run a sync out of memory; out-of-memory jars retry once with double the heap
+- The IDE warns when the Gradle plugin is older than 1.6.0
+- `mixin_search_in_deps`: "Not searched" separates runtime-only jars (not decompiled by design) from compile jars not decompiled yet
+- `mixin_get_dep_source`: header shows total lines, where to continue, and the jar a decompiled class came from
+- `jarPath` calls no longer wait for indexing or a sync
+
+### Fixed
+
+- `mixin_sync_project` hanging when a sync was already running
+- `mixin_sync_project` reporting the import done before it started
+- Moved or duplicated jars reported as not decompiled
+- Large audio and binary resources (such as `.mp3` and `.ser` files) in the decompiled cache triggering false unreadable-file warnings during `mixin_search_in_deps`
+- `zipTree`-expanded NeoForge jars under `build/tmp/` misclassified as MDG merged game artifacts
+
 ## [1.5.3]
 ### Added
 - Support for Antigravity

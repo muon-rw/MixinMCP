@@ -949,8 +949,8 @@ class SourceNavigationToolset : McpToolset {
             }
             if (!timedOut && System.currentTimeMillis() - startTime > timeout) timedOut = true
 
-            val unsearchedJars: List<String> =
-                if (rootsMode in setOf("all", "library", "decompiled")) unsearchableClasspathJars(project) else emptyList()
+            val unsearchedJars: UnsearchedJars =
+                if (rootsMode in setOf("all", "library", "decompiled")) unsearchableClasspathJars(project) else UnsearchedJars.NONE
             val noMatchHints: List<String> =
                 if (hits.isEmpty() && !timedOut) {
                     val base: List<String> = buildNoMatchHintsForDepSearch(
@@ -1225,12 +1225,17 @@ class SourceNavigationToolset : McpToolset {
                 appendLine("(the same path is also in ${others.size} other root(s), pass a url to read one: $shown$more)")
             }
             val modSuffix: String = pinned?.let { " [pinned module: ${it.module.name}]" } ?: ""
-            appendLine("=== ${vf.name} (lines ${window.start}-${window.end}) [sourceKind: $sourceKind]$modSuffix ===")
+            // A class can resolve from any copy of its jar on the classpath, so say which one was read.
+            val jarSuffix: String = if (isClassEntry && vf.path.contains("!/")) " [jar: ${vf.path.substringBefore("!/")}]" else ""
+            appendLine("=== ${vf.name} (lines ${window.start}-${window.end} of ${lines.size}) [sourceKind: $sourceKind]$modSuffix$jarSuffix ===")
             appendLine()
             val markedLine: Int? = if (startLine == null && endLine == null) lineNumber else null
             for (i in window.start..window.end) {
                 val marker: String = if (i == markedLine) ">" else " "
                 appendLine("$marker $i| ${lines[i - 1]}")
+            }
+            if (window.end < lines.size) {
+                appendLine("(${lines.size - window.end} more lines; continue with startLine=${window.end + 1})")
             }
         }
 

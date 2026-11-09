@@ -61,6 +61,23 @@ data class DecompilationManifest(
             ignoreUnknownKeys = true
         }
 
+        private const val HASH_MEMO_FILE = "hash-memo.json"
+
+        /**
+         * The Gradle plugin's `<jar path>|<size>|<mtime>` to content-hash memo in [cacheRoot],
+         * or empty when absent or unreadable.
+         */
+        fun loadHashMemo(cacheRoot: Path): Map<String, String> {
+            val memoPath = cacheRoot.resolve(HASH_MEMO_FILE)
+            if (!Files.exists(memoPath)) return emptyMap()
+            return try {
+                json.decodeFromString<Map<String, String>>(Files.readString(memoPath))
+            } catch (e: Exception) {
+                LOG.warn("MixinMCP: failed to parse hash memo at $memoPath", e)
+                emptyMap()
+            }
+        }
+
         /**
          * Compute artifact hash: SHA-256 of the JAR file's actual bytes.
          * Streaming read with an 8KB buffer — negligible memory overhead.

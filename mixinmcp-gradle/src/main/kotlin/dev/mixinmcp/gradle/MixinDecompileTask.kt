@@ -8,13 +8,12 @@ import org.gradle.api.artifacts.result.ResolvedArtifactResult
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.options.Option
 import org.gradle.work.DisableCachingByDefault
+import org.gradle.workers.WorkerExecutor
 import org.jetbrains.java.decompiler.api.Decompiler
-import org.jetbrains.java.decompiler.main.decompiler.DirectoryResultSaver
-import org.jetbrains.java.decompiler.main.extern.IFernflowerLogger
-import org.jetbrains.java.decompiler.main.extern.IFernflowerPreferences
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
@@ -23,6 +22,7 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.FileTime
 import java.util.zip.ZipFile
 import java.util.concurrent.TimeUnit
+import javax.inject.Inject
 
 /**
  * Decompiles dependency JARs without -sources.jar into ~/.cache/mixinmcp/decompiled/.
@@ -35,14 +35,11 @@ import java.util.concurrent.TimeUnit
  * builds and entirely separate projects to share decompilation work without interfering with
  * each other's cache entries.
  *
- * Vineflower spawns N decompiler threads internally (default = CPU count). Each
- * thread builds an SSA variable graph per class that can consume hundreds of MB.
- * On a 12-core machine with a large JAR, this means 12 threads x ~800MB = ~10GB.
- *
- * To stay within a reasonable heap budget, this task limits Vineflower's thread
- * count (default 2). Override with --threads. If you still hit OOM, increase the
- * Gradle daemon heap in gradle.properties:
- *   org.gradle.jvmargs=-Xmx4g
+ * Vineflower builds an SSA variable graph per class per thread that can reach hundreds of MB, so
+ * a large jar can need several GB. We run it in a forked worker JVM with its own heap
+ * (--decompiler-heap, default sized from --threads) instead of the Gradle daemon: during an IDE
+ * sync the daemon heap also holds the project model, and an OutOfMemoryError there can land on
+ * any thread and fail the sync itself.
  *
  * Configuration cache: artifactCollection is set at configuration time by the
  * plugin. No Task.project access at execution time.
@@ -50,13 +47,25 @@ import java.util.concurrent.TimeUnit
 @DisableCachingByDefault(because = "writes to a machine-global content-addressed cache with its own incrementality")
 abstract class MixinDecompileTask : DefaultTask() {
 
+    @get:Inject
+    abstract val workerExecutor: WorkerExecutor
+
     @get:Input
     @get:Option(option = "threads", description = "Vineflower decompiler threads (default 2). Lower = less memory.")
     var threads: Int = 2
 
     @get:Input
-    @get:Option(option = "force", description = "Skip OOM pre-flight confirmation; proceed with decompilation even when heap may be insufficient.")
+    @get:Option(option = "force", description = "Decompile large jars even when --decompiler-heap is below the estimated need.")
     var force: Boolean = false
+
+    @get:Input
+    @get:Optional
+    @get:Option(option = "decompiler-heap", description = "Max heap of the forked decompiler JVM, e.g. 6g (default: 1g per thread + 1g, at least 2g).")
+    var decompilerHeap: String? = null
+
+    /** Set by MixinDecompilePlugin from `mixinmcp { decompilerHeap }`; --decompiler-heap wins. */
+    @get:Internal
+    var decompilerHeapSetting: Provider<String>? = null
 
     @get:Input
     @get:Option(option = "jar", description = "Decompile an extra jar that is on no classpath; repeat per jar. Relative paths resolve against the project directory.")
@@ -116,6 +125,30 @@ abstract class MixinDecompileTask : DefaultTask() {
         var skipped = 0
         var failed = 0
         var corruptPurged = 0
+        var toolchainSourced = 0
+        private val recordedThisRun = mutableSetOf<String>()
+
+        /**
+         * Records [entry] for [hash], refreshing an entry loaded from the previous manifest: the cache
+         * is content-addressed, so a jar that moved (a pack jar replaced by an identical Maven artifact)
+         * would otherwise keep a stale path. The first artifact seen this run wins, which keeps
+         * compile-over-buildscript precedence for byte-identical duplicates. createdAt and
+         * decompilerVersion describe the cached output, so we keep them from the existing entry.
+         */
+        fun record(hash: String, entry: CacheEntry) {
+            if (!recordedThisRun.add(hash)) return
+            val previous: CacheEntry? = entries[hash]
+            entries[hash] = if (previous == null) entry else entry.copy(
+                createdAt = previous.createdAt,
+                decompilerVersion = previous.decompilerVersion,
+            )
+        }
+
+        /** Records an entry whose output was just written, replacing any previous entry outright. */
+        fun recordFresh(hash: String, entry: CacheEntry) {
+            recordedThisRun.add(hash)
+            entries[hash] = entry
+        }
     }
 
     private class ArtifactIdentity(val displayName: String, val moduleOwner: ModuleComponentIdentifier?)
@@ -239,8 +272,9 @@ abstract class MixinDecompileTask : DefaultTask() {
             val cacheDir = globalCacheRoot.resolve(hash).toFile()
 
             if (cacheDir.isDirectory && cacheDir.list()?.isNotEmpty() == true) {
-                if (hash !in classpathBatch.entries) {
-                    val entry = CacheEntry(
+                classpathBatch.record(
+                    hash,
+                    CacheEntry(
                         libraryName = libraryName,
                         classesJarPath = jarPath,
                         jarSize = jarSize,
@@ -249,9 +283,8 @@ abstract class MixinDecompileTask : DefaultTask() {
                         decompilerVersion = "published-sources",
                         createdAt = System.currentTimeMillis(),
                         classpathKind = classpathKindOf(jarFile),
-                    )
-                    classpathBatch.entries[hash] = entry
-                }
+                    ),
+                )
                 touchDirectory(cacheDir.toPath())
                 logger.lifecycle("$progress Already cached: $libraryName (published sources)")
                 publishedCached++
@@ -273,7 +306,7 @@ abstract class MixinDecompileTask : DefaultTask() {
                     createdAt = System.currentTimeMillis(),
                     classpathKind = classpathKindOf(jarFile),
                 )
-                classpathBatch.entries[hash] = entry
+                classpathBatch.recordFresh(hash, entry)
                 saveBatch(classpathBatch)
                 publishedMirrored++
                 logger.lifecycle("$progress Done! $libraryName")
@@ -312,7 +345,8 @@ abstract class MixinDecompileTask : DefaultTask() {
         val corruptPurged = classpathBatch.corruptPurged + adhocBatch.corruptPurged
         logger.lifecycle(
             "MixinMCP complete: decompile: ${classpathBatch.decompiled} new, ${classpathBatch.cached} cached, " +
-                "${classpathBatch.skipped} skipped (heap), ${classpathBatch.failed} failed (of $total); " +
+                "${classpathBatch.skipped} skipped (heap), ${classpathBatch.toolchainSourced} skipped (toolchain sources), " +
+                "${classpathBatch.failed} failed (of $total); " +
                 "published sources: $publishedMirrored mirrored, $publishedCached cached, $publishedFailed failed (of $publishedTotal)" +
                 (if (adhocJars.isNotEmpty()) {
                     "; ad hoc: ${adhocBatch.decompiled} new, ${adhocBatch.cached} cached, " +
@@ -325,7 +359,7 @@ abstract class MixinDecompileTask : DefaultTask() {
             logger.warn("")
             logger.warn("MixinMCP: $skipped JAR(s) skipped due to memory constraints.")
             logger.warn("To decompile them, run: ./gradlew genDependencySources --force")
-            logger.warn("Or increase heap: org.gradle.jvmargs=-Xmx${(threads * 800L) + 1012}m in gradle.properties")
+            logger.warn("Or raise the decompiler heap: --decompiler-heap=${(threads * 800L) + 1012}m")
             logger.warn("")
         }
 
@@ -381,6 +415,14 @@ abstract class MixinDecompileTask : DefaultTask() {
             return
         }
 
+        // Checked before the hash is recorded so the manifest prune drops any entry an earlier
+        // run decompiled before the toolchain had written its sources.
+        toolchainSourcesJar(jarFile)?.let { sources ->
+            logger.lifecycle("$progress Skipping $libraryName: toolchain sources present (${sources.name})")
+            batch.toolchainSourced++
+            return
+        }
+
         val jarSize = jarFile.length()
         val jarModified = jarFile.lastModified()
         val hash = DecompilationManifest.computeArtifactHashMemoized(jarFile, batch.hashMemo)
@@ -402,55 +444,119 @@ abstract class MixinDecompileTask : DefaultTask() {
         )
 
         if (cacheDir.isDirectory && cacheDir.list()?.isNotEmpty() == true) {
-            if (hash !in batch.entries) {
-                batch.entries[hash] = newEntry()
-            }
+            batch.record(hash, newEntry())
             touchDirectory(cacheDir.toPath())
             logger.lifecycle("$progress Already cached: $libraryName ($sizeStr) Skipping...")
             batch.cached++
             return
         }
 
-        val maxHeapMb = Runtime.getRuntime().maxMemory() / 1024 / 1024
+        val workerHeapMb: Long = workerHeapMb()
         val estimatedNeedMb = (threads * 800L) + 500L
-        if (sizeMb >= 15 && maxHeapMb < estimatedNeedMb && !force) {
-            logger.warn("$progress Skipping $libraryName ($sizeStr): may exceed ${maxHeapMb}MB heap. " +
-                "Run with --force or set org.gradle.jvmargs=-Xmx${estimatedNeedMb + 512}m")
+        if (sizeMb >= 15 && workerHeapMb < estimatedNeedMb && !force) {
+            logger.warn("$progress Skipping $libraryName ($sizeStr): may exceed the ${workerHeapMb}MB decompiler heap. " +
+                "Run with --force or --decompiler-heap=${estimatedNeedMb + 512}m")
             batch.skipped++
             return
         }
 
-        Files.createDirectories(cacheDir.toPath())
-
         logger.lifecycle("$progress Decompiling: $libraryName ($sizeStr)")
 
-        try {
-            val decompiler = Decompiler.builder()
-                .inputs(jarFile)
-                .output(DirectoryResultSaver(cacheDir))
-                .option(IFernflowerPreferences.THREADS, threads.toString())
-                .option(IFernflowerPreferences.REMOVE_SYNTHETIC, "0")
-                .logger(IFernflowerLogger.NO_OP)
-                .build()
-            decompiler.decompile()
+        // A single retry at double the heap, not fewer threads: --threads=1 can stall Vineflower.
+        var attemptHeapMb: Long = workerHeapMb
+        while (true) {
+            Files.createDirectories(cacheDir.toPath())
+            try {
+                decompileInWorker(jarFile, cacheDir, threads, attemptHeapMb)
+                batch.recordFresh(hash, newEntry())
+                saveBatch(batch)
+                batch.decompiled++
+                logger.lifecycle("$progress Done! $libraryName")
+                return
+            } catch (e: Exception) {
+                deleteRecursively(cacheDir)
+                val outOfMemory: Boolean = isWorkerOutOfMemory(e)
+                if (outOfMemory && attemptHeapMb == workerHeapMb) {
+                    attemptHeapMb = workerHeapMb * 2
+                    logger.warn("$progress Decompiler ran out of its ${workerHeapMb}MB heap on $libraryName; retrying with ${attemptHeapMb}MB")
+                    continue
+                }
+                if (outOfMemory) {
+                    logger.error("$progress Decompiler ran out of a ${attemptHeapMb}MB heap on $libraryName ($sizeStr), skipping. " +
+                        "Raise it with --decompiler-heap=${attemptHeapMb * 2}m or mixinmcp { decompilerHeap = \"${attemptHeapMb * 2}m\" }")
+                } else {
+                    logger.warn("$progress Failed: $libraryName: ${rootMessage(e)}")
+                }
+                batch.failed++
+                return
+            }
+        }
+    }
 
-            batch.entries[hash] = newEntry()
-            saveBatch(batch)
-            batch.decompiled++
-            logger.lifecycle("$progress Done! $libraryName")
-        } catch (e: OutOfMemoryError) {
-            logger.error("$progress OOM decompiling $libraryName ($sizeStr), skipping. " +
-                "Try: --threads=1 or org.gradle.jvmargs=-Xmx6g in gradle.properties")
-            deleteRecursively(cacheDir)
-            batch.failed++
-            System.gc()
-        } catch (e: Exception) {
-            logger.warn("$progress Failed: $libraryName: ${e.message}")
-            deleteRecursively(cacheDir)
-            batch.failed++
+    private fun decompileInWorker(jarFile: File, cacheDir: File, threadCount: Int, heapMb: Long) {
+        val queue = workerExecutor.processIsolation { spec ->
+            vineflowerClasspath()?.let { spec.classpath.from(it) }
+            spec.forkOptions { fork ->
+                fork.maxHeapSize = "${heapMb}m"
+                // Die on the first OOM instead of thrashing the GC; the failure surfaces from await().
+                fork.jvmArgs("-XX:+ExitOnOutOfMemoryError")
+            }
+        }
+        queue.submit(DecompileJarAction::class.java) { params ->
+            params.inputJar.set(jarFile)
+            params.outputDir.set(cacheDir)
+            params.threads.set(threadCount)
+        }
+        queue.await()
+    }
+
+    private fun vineflowerClasspath(): File? =
+        Decompiler::class.java.protectionDomain?.codeSource?.location?.toURI()?.let { File(it) }
+
+    private fun workerHeapMb(): Long {
+        val configured: String? = decompilerHeap?.takeIf { it.isNotBlank() } ?: decompilerHeapSetting?.orNull
+        configured?.let { value ->
+            parseHeapMb(value)?.let { return it }
+            logger.warn("MixinMCP: ignoring unparseable decompiler heap \"$value\" (expected e.g. 4g or 4096m)")
+        }
+        return maxOf(2048L, threads * 1024L + 1024L)
+    }
+
+    private fun parseHeapMb(value: String): Long? {
+        val match = Regex("""(?i)^\s*(\d+)\s*([gmk]?)\s*$""").find(value) ?: return null
+        val amount: Long = match.groupValues[1].toLong()
+        return when (match.groupValues[2].lowercase()) {
+            "g" -> amount * 1024
+            "k" -> amount / 1024
+            "m" -> amount
+            else -> amount / 1024 / 1024
+        }
+    }
+
+    /**
+     * True when the worker hit an OutOfMemoryError or died from one; -XX:+ExitOnOutOfMemoryError
+     * makes the JVM exit with status 3, which Gradle reports as a failed worker process.
+     */
+    private fun isWorkerOutOfMemory(e: Throwable): Boolean =
+        generateSequence(e) { it.cause.takeIf { cause -> cause !== it } }.any { t ->
+            t is OutOfMemoryError ||
+                t.message?.contains("OutOfMemoryError") == true ||
+                t.message?.contains("non-zero exit value 3") == true
         }
 
-        System.gc()
+    private fun rootMessage(e: Throwable): String {
+        val root: Throwable = generateSequence(e) { it.cause.takeIf { cause -> cause !== it } }.last()
+        return root.message ?: root.toString()
+    }
+
+    /**
+     * The `-sources.jar` a toolchain wrote next to [jarFile], such as MDG's
+     * `neoforge-<v>-sources.jar` beside `neoforge-<v>.jar` and `neoforge-<v>-merged.jar`.
+     * Gradle's module cache keeps each file in its own hash directory, so this never matches there.
+     */
+    private fun toolchainSourcesJar(jarFile: File): File? {
+        val base: String = jarFile.nameWithoutExtension.removeSuffix("-merged")
+        return File(jarFile.parentFile ?: return null, "$base-sources.jar").takeIf { it.isFile && it != jarFile }
     }
 
     /** --jar paths (relative ones against the project dir) plus the `mixinmcp` extension's jars. */

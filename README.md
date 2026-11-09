@@ -125,7 +125,7 @@ pluginManagement {
 // build.gradle.kts
 plugins {
     // ... your existing plugins ...
-    id("dev.mixinmcp.decompile") version "1.5.0"
+    id("dev.mixinmcp.decompile") version "1.6.0"
 }
 ```
 
@@ -133,20 +133,19 @@ plugins {
 // build.gradle
 plugins {
     // ... your existing plugins ...
-    id 'dev.mixinmcp.decompile' version '1.5.0'
+    id 'dev.mixinmcp.decompile' version '1.6.0'
 }
 ```
-**3. Increase Gradle process memory:** (**Strongly** Recommended)
+**3. (Optional) Size the decompiler heap:**
 
-> [!CAUTION]
-> If you skip this step, you might experience OOM errors during gradle sync
-
-
- Add to your project level `gradle.properties`:
-```properties
-org.gradle.jvmargs=-Xmx4g
-# You may need to set this as high as 6g if you need 
-# to decompile an extremely large jar (e.g. Cataclysm)
+Decompilation runs in its own worker JVM, not the Gradle daemon, so it can't run your sync
+out of memory. The default heap is 1 GB per decompiler thread plus 1 GB (3 GB at the default
+2 threads), and a jar that runs out is retried once at double that. To decompile an extremely
+large jar (e.g. Cataclysm) on the first try, raise it in your build script:
+```groovy
+mixinmcp {
+    decompilerHeap = "6g"
+}
 ```
 
 > [!WARNING]
@@ -226,7 +225,9 @@ Older MixinMCP versions injected these skills into `.cursor/` and `.claude/` and
 ## Tool reference
 
 <details>
-<summary>All 27 tools (click to expand)</summary>
+<summary>All 28 tools (click to expand)</summary>
+
+Six tools accept any jar on disk through `jarPath`, on the classpath or not: `mixin_get_dep_source`, `mixin_list_jar_entries`, `mixin_search_bytecode` and `mixin_find_targeting_mixins` (both also read jar-in-jar), `mixin_class_bytecode`, and `mixin_method_bytecode`. The rest work on what the IDE indexes, the project and its classpath. `mixin_search_in_deps` searches source, which `genDependencySources` produces for the compile classpath only: runtime-only jars are left out by design, and its "Not searched" note names them separately from compile jars that just haven't been decompiled yet.
 
 Undeclared parameter names are rejected before the call runs: common synonyms are accepted outright when they can only mean one thing on that tool (`limit` for `maxResults`, `class` for `className`), anything else gets a suggestion in the error. Three renamed parameters keep their old names: `path` on `mixin_refresh_vfs`, `force` on `mixin_safe_delete`, `methodName` on `mixin_extract_method`.
 
@@ -239,6 +240,7 @@ Undeclared parameter names are rejected before the call runs: common synonyms ar
 | `mixin_search_in_deps` | Regex search across all dependency sources, both published and auto-decompiled. Like grep for your entire classpath, JDK `src.zip` and buildscript classpath included. Pass `contextLines` to capture short method bodies inline; `roots` narrows the scan to `library`, `game`, `decompiled`, `jdk`, or `buildscript`. The default order scans game roots first and the JDK second to last, so vanilla and mod hits lead. |
 | `mixin_get_dep_source` | Read source and text resources from dependency jars, the decompiled cache, or any jar on disk. Address the file with `url` (from search results), `jarPath` + `entry`, `className`, or `path` (e.g. io/redspace/.../Utils.java); pick lines with a `lineNumber` window or an explicit `startLine`/`endLine` range. Reads `mods.toml`, `fabric.mod.json`, lang files, recipes, and mixin configs as readily as `.java`. |
 | `mixin_list_jar_entries` | List or grep the entries inside jars. `jarPath` takes any jar on disk, on the classpath or not, or a directory of jars such as a pack's mods folder; `jar` takes a substring of a classpath jar's file name or coordinates. Narrow with `pathPrefix` / `fileMask`; `.class` entries need `includeClasses=true`. `regexPattern` greps the text entries instead, e.g. every `mods.toml` in a mods folder that mentions a dependency; it is also the way to search runtime-only jars, which `mixin_search_in_deps` cannot see. |
+| `mixin_search_bytecode` | Search compiled classes for constant-pool strings: member names, owner classes, descriptors, string literals, and annotation values such as mixin targets. Each hit is labeled by role: a declared field or method (an override or mixin handler), extends/implements, a field or method ref (`Owner.name descriptor`), class ref, string, or other constant; `kinds` narrows to roles, e.g. `kinds=["declares"]` for classes that declare or override a member rather than call it. Works on jars without source, jars on no classpath, and jar-in-jar (scanned in memory, three levels deep). `jarPath` takes a jar or a folder of jars, `jar` a classpath jar by name; with neither it searches the whole classpath. The way to find every mod in a pack that touches a vanilla member: `patterns=["actuallyHurt"], jarPath="<pack>/mods"`. |
 | `mixin_list_source_roots` | Lists all source roots searched by dependency tools. Use to diagnose missing sources, or pass `filter` (a substring or glob over label, jar name, coordinates, and URL) to answer "is jar X attached" in one call. |
 
 ### Semantic Navigation
@@ -251,7 +253,7 @@ Undeclared parameter names are rejected before the call runs: common synonyms ar
 | `mixin_call_hierarchy`        | Callers and callees of a method, recursive to `maxDepth` (default 3, cap 10), traces execution flow across levels with cycle detection. Callees cover direct calls, `new Foo(...)`, `Foo::bar`, and the real synthetic target behind each lambda. A method that calls the target more than once lists each call's Mixin `INVOKE` ordinal and line. |
 | `mixin_super_methods`         | Find where a method is originally declared in the hierarchy.                                                                                                                                                                                      |
 | `mixin_find_overrides`        | Find all overrides of a method across the class hierarchy (project, mods, loader, libraries).                                                                                                                                                     |
-| `mixin_find_targeting_mixins` | Find all `@Mixin` classes that target a given class/method, for cross-mod conflict analysis.                                                                                                                                                      |
+| `mixin_find_targeting_mixins` | Find all `@Mixin` classes that target a given class/method, for cross-mod conflict analysis. With `jarPath` (a jar or a pack's mods folder) it reads mixins from bytecode, jar-in-jar included, and for versions before 26.x also matches the names as Mojang, intermediary, and Yarn (`mcVersion`), since Fabric mods ship mixins in whichever of those they were built with.                                                                                                                                                      |
 
 ### Bytecode Inspection
 
@@ -321,34 +323,24 @@ project, every dependency is searchable.
 
 ### Memory tuning
 
-Vineflower's SSA analysis can use significant memory on large JARs. The task
-defaults to 2 decompiler threads to keep memory usage reasonable.
-
-**Pre-flight check:** Before decompiling large uncached JARs (≥15MB), the task
-checks whether the Gradle daemon heap is likely sufficient. If not, it blocks
-and prompts for confirmation. In non-interactive environments (CI, IntelliJ sync),
-the task fails with recommendations instead of hanging. Use `--force` to skip this
-check and proceed regardless:
+Vineflower's SSA analysis can use several GB on large JARs, so the task runs it per jar in a
+forked worker JVM instead of the Gradle daemon. An out-of-memory error there ends only that
+worker: the task retries the jar once at double the heap, then skips it and moves on.
 
 ```bash
-# Manually set thread count. Setting threads=1 may cause decompilation to freeze entirely.
-./gradlew genDependencySources --threads=3 # Default=2
+# Decompiler threads (default 2). Setting threads=1 may cause decompilation to freeze entirely.
+./gradlew genDependencySources --threads=3
 
-# Skip OOM pre-flight confirmation (e.g. when you know heap is sufficient)
+# Worker heap for this run (default: 1g per thread + 1g, at least 2g)
+./gradlew genDependencySources --decompiler-heap=6g
+
+# Decompile jars of 15MB+ even when the heap is below the estimated need
 ./gradlew genDependencySources --force
 ```
 
-
-*Add to your mod project's gradle.properties:*
-```properties
-# Increase memory available to Gradle
-org.gradle.jvmargs=-Xmx4g
-
-# Disable parallelization (which may increase risk of OOM)
-org.gradle.parallel=false
-```
-
-On large modded projects (50+ dependencies, some JARs over 100MB), you might need to set gradle process memory as high as `-Xmx6g`. 
+Set the heap permanently with `mixinmcp { decompilerHeap = "6g" }` in your build script.
+On MDG projects the task runs after `createMinecraftArtifacts` and skips the game jar MDG
+already wrote sources for.
 
 The task saves progress after each JAR, so if things do crash, just resync Gradle or run the task manually and Decompile will pick up where it left off.
 

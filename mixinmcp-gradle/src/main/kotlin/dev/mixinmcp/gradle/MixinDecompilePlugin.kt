@@ -22,6 +22,8 @@ import java.io.File
  * (implementation, api, compileOnly, compileOnlyApi). runtimeOnly deps are
  * excluded — they can't be referenced in code or targeted by mixins.
  */
+private val TOOLCHAIN_SOURCES_TASKS: Set<String> = setOf("createMinecraftArtifacts")
+
 class MixinDecompilePlugin : Plugin<Project> {
 
     override fun apply(project: Project) {
@@ -33,6 +35,10 @@ class MixinDecompilePlugin : Plugin<Project> {
             it.projectDir = project.projectDir
             it.gradleUserHome = project.gradle.gradleUserHomeDir
             it.extraJarFiles = project.provider { extension.extraJars.files }
+            it.decompilerHeapSetting = extension.decompilerHeap
+            // MDG writes the game jar's -sources.jar in this task; running after it lets us skip
+            // decompiling the largest jar on the classpath, which the IDE attaches sources for anyway.
+            it.mustRunAfter(project.tasks.matching { task -> task.name in TOOLCHAIN_SOURCES_TASKS })
 
             val configs = findClasspathConfigurations(project)
             if (configs.isNotEmpty()) {

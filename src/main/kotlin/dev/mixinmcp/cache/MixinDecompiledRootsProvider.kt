@@ -78,9 +78,13 @@ class MixinDecompiledRootsProvider : AdditionalLibraryRootsProvider(), LabeledSy
                 .filter { it !== this }
                 .flatMap { it.sourcedClassesJarPaths(project) }
         val includeBuildscript: Boolean = MixinMcpSettings.getInstance(project).indexBuildscriptClasspath
-        return DecompilationCacheService.getInstance(project).getCachedRoots()
+        val service: DecompilationCacheService = DecompilationCacheService.getInstance(project)
+        val roots: List<DecompilationCacheService.CachedLibraryInfo> = service.getCachedRoots()
+        // Matched by hash too, so a cache entry recorded under another copy's path still yields to attached sources.
+        val sourcedHashes: Set<String> = sourced.mapNotNullTo(HashSet()) { service.artifactHashFor(it) }
+        return roots
             .filterNot { !includeBuildscript && it.classpathKind == "buildscript" }
-            .filterNot { DecompilationCacheService.normalizeJarDiskPath(it.classesJarPath) in sourced }
+            .filterNot { DecompilationCacheService.normalizeJarDiskPath(it.classesJarPath) in sourced || it.artifactHash in sourcedHashes }
     }
 
     private fun classesJarPathsWithAttachedSources(project: Project): Set<String> {

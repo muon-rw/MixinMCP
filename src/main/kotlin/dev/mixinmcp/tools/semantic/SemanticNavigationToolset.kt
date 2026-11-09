@@ -294,16 +294,38 @@ class SemanticNavigationToolset : McpToolset {
 
     @McpToolHints(readOnlyHint = TRUE, openWorldHint = FALSE)
     @McpTool
-    @McpDescription("Finds all @Mixin classes that target a given class (and optionally a specific method). Use this for cross-mod conflict analysis — discover which other mods inject into the same target. Returns mixin FQCN, injection points (@Inject, @Redirect, @Overwrite, etc.), and source location. methodName: optionally narrow to mixins targeting that method. maxResults: 50 default. If the IDE is indexing, the call waits for indexing to finish rather than failing.")
+    @McpDescription(
+        "Finds all @Mixin classes that target a given class (and optionally a specific method). Use this for " +
+            "cross-mod conflict analysis: discover which other mods inject into the same target. Returns mixin FQCN, " +
+            "injection points (@Inject, @Redirect, @Overwrite, MixinExtras injectors, etc.), and source location. " +
+            "methodName: optionally narrow to mixins targeting that method. maxResults: 50 default. Without jarPath " +
+            "it searches the IDE index (the project and its classpath) and waits for indexing to finish. jarPath: " +
+            "instead read mixins from bytecode in a jar or a directory of jars, such as a pack's mods folder, " +
+            "including jar-in-jar, with no classpath or index needed. Pass className and methodName in your project's " +
+            "names; for game versions before 26.x they are also matched as their Mojang, intermediary, and Yarn names, " +
+            "since Fabric mods ship mixins in whichever of those they were built with. mcVersion: the game version of " +
+            "those jars for that expansion (default: the project's version; 'none' matches only the names given). " +
+            "timeout (ms, default 60000) applies to jarPath scans.",
+    )
     @Suppress("unused")
     suspend fun mixin_find_targeting_mixins(
         className: String,
         methodName: String? = null,
         maxResults: Int = 50,
+        jarPath: String? = null,
+        mcVersion: String? = null,
+        timeout: Long = 60_000,
     ): McpToolCallResult {
         val project = coroutineContext.requireProject { return it }
         if (maxResults < 1) {
             return McpToolCallResult.error("maxResults must be >= 1 (got $maxResults)")
+        }
+        val diskPath: String? = jarPath?.trim()?.takeIf { it.isNotEmpty() }
+        if (diskPath != null) {
+            if (timeout < 1000 || timeout > 600_000) {
+                return McpToolCallResult.error("timeout must be between 1000 and 600000 ms (got $timeout)")
+            }
+            return findTargetingMixinsInJars(project, className, methodName, maxResults, diskPath, mcVersion?.trim(), timeout)
         }
 
         return smartReadAction(project) {
@@ -334,7 +356,7 @@ class SemanticNavigationToolset : McpToolset {
                             ownBuildSkipped++
                         } else if (deduper.record(psiClass.qualifiedName, vf)) {
                             val injections: List<String> = if (methodName != null) {
-                                extractInjectionsForMethod(psiClass, methodName)
+                                extractInjectionsForMethod(psiClass, methodName, normalizedTarget)
                             } else {
                                 extractAllInjections(psiClass)
                             }

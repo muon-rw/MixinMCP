@@ -7,7 +7,7 @@ import com.intellij.mcpserver.annotations.McpTool
 import com.intellij.mcpserver.annotations.McpToolHintValue.FALSE
 import com.intellij.mcpserver.annotations.McpToolHintValue.TRUE
 import com.intellij.mcpserver.annotations.McpToolHints
-import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.EDT
 import com.intellij.openapi.externalSystem.importing.ImportSpecBuilder
 import com.intellij.openapi.externalSystem.model.ProjectSystemId
 import com.intellij.openapi.externalSystem.service.execution.ProgressExecutionMode
@@ -20,6 +20,9 @@ import com.intellij.openapi.util.io.FileUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtil
 import dev.mixinmcp.sync.IdeSyncState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.coroutines.coroutineContext
@@ -28,6 +31,7 @@ import kotlin.coroutines.coroutineContext
 private val GRADLE_SYSTEM_ID: ProjectSystemId = ProjectSystemId("GRADLE")
 
 private const val NO_WAIT_START_BUDGET_MS: Long = 30_000
+private const val MIN_START_BUDGET_MS: Long = 5_000
 private const val MAX_SYNC_TIMEOUT_MS: Long = 600_000
 
 internal fun normalizeDiskPath(path: String): String =
@@ -67,7 +71,9 @@ class ProjectManagementToolset : McpToolset {
             "Gradle root or a directory inside one (the error lists the linked roots). wait (default true) blocks " +
             "until the resolve and the project-data import that follows it finish, up to timeoutMs (default 90000, " +
             "max 600000; the resolve can take several seconds to start), then reports success, failure with the error " +
-            "text, cancellation, or timeout; wait=false returns as soon as the resolve has started, or after 30s if it " +
+            "text, cancellation, or timeout. When a sync is already running (IntelliJ auto-reloads after build-file " +
+            "edits), wait=true waits for it inside the same budget and then syncs again; wait=false returns without " +
+            "queueing a second one. wait=false returns as soon as the resolve has started, or after 30s if it " +
             "has not, and the sync continues in the background (poll " +
             "mixin_ide_status). Maven projects are not supported by this tool; use the IDE's Maven reload.",
     )
@@ -103,26 +109,58 @@ class ProjectManagementToolset : McpToolset {
             )
 
         val syncState: IdeSyncState = IdeSyncState.getInstance(project)
-        val generationBefore: Long = syncState.snapshot.generation
         val requestedAt: Long = System.currentTimeMillis()
 
-        // External System refresh must run on EDT; the resolve itself runs in the background.
-        ApplicationManager.getApplication().invokeLater {
-            if (project.isDisposed) return@invokeLater
-            FileDocumentManager.getInstance().saveAllDocuments()
-            val spec = ImportSpecBuilder(project, GRADLE_SYSTEM_ID).use(ProgressExecutionMode.START_IN_FOREGROUND_ASYNC)
-            try {
-                ExternalSystemUtil.refreshProject(gradleRoot, spec.build())
-            } catch (e: Exception) {
-                syncState.recordTriggerFailure(e.message ?: e.toString())
+        // IntelliJ drops a refresh request for a project whose resolve is already running (an
+        // auto-reload after a build-file edit, or an earlier call), so no new generation would
+        // ever start. Wait that resolve out, then sync again so the import sees current build files.
+        if (syncState.snapshot.resolveInFlight > 0) {
+            if (!wait) {
+                return McpToolCallResult.text(
+                    "A sync is already running for this project (${IdeBusyGuardingTool.describeBusyState(project)}); " +
+                        "IntelliJ ignores new sync requests until it ends, so none was queued. Poll mixin_ide_status, " +
+                        "or call mixin_sync_project with wait=true to wait for it and then sync again.",
+                )
             }
+            withTimeoutOrNull(timeoutMs) { syncState.awaitIdle() } ?: return McpToolCallResult.error(
+                "An earlier sync is still running after ${timeoutMs / 1000}s (${IdeBusyGuardingTool.describeBusyState(project)}), " +
+                    "so no new sync was requested for $gradleRoot. Poll mixin_ide_status or call again with a larger timeoutMs.",
+            )
+        }
+        val budgetLeftMs: Long = timeoutMs - (System.currentTimeMillis() - requestedAt)
+        if (budgetLeftMs < MIN_START_BUDGET_MS) {
+            return McpToolCallResult.error(
+                "Waiting for the earlier sync used the ${timeoutMs / 1000}s budget, so no new sync was requested for " +
+                    "$gradleRoot. Call again (the IDE is idle now) or pass a larger timeoutMs.",
+            )
         }
 
-        val startBudgetMs: Long = if (wait) timeoutMs else minOf(timeoutMs, NO_WAIT_START_BUDGET_MS)
+        // External System refresh must run on EDT; the resolve itself runs in the background.
+        // The generation is read on the EDT right before the refresh, so a resolve that started
+        // after the wait above is either counted in it or adopted by awaitStarted.
+        val generationBefore: Long = try {
+            withContext(Dispatchers.EDT) {
+                val generation: Long = syncState.snapshot.generation
+                if (!project.isDisposed && syncState.snapshot.resolveInFlight == 0) {
+                    FileDocumentManager.getInstance().saveAllDocuments()
+                    val spec = ImportSpecBuilder(project, GRADLE_SYSTEM_ID).use(ProgressExecutionMode.START_IN_FOREGROUND_ASYNC)
+                    ExternalSystemUtil.refreshProject(gradleRoot, spec.build())
+                }
+                generation
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return McpToolCallResult.error("Sync could not be started for $gradleRoot: ${e.message ?: e}")
+        }
+
+        val startBudgetMs: Long = (timeoutMs - (System.currentTimeMillis() - requestedAt)).coerceAtLeast(1).let {
+            if (wait) it else minOf(it, NO_WAIT_START_BUDGET_MS)
+        }
         val started: IdeSyncState.Snapshot = withTimeoutOrNull(startBudgetMs) { syncState.awaitStarted(generationBefore) }
             ?: return if (wait) {
                 McpToolCallResult.error(
-                    "Sync requested for $gradleRoot but no Gradle resolve started within ${timeoutMs / 1000}s. " +
+                    "Sync requested for $gradleRoot but no Gradle resolve started within ${startBudgetMs / 1000}s. " +
                         "The IDE may have refused the import (untrusted project, Gradle plugin disabled) or queued it " +
                         "behind another sync; check mixin_ide_status and the Build tool window.",
                 )
@@ -133,9 +171,6 @@ class ProjectManagementToolset : McpToolset {
                         "mixin_ide_status, or call mixin_sync_project with wait=true to block until it finishes.",
                 )
             }
-        started.triggerFailure?.let { failure ->
-            return McpToolCallResult.error("Sync could not be started for $gradleRoot: $failure")
-        }
         if (!wait) {
             return McpToolCallResult.text(
                 "Sync started for $gradleRoot (generation ${started.generation}); it continues in the background. " +
@@ -191,7 +226,6 @@ class ProjectManagementToolset : McpToolset {
             appendLine("Project-data import in flight: ${snapshot.importInFlight}")
             appendLine("Last sync outcome: ${snapshot.lastOutcome ?: "none recorded since the IDE opened"} (${ago(snapshot.lastOutcomeAt)})")
             snapshot.lastError?.let { appendLine("Last sync error: $it") }
-            snapshot.triggerFailure?.let { appendLine("Last sync trigger failure: $it") }
             val linked: List<String> = linkedGradleRoots(project)
             appendLine("Linked Gradle roots (${linked.size}): ${if (linked.isEmpty()) "(none)" else linked.joinToString(", ")}")
         }

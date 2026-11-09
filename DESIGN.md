@@ -29,7 +29,7 @@
 ## 1. What This Plugin Does
 
 MixinMCP is an IntelliJ Platform plugin that extends the IDE's built-in MCP Server with
-27 tools for Minecraft mod development: mixin authoring, dependency navigation, bytecode
+28 tools for Minecraft mod development: mixin authoring, dependency navigation, bytecode
 inspection, mappings lookup, and reference-aware refactoring. A companion Gradle plugin
 (`dev.mixinmcp.decompile`) decompiles dependencies without published sources into a cache
 the IntelliJ plugin indexes, so the tools see the full compiled classpath.
@@ -59,7 +59,7 @@ decompiled source.
 │                                                                  │
 │  MixinMCP plugin, registered via com.intellij.mcpServer EP:      │
 │  ├── SourceNavigationToolset    (5 tools)                        │
-│  ├── JarEntriesToolset          (1 tool)                         │
+│  ├── JarEntriesToolset          (2 tools)                        │
 │  ├── SemanticNavigationToolset  (7 tools)                        │
 │  ├── BytecodeInspectionToolset  (2 tools)                        │
 │  ├── ProjectManagementToolset   (3 tools)                        │
@@ -201,7 +201,8 @@ MixinMCP/
 │   │   ├── ProjectManagementToolset.kt
 │   │   ├── source/
 │   │   │   ├── SourceNavigationToolset.kt
-│   │   │   ├── JarEntriesToolset.kt   # mixin_list_jar_entries
+│   │   │   ├── JarEntriesToolset.kt   # mixin_list_jar_entries, mixin_search_bytecode
+│   │   │   ├── BytecodeSearch.kt      # constant-pool scan, nested-jar walk
 │   │   │   ├── SourceWindow.kt        # mixin_get_dep_source line selection
 │   │   │   └── DepSearchHelpers.kt    # root collection, regex scan, hints
 │   │   ├── semantic/
@@ -442,6 +443,7 @@ old name as an alias (Section 3).
 | `mixin_search_in_deps` | `regexPattern`, `fileMask?`, `caseSensitive=true`, `maxResults=100`, `timeout=15000`, `pathPrefix?`, `roots=all`, `contextLines=0` |
 | `mixin_get_dep_source` | `url?`, `jarPath?` + `entry?`, `className?`, or `path?`, `lineNumber=1`, `linesBefore=30`, `linesAfter=70`, `startLine?`, `endLine?`, `module?` |
 | `mixin_list_jar_entries` | `jarPath?` or `jar?`, `pathPrefix?`, `fileMask?`, `includeClasses=false`, `regexPattern?`, `maxResults=200` |
+| `mixin_search_bytecode` | `patterns`, `jarPath?` or `jar?`, `isRegex=false`, `kinds?`, `pathPrefix?`, `maxResults=200`, `timeout=60000` |
 | `mixin_list_source_roots` | `maxSamplesPerRoot=5`, `verbose=false`, `filter?` |
 
 `mixin_search_in_deps` and `mixin_get_dep_source` cover library SOURCES roots (published
@@ -546,7 +548,25 @@ skipped, entries over 4 MB skipped), printing `entry:line: text` and omitting ja
 a match. It is the only text search over runtime-only jars: `mixin_search_in_deps` scans
 source roots, and `genDependencySources` decompiles only the compile classpath, so an empty
 `mixin_search_in_deps` result appends the classpath jars no root covers
-(`unsearchableClasspathJars`).
+(`unsearchableClasspathJars`), split by library scope: runtime- or test-only jars, which are
+skipped by design, and compile-scope jars that have not been decompiled yet.
+
+**`mixin_search_bytecode`** searches compiled classes rather than source, which covers jars
+with no source, jars on no classpath, and jar-in-jar. `jarPath` / `jar` resolve as above
+(without the 10-jar cap); with neither, every classpath and cache jar is scanned.
+`scanJarBytecode` walks each jar's entries and recurses into nested `.jar` entries in
+memory, up to three levels, labeling them `outer.jar !/path/inner.jar`.
+`ClassFileView` parses the constant pool directly (no ASM), and the class structure after it
+(superclass, interfaces, fields, methods, attribute offsets) on first use. `scanClassConstants`
+reports, per class and by role: declared fields and methods whose name or descriptor matched,
+the superclass and interfaces, field and method refs whose owner, name, or descriptor matched
+(`Owner.name descriptor`), other class refs, string literals, and any other matching UTF-8
+constant (signatures, annotation values such as mixin targets). `kinds` filters by role
+(`MatchCategory`: declares, refs, types, strings, other); a class is listed when any of its
+matches passes, and only listed classes count toward `maxResults`. Literal ASCII patterns prefilter the
+raw class bytes before parsing, since modified UTF-8 leaves ASCII unchanged, so most classes
+are never parsed. Jars are scanned four at a time on `Dispatchers.IO`; `maxResults` (matching
+classes) and `timeout` stop the scan, and the summary names jars that were not reached.
 
 ### Semantic Navigation
 
@@ -558,7 +578,7 @@ source roots, and `genDependencySources` decompiles only the compile classpath, 
 | `mixin_call_hierarchy` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?`, `direction=callers`, `maxDepth=3`, `maxResults=50` |
 | `mixin_super_methods` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?` |
 | `mixin_find_overrides` | `className`, `methodName`, `parameterTypes?`, `methodDescriptor?`, `maxResults=50` |
-| `mixin_find_targeting_mixins` | `className`, `methodName?`, `maxResults=50` |
+| `mixin_find_targeting_mixins` | `className`, `methodName?`, `maxResults=50`, `jarPath?`, `mcVersion?`, `timeout=60000` |
 
 Tools that take `parameterTypes` also accept `methodDescriptor` (JVM format, e.g.
 `(Lnet/minecraft/world/effect/MobEffectInstance;)Z`), which takes precedence. For
@@ -640,6 +660,22 @@ injector annotations: `@Inject`, `@Redirect`, `@Overwrite`, `@ModifyArg`, `@Modi
 the dependency source roots (library SOURCES plus decompiled cache, `.java` files) runs
 only when the annotation search finds nothing, returning FQCN and path only.
 
+With `jarPath` it skips the index and reads bytecode (`findTargetingMixinsInJars`,
+`MixinBytecodeTargets.kt`), walking each jar and its nested jars with `walkJarClasses`. A
+class is parsed only when its raw bytes contain the `@Mixin` descriptor and a simple name of
+the target. `ClassFileView.annotationsIn` reads both annotation attributes (`@Mixin` has
+CLASS retention, so it is in RuntimeInvisibleAnnotations; injectors and `@At` are RUNTIME);
+targets come from `value` class literals and `targets` strings. Injectors are recognized by
+short name within the SpongePowered and MixinExtras packages and rendered from their element
+values. Shipped jars carry production names, unlike the remapped jars the IDE indexes: Fabric
+before 26.x ships Yarn or Mojang names plus a refmap, or intermediary written into the
+annotations, sometimes several per selector. So `expandTargetNames` maps the class and method
+through the mappings tree (Mojang, intermediary, Yarn for `mcVersion`, default from
+`McVersionDetector`; `none` disables) and matches any of them, which covers refmapped mods
+without reading refmaps. From 26.x the game is unobfuscated and nothing is expanded. Mods
+built with other mappings (MCP, Quilt) are not matched. The target is canonicalized through the
+classpath when it resolves there, so `Outer.Inner` becomes `Outer$Inner`.
+
 ### Bytecode Inspection
 
 | Tool | Parameters |
@@ -685,7 +721,19 @@ when the request is the IDE project directory, the sole linked root nested under
 Anything else errors with the list of linked roots, which is what a Windows backslash path
 used to hit as "No Gradle project is linked at this path". It then saves all documents and
 triggers `ExternalSystemUtil.refreshProject` with
-`ProgressExecutionMode.START_IN_FOREGROUND_ASYNC` on the EDT. With `wait=true` (the
+`ProgressExecutionMode.START_IN_FOREGROUND_ASYNC` inside `withContext(Dispatchers.EDT)`, so a
+refresh exception reaches the caller directly. IntelliJ drops a refresh request for a root
+whose resolve is already running (an auto-reload after a build-file edit, or an earlier
+call), so no new generation would ever start. When `IdeSyncState` shows a resolve in flight,
+`wait=true` first waits it out inside the same `timeoutMs` budget and then triggers its own,
+and `wait=false` returns without triggering. The generation is read on the EDT right before
+the refresh, and `awaitStarted` also completes when any resolve is in flight, so a resolve
+that slips in between the wait and the refresh is adopted instead of awaited forever. After a
+successful resolve, `awaitIdle` waits for the monotonic `importsFinished` counter to pass its
+value at resolve start (30 s fallback) rather than sampling the short-lived `importInFlight`
+flag, which a conflated `StateFlow` collector can miss. Sync state is project-wide, not per
+linked root or build system: with several linked roots, another root's resolve can satisfy
+these waits. With `wait=true` (the
 default) it blocks on `IdeSyncState` until the resolve and the project-data import that
 follows it finish, up to `timeoutMs` (1000 to 600000), and reports SUCCESS, FAILURE with
 the error text, CANCELLED, or a timeout that says the sync continues in the background.
@@ -697,7 +745,7 @@ applied, sync also re-runs `genDependencySources` (Section 10).
 
 **`mixin_ide_status`** reports whether the IDE can answer classpath questions right now:
 dumb mode, resolve and import in flight with how long ago the resolve started, the last
-sync outcome with its error text and any trigger failure, and the linked Gradle roots that
+sync outcome with its error text, and the linked Gradle roots that
 `mixin_sync_project` accepts. It is the poll target for `wait=false` and for the busy error
 every other tool returns (Section 3).
 
@@ -964,9 +1012,18 @@ IntelliJ sync populates the cache (the same technique MDG and Loom use).
    repositories (e.g. cursemaven) serve chunked responses that Gradle caches as complete,
    and cleanly truncated jars can survive streaming remap transforms as valid but
    classless output.
-6. Memory: jars of 15 MB or more are skipped when max heap is below
-   `threads x 800 MB + 500 MB` unless `--force`; an `OutOfMemoryError` deletes the
-   partial output and continues.
+6. Memory: Vineflower runs per jar in a forked worker JVM (Gradle Worker API, process
+   isolation, `DecompileJarAction`), never in the daemon, whose heap also holds the
+   project model during an IDE sync. The worker heap is `--decompiler-heap` or
+   `mixinmcp { decompilerHeap }`, defaulting to 1 GB per thread plus 1 GB (at least 2 GB),
+   and the worker runs with `-XX:+ExitOnOutOfMemoryError`. Jars of 15 MB or more are
+   skipped when that heap is below `threads x 800 MB + 500 MB` unless `--force`. A worker
+   that runs out of memory is retried once at double the heap (not fewer threads, which can
+   stall Vineflower); a second failure deletes the partial output and continues.
+   A jar with a `-sources.jar` sibling written by the toolchain (MDG's
+   `neoforge-<v>-sources.jar` beside `neoforge-<v>.jar` and `-merged.jar`) is skipped before
+   hashing, so the prune drops any earlier decompiled entry. The task `mustRunAfter`
+   MDG's `createMinecraftArtifacts`, so during a sync those sources exist before it looks.
 7. The manifest is saved after every successful decompile or mirror (crash-resumable),
    then pruned at the end to hashes still on the classpath; the hash memo is pruned the
    same way. Orphaned cache
@@ -1277,6 +1334,36 @@ error when output is missing entirely.
 ### Large Output
 Full decompiled source or `includeInstructions=true` can produce very large responses.
 Tool descriptions guide LLMs toward targeted queries.
+
+### Jar-in-Jar (shelved: automatic indexing)
+Nested jars (`META-INF/jarjar/*.jar`, Fabric/Connector `META-INF/jars/*.jar`) are on no
+classpath. Only `mixin_search_bytecode` and `mixin_find_targeting_mixins(jarPath=...)` read them;
+every other tool needs the user to put
+them on the compile classpath with
+`compileOnly(files(zipTree("<outer>.jar").matching { include "META-INF/jarjar/<inner>-*.jar" }))`,
+which the mixinmcp-tools skill documents.
+
+Automatic support was designed and shelved (2026-11) as too large for its benefit, given the
+cleanup it could cause. The design, if revisited:
+- `genDependencySources` recurses into nested jars of compile-classpath jars only (keeping the
+  compile classpath as the opt-in), extracts each into the content-addressed cache,
+  decompiles it, and records a manifest entry labeled `outer !/inner`.
+- The IDE registers the extracted jars as binary roots next to their decompiled sources, so
+  `mixin_find_class`, `mixin_search_symbols`, hierarchies, and references see them, not only
+  `mixin_search_in_deps`.
+- Nested copies of libraries already on the classpath (Deep Aether bundles TerraBlender 4.1.0.3
+  beside a top-level 4.1.0.8) are skipped using JarJar's `metadata.json` or `fabric.mod.json`'s
+  `jars` list, so the index does not hold duplicate classes.
+- Compile access stays explicit: adding bundled jars to javac's classpath automatically risks
+  version conflicts. A `mixinmcp { nestedCompileOnly(...) }` helper could generate the
+  `zipTree` line.
+- Independent and smaller: `jarPath` on `mixin_get_dep_source` and the bytecode tools could
+  accept `outer.jar!/META-INF/jarjar/inner.jar` and extract the inner jar on demand.
+
+The mess to expect: duplicate or conflicting classes in the index, manifest entries whose
+classes jar is an extraction rather than a Gradle artifact (eviction, pruning, and the
+corrupt-download guard all assume the latter), and nested jars that change whenever the
+outer jar updates.
 
 ---
 

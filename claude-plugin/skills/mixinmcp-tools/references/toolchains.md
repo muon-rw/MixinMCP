@@ -82,7 +82,7 @@ If `mixin_list_source_roots` shows no Minecraft root at all (nothing under
 | ------------- | ------------------------------------------------------------- |
 | Loom toolchains (Fabric, Architectury, neo-loom) | `./gradlew genSources`     |
 | NeoForge/Forge via MDG | `./gradlew downloadAssets`                           |
-| Any loader    | `./gradlew genDependencySources --force` (needs `org.gradle.jvmargs=-Xmx4g`) |
+| Any loader    | `./gradlew genDependencySources --force` (add `--decompiler-heap=6g` for very large jars) |
 
 Then run `mixin_sync_project` to refresh IntelliJ's project model.
 

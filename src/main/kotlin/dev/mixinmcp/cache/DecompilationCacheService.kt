@@ -67,6 +67,7 @@ class DecompilationCacheService(private val project: Project) {
         }
 
         rootInfoByPath = result.associateBy { it.root.path }
+        artifactHashByJarPath = loadArtifactHashMemo()
         lastScanStats = CacheScanStats(
             valid = result.size,
             missingCacheDir = missingCache,
@@ -104,6 +105,29 @@ class DecompilationCacheService(private val project: Project) {
     private var rootInfoByPath: Map<String, CachedLibraryInfo> = emptyMap()
 
     fun cachedRootInfo(root: VirtualFile): CachedLibraryInfo? = rootInfoByPath[root.path]
+
+    /**
+     * Snapshot from the last getCachedRoots pass: normalized jar path to content hash, read from
+     * the Gradle plugin's hash memo. A manifest entry records only one classes-jar path per hash,
+     * so a byte-identical second copy of a jar (or one an older Gradle plugin recorded at a
+     * previous location) has to be matched by hash instead.
+     */
+    @Volatile
+    private var artifactHashByJarPath: Map<String, String> = emptyMap()
+
+    /** Content hash of the jar at [jarDiskPath] when the hash memo has it for the jar's current size and mtime. */
+    fun artifactHashFor(jarDiskPath: String): String? = artifactHashByJarPath[normalizeJarDiskPath(jarDiskPath)]
+
+    /** True when [jarDiskPath] is the classes jar of [info], by recorded path or by content hash. */
+    fun isClassesJarOf(info: CachedLibraryInfo, jarDiskPath: String): Boolean =
+        normalizeJarDiskPath(info.classesJarPath) == normalizeJarDiskPath(jarDiskPath) ||
+            artifactHashFor(jarDiskPath) == info.artifactHash
+
+    private fun loadArtifactHashMemo(): Map<String, String> {
+        val out = HashMap<String, String>()
+        forEachManifestDir { dir -> out.putAll(currentArtifactHashes(DecompilationManifest.loadHashMemo(dir))) }
+        return out
+    }
 
     fun buildscriptCacheLibraryName(root: VirtualFile): String? =
         cachedRootInfo(root)?.takeIf { it.classpathKind == "buildscript" }?.libraryName
@@ -146,23 +170,30 @@ class DecompilationCacheService(private val project: Project) {
     }
 
     private fun forEachManifest(consume: (DecompilationManifest) -> Unit) {
-        val projectDir = project.basePath?.let { Paths.get(it) } ?: return
-
-        fun tryLoadManifest(dir: Path) {
-            val manifestDir = dir.resolve(".gradle").resolve("mixinmcp")
+        forEachManifestDir { manifestDir ->
             for (fileName in MANIFEST_FILE_NAMES) {
                 if (Files.exists(manifestDir.resolve(fileName))) {
                     consume(DecompilationManifest().load(manifestDir, fileName))
                 }
             }
         }
+    }
 
-        tryLoadManifest(projectDir)
+    /** `.gradle/mixinmcp` of the root project and of each first-level subdirectory that has one. */
+    private fun forEachManifestDir(consume: (Path) -> Unit) {
+        val projectDir = project.basePath?.let { Paths.get(it) } ?: return
+
+        fun tryDir(dir: Path) {
+            val manifestDir = dir.resolve(".gradle").resolve("mixinmcp")
+            if (Files.isDirectory(manifestDir)) consume(manifestDir)
+        }
+
+        tryDir(projectDir)
         try {
             Files.list(projectDir).use { stream ->
                 stream.filter { Files.isDirectory(it) }
                     .filter { !it.fileName.toString().startsWith(".") }
-                    .forEach { tryLoadManifest(it) }
+                    .forEach { tryDir(it) }
             }
         } catch (_: Exception) {}
     }
@@ -188,8 +219,12 @@ class DecompilationCacheService(private val project: Project) {
     companion object {
         private val LOG = Logger.getInstance(DecompilationCacheService::class.java)
 
-        /** Oldest Gradle plugin whose manifests cover everything this IDE plugin surfaces. */
-        const val REQUIRED_GRADLE_PLUGIN_VERSION: String = "1.5.0"
+        /**
+         * Oldest Gradle plugin we don't warn about: its manifests cover everything this IDE plugin
+         * surfaces, and it has no known sync-breaking bug (before 1.6.0, decompiling in the Gradle
+         * daemon could run the sync out of memory). See ManifestSchemaGuardTest.
+         */
+        const val REQUIRED_GRADLE_PLUGIN_VERSION: String = "1.6.0"
 
         /** Per-project manifests: the classpath one and the one for jars named via `--jar` / `extraJars`. */
         val MANIFEST_FILE_NAMES: List<String> = listOf("manifest.json", "adhoc-manifest.json")
@@ -201,6 +236,24 @@ class DecompilationCacheService(private val project: Project) {
             val norm: String = path.replace('\\', '/').trimEnd('/')
             val root: String = globalCacheRoot.toString().replace('\\', '/').trimEnd('/')
             return norm == root || norm.startsWith("$root/")
+        }
+
+        /**
+         * Normalized jar path to content hash for the memo entries (`<absolute path>|<size>|<mtime>`)
+         * whose jar still has that size and mtime; entries for since-changed or deleted jars are dropped.
+         */
+        internal fun currentArtifactHashes(memo: Map<String, String>): Map<String, String> {
+            val out = HashMap<String, String>()
+            for ((key, hash) in memo) {
+                val parts: List<String> = key.split('|')
+                if (parts.size < 3) continue
+                val path: String = parts.dropLast(2).joinToString("|")
+                val size: Long = parts[parts.size - 2].toLongOrNull() ?: continue
+                val modified: Long = parts.last().toLongOrNull() ?: continue
+                val file = java.io.File(path)
+                if (file.isFile && file.length() == size && file.lastModified() == modified) out[normalizeJarDiskPath(path)] = hash
+            }
+            return out
         }
 
         fun normalizeJarDiskPath(path: String): String {

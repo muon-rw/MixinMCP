@@ -27,4 +27,19 @@ class ToolchainPathClassificationTest {
         assertFalse(isLoomCacheArtifactPath(mdg, projectPath))
         assertTrue(isGradleToolchainMergedOrBinaryInBuild(mdg, projectPath))
     }
+
+    @Test
+    fun zipTreeExpandedJarsUnderBuildTmpAreNotMerged() {
+        val expanded = "/p/build/tmp/.cache/expanded/zip_abc/META-INF/jarjar/burnt_additions-0.1.5-neoforge-1.21.1.jar"
+        assertFalse(isGradleToolchainMergedOrBinaryInBuild(expanded, projectPath))
+    }
+
+    @Test
+    fun audioAndSerializedResourceExtensionsAreBinary() {
+        assertTrue(isBinaryEntryName("WintersBreath.mp3"))
+        assertTrue(isBinaryEntryName("ambient.flac"))
+        assertTrue(isBinaryEntryName("sfd.ser"))
+        assertTrue(isBinaryEntryName("CERT.RSA"))
+        assertFalse(isBinaryEntryName("LivingEntity.java"))
+    }
 }

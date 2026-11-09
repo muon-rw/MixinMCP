@@ -4,6 +4,7 @@ import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.AdditionalLibraryRootsProvider
+import com.intellij.openapi.roots.DependencyScope
 import com.intellij.openapi.roots.JdkOrderEntry
 import com.intellij.openapi.roots.LibraryOrderEntry
 import com.intellij.openapi.roots.ModuleRootManager
@@ -90,7 +91,7 @@ internal data class DepRegexScanResult(
     val rootsScanned: Int = 0,
     val rootsTotal: Int = 0,
     val stoppedInRoot: String? = null,
-    val unsearchedJars: List<String> = emptyList(),
+    val unsearchedJars: UnsearchedJars = UnsearchedJars.NONE,
 )
 
 /**
@@ -268,6 +269,7 @@ internal fun isLoomCacheArtifactPath(filePath: String, projectPath: String): Boo
  */
 internal fun isGradleToolchainMergedOrBinaryInBuild(filePath: String, projectPath: String): Boolean {
     val rel: String = filePath.removePrefix(projectPath).trimStart('/').lowercase()
+    if (rel.startsWith("build/tmp/")) return false
     return rel.startsWith("build/moddev/") ||
         rel.contains("-merged.jar") ||
         (rel.startsWith("build/") && rel.contains("neoforge")) ||
@@ -650,43 +652,88 @@ private fun libraryClassesRoots(project: Project, scope: GlobalSearchScope?): Li
 }
 
 /**
- * File names of classpath jars that no text-search root covers: no attached sources and no
- * decompiled-cache copy. Runtime-only dependencies land here, since genDependencySources only
- * decompiles the compile classpath.
+ * Classpath jars that no text-search root covers (no attached sources, no decompiled-cache copy),
+ * split by cause. genDependencySources decompiles only the compile classpath, so runtime- and
+ * test-only jars are skipped by design; a compile-classpath jar here just hasn't been decompiled yet.
  */
+internal data class UnsearchedJars(val outsideCompileClasspath: List<String>, val notYetDecompiled: List<String>) {
+    val isEmpty: Boolean get() = outsideCompileClasspath.isEmpty() && notYetDecompiled.isEmpty()
+
+    companion object {
+        val NONE = UnsearchedJars(emptyList(), emptyList())
+    }
+}
+
+private val COMPILE_SCOPES: Set<DependencyScope> = setOf(DependencyScope.COMPILE, DependencyScope.PROVIDED)
+
 @RequiresReadLock
-internal fun unsearchableClasspathJars(project: Project): List<String> {
+internal fun unsearchableClasspathJars(project: Project): UnsearchedJars {
     val covered = HashSet<String>()
+    val compileVisible = HashSet<String>()
     val names = LinkedHashMap<String, String>()
     for (module in ModuleManager.getInstance(project).modules) {
         for (entry in ModuleRootManager.getInstance(module).orderEntries) {
-            val lib = (entry as? LibraryOrderEntry)?.library ?: continue
+            val libraryEntry = entry as? LibraryOrderEntry ?: continue
+            val lib = libraryEntry.library ?: continue
             val hasSources: Boolean = lib.getFiles(OrderRootType.SOURCES).isNotEmpty()
             for (root in lib.getFiles(OrderRootType.CLASSES)) {
                 val disk: String = DecompilationCacheService.normalizeJarDiskPath(root.path)
                 if (!disk.endsWith(".jar")) continue
                 names.putIfAbsent(disk, root.path.replace('\\', '/').substringBefore("!/").substringAfterLast('/'))
                 if (hasSources) covered.add(disk)
+                if (libraryEntry.scope in COMPILE_SCOPES) compileVisible.add(disk)
             }
         }
     }
-    DecompilationCacheService.getInstance(project).getCachedRoots()
-        .forEach { covered.add(DecompilationCacheService.normalizeJarDiskPath(it.classesJarPath)) }
-    return names.filterKeys { it !in covered }.values.distinct().sorted()
+    val service: DecompilationCacheService = DecompilationCacheService.getInstance(project)
+    val cachedRoots: List<DecompilationCacheService.CachedLibraryInfo> = service.getCachedRoots()
+    cachedRoots.forEach { covered.add(DecompilationCacheService.normalizeJarDiskPath(it.classesJarPath)) }
+    val cachedHashes: Set<String> = cachedRoots.mapTo(HashSet()) { it.artifactHash }
+    val uncovered: Map<String, String> = names.filterKeys { disk ->
+        disk !in covered && service.artifactHashFor(disk) !in cachedHashes
+    }
+    return UnsearchedJars(
+        outsideCompileClasspath = uncovered.filterKeys { it !in compileVisible }.values.distinct().sorted(),
+        notYetDecompiled = uncovered.filterKeys { it in compileVisible }.values.distinct().sorted(),
+    )
 }
 
-internal fun describeUnsearchableJars(names: List<String>): String? {
-    if (names.isEmpty()) return null
-    val jars: String = if (names.size == 1) "jar has" else "jars have"
-    return "${names.size} classpath $jars no searchable source (runtime-only, or never decompiled), so matches " +
-        "inside them cannot appear here: ${sampleOf(names, 8)}. Grep one directly with " +
-        "mixin_list_jar_entries(jar=\"<name>\", regexPattern=...) or read a class with mixin_get_dep_source(className=...)."
+internal fun describeUnsearchableJars(jars: UnsearchedJars): String? {
+    if (jars.isEmpty) return null
+    return buildString {
+        if (jars.outsideCompileClasspath.isNotEmpty()) {
+            append(
+                "${jars.outsideCompileClasspath.size} runtime- or test-only jar(s) were not searched: " +
+                    "${sampleOf(jars.outsideCompileClasspath, 8)}. This is not a missing-sources problem: " +
+                    "genDependencySources decompiles only the compile classpath, by design. Declare one as " +
+                    "compileOnly (then sync) to make it searchable here, or search them as they are with " +
+                    "mixin_search_bytecode(patterns=[...]) (pass jar=\"<name>\" for one) or " +
+                    "mixin_list_jar_entries(jar=\"<name>\", regexPattern=...). ",
+            )
+        }
+        if (jars.notYetDecompiled.isNotEmpty()) {
+            append(
+                "${jars.notYetDecompiled.size} compile-classpath jar(s) have not been decompiled yet: " +
+                    "${sampleOf(jars.notYetDecompiled, 8)}. Run ./gradlew genDependencySources, then mixin_sync_project. ",
+            )
+        }
+        append("mixin_get_dep_source(className=...) still reads any class in them.")
+    }
 }
 
-internal fun describeUnsearchedJarsBriefly(names: List<String>): String? {
-    if (names.isEmpty()) return null
-    return "(Not searched: ${names.size} classpath jar(s) without source: ${sampleOf(names, 5)}. Grep them with " +
-        "mixin_list_jar_entries(jar=\"<name>\", regexPattern=...).)"
+internal fun describeUnsearchedJarsBriefly(jars: UnsearchedJars): String? {
+    if (jars.isEmpty) return null
+    val parts: MutableList<String> = mutableListOf()
+    if (jars.outsideCompileClasspath.isNotEmpty()) {
+        parts.add(
+            "${jars.outsideCompileClasspath.size} runtime/test-only jar(s), not decompiled by design: " +
+                sampleOf(jars.outsideCompileClasspath, 5),
+        )
+    }
+    if (jars.notYetDecompiled.isNotEmpty()) {
+        parts.add("${jars.notYetDecompiled.size} compile jar(s) not decompiled yet: ${sampleOf(jars.notYetDecompiled, 5)}")
+    }
+    return "(Not searched: ${parts.joinToString("; ")}. Search them with mixin_search_bytecode(patterns=[...]) or pass jar=\"<name>\" for one.)"
 }
 
 private fun sampleOf(names: List<String>, limit: Int): String =
@@ -790,7 +837,7 @@ internal fun decompiledCacheSource(project: Project, psiClass: PsiClass): Virtua
         }
     val sameJar: VirtualFile? = hits.firstOrNull { (root, _) ->
         val info: DecompilationCacheService.CachedLibraryInfo? = service.cachedRootInfo(root)
-        classJar != null && info != null && DecompilationCacheService.normalizeJarDiskPath(info.classesJarPath) == classJar
+        classJar != null && info != null && service.isClassesJarOf(info, classJar)
     }?.second
     return sameJar ?: hits.firstOrNull()?.second
 }
@@ -862,9 +909,12 @@ internal fun globToRegex(glob: String): String = buildString {
     if (literalStart < glob.length) append(Pattern.quote(glob.substring(literalStart)))
 }
 
+private const val MAX_GREP_FILE_BYTES: Long = 4L * 1024 * 1024
+
 private val BINARY_ENTRY_EXTENSIONS: Set<String> = setOf(
-    "class", "jar", "zip", "png", "jpg", "jpeg", "gif", "ogg", "wav", "ttf", "otf",
-    "nbt", "dat", "bin", "so", "dll", "dylib", "ico", "icns",
+    "class", "jar", "zip", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ogg", "wav", "mp3", "flac",
+    "mp4", "webm", "ttf", "otf", "woff", "woff2", "nbt", "dat", "bin", "ser", "so", "dll", "dylib",
+    "ico", "icns", "jks", "keystore", "p12", "dsa", "rsa", "sf",
 )
 
 internal fun isBinaryEntryName(name: String): Boolean =
@@ -946,16 +996,19 @@ internal fun collectRegexHits(
         }
     } else {
         if (isBinaryEntryName(vf.name)) return
+        if (vf.length > MAX_GREP_FILE_BYTES) return
         val pathToMatch: String = getPathForMask(root, vf)
         if (pathPrefix != null && !pathToMatch.startsWith(pathPrefix, ignoreCase = true)) return
         if (skipPath(pathToMatch)) return
         if (!matchesMask(pathToMatch)) return
-        val content: String = try {
-            String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+        val bytes: ByteArray = try {
+            vf.contentsToByteArray()
         } catch (e: Exception) {
             unreadableFiles?.let { count -> count[0]++ }
             return
         }
+        if (looksBinary(bytes)) return
+        val content = String(bytes, StandardCharsets.UTF_8)
         scannedFiles?.let { count -> count[0]++ }
         val lines: List<String> = content.lines()
         for ((i, line) in lines.withIndex()) {

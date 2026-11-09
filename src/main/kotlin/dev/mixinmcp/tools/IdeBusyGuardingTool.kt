@@ -8,6 +8,8 @@ import com.intellij.openapi.project.Project
 import dev.mixinmcp.sync.IdeSyncState
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -23,6 +25,9 @@ class IdeBusyGuardingTool(private val delegate: McpTool) : McpTool {
 
     override suspend fun call(args: JsonObject): McpToolCallResult {
         if (descriptor.name in EXEMPT_TOOLS) return delegate.call(args)
+        // A disk-path scan reads jars directly and needs neither indexes nor the project model.
+        val jarPath: String? = (args["jarPath"] as? JsonPrimitive)?.contentOrNull
+        if (descriptor.name in DISK_PATH_EXEMPT_TOOLS && !jarPath.isNullOrBlank()) return delegate.call(args)
         val project: Project = coroutineContext.softProject() ?: return delegate.call(args)
         val waitedMs: Long? = awaitIdeIdle(project, MAX_WAIT_MS)
         if (waitedMs == null) return McpToolCallResult.error(busyMessage(project, MAX_WAIT_MS))
@@ -38,6 +43,12 @@ class IdeBusyGuardingTool(private val delegate: McpTool) : McpTool {
             "mixin_refresh_vfs",
             "mixin_ide_status",
             "mixin_mappings_lookup",
+        )
+
+        val DISK_PATH_EXEMPT_TOOLS: Set<String> = setOf(
+            "mixin_search_bytecode",
+            "mixin_list_jar_entries",
+            "mixin_find_targeting_mixins",
         )
 
         fun isBusy(project: Project): Boolean =
