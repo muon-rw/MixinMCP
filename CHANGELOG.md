@@ -2,7 +2,10 @@
 
 # MixinMCP Changelog
 
+## [Unreleased]
+
 ## [1.6.0]
+
 ### Added
 
 - New tool `mixin_search_bytecode`: search compiled classes in any jar, a mods folder, or the classpath, jar-in-jar included. Hits are labeled by role (declares, extends/implements, refs, strings), `kinds` filters them, and literal patterns accept dotted class names and `Owner.member` / `Owner#member` forms
@@ -26,7 +29,9 @@
 - `zipTree`-expanded NeoForge jars under `build/tmp/` misclassified as MDG merged game artifacts
 
 ## [1.5.3]
+
 ### Added
+
 - Support for Antigravity
 
 ## [1.5.2] - 2026-09-18
@@ -450,7 +455,9 @@ Minimum IntelliJ version is now 2026.1
 
 - Initial Alpha
 
-[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.5.2...HEAD
+[Unreleased]: https://github.com/muon-rw/MixinMCP/compare/1.6.0...HEAD
+[1.6.0]: https://github.com/muon-rw/MixinMCP/compare/1.5.3...1.6.0
+[1.5.3]: https://github.com/muon-rw/MixinMCP/compare/1.5.2...1.5.3
 [1.5.2]: https://github.com/muon-rw/MixinMCP/compare/1.5.1...1.5.2
 [1.5.1]: https://github.com/muon-rw/MixinMCP/compare/1.5.0...1.5.1
 [1.5.0]: https://github.com/muon-rw/MixinMCP/compare/1.4.1...1.5.0

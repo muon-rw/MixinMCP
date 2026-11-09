@@ -129,7 +129,20 @@ class AntigravityPluginTest {
             "skills/mixin-writing/references/expressions-language.md",
         )
         for (rel in expectedSkillFiles) {
-            assertTrue("Missing antigravity-plugin/$rel", Files.isRegularFile(root.resolve("antigravity-plugin").resolve(rel)))
+            val agyFile = root.resolve("antigravity-plugin").resolve(rel)
+            val claudeFile = root.resolve("claude-plugin").resolve(rel)
+            assertTrue("Missing antigravity-plugin/$rel", Files.isRegularFile(agyFile))
+            assertTrue("Missing claude-plugin/$rel", Files.isRegularFile(claudeFile))
+            if (rel.endsWith("/SKILL.md")) {
+                assertTrue(
+                    "antigravity-plugin/$rel must be under 24KB limit (was ${Files.size(agyFile)} bytes)",
+                    Files.size(agyFile) in 1..24_000,
+                )
+                assertTrue(
+                    "claude-plugin/$rel must be under 24KB limit (was ${Files.size(claudeFile)} bytes)",
+                    Files.size(claudeFile) in 1..24_000,
+                )
+            }
         }
 
         val agyToolsSkill = Files.readString(root.resolve("antigravity-plugin/skills/mixinmcp-tools/SKILL.md"))

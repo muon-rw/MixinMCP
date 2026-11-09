@@ -17,29 +17,24 @@ description: >
 
 # MixinMCP Tools
 
-These tools come from the IntelliJ MCP server and search a JVM project's whole
-classpath, including inside dependency jars that `grep_search` and `find_by_name`
-cannot see. They add dedicated type-hierarchy, call-graph, reference-finding, and
-bytecode tools that are faster and more accurate than text search, and return
-structured results that cost far less context than raw file dumps. Dependencies
-without published sources are decompiled (Vineflower, via the MixinMCP Gradle plugin)
-so every library on the classpath is searchable.
-
-**Prefer these over `grep_search`, `read_file`, `find_by_name`, or `run_command` jar extraction for anything on the classpath.** The
-search, hierarchy, bytecode, and refactoring tools work on any Gradle/Maven JVM project.
-The mapping, mixin, and Minecraft-toolchain features are used only on Minecraft projects.
+IntelliJ MCP tools for full-classpath search, type hierarchies, call graphs, references,
+bytecode, and refactoring across any Gradle/Maven JVM project (dependencies without
+published sources are decompiled via the MixinMCP Gradle plugin). **Prefer these over
+`grep_search`, `read_file`, `find_by_name`, or `run_command` jar extraction for anything
+on the classpath.** Mapping, mixin, and Minecraft-toolchain features apply only to
+Minecraft projects.
 
 ## Invoking
 
 Call them as regular MCP tools once IntelliJ is connected, e.g.
-`mixin_find_class(className="java.util.concurrent.ConcurrentHashMap")`. Each tool's
-description documents its parameters and defaults; read it before calling rather than
-guessing.
+`mixin_find_class(className="java.util.concurrent.ConcurrentHashMap")`. Read each tool's
+description for its parameters and defaults before calling.
 
-Two names look alike across tools but are not interchangeable: `path` is a
-classpath-relative source path, `filePath` a file on disk, and `url` a `jar://` or
-`file://` URL, so do not carry one into a parameter expecting another. `memberName`
-takes a method or field name on tools that declare no `methodName` / `fieldName`.
+- **Parameter names are strict:** unknown names (or passing two aliases of the same parameter) are rejected with the accepted list; use the suggested name.
+- **Address parameters are distinct:** `path` is a classpath-relative source path (`com/example/Foo.java`), `filePath` is a file on disk, and `url` is a `jar://` or `file://` URL. Do not pass one where another is expected.
+- **`memberName`** takes a method or field name on tools that declare no `methodName` / `fieldName`.
+- **`projectPath`** is auto-injected by the IntelliJ MCP framework; omit it when one IDE window is open, or pass one of the candidate paths if multiple windows make it ambiguous.
+- **Busy IDE:** every tool except `mixin_sync_project`, `mixin_refresh_vfs`, `mixin_ide_status`, and `mixin_mappings_lookup` waits up to 30s for indexing, Gradle resolve, or project import and then errors naming what it is waiting on. Retry or call `mixin_ide_status` / `mixin_sync_project(wait=true)` first.
 
 ## Tool selection
 
@@ -53,8 +48,8 @@ takes a method or field name on tools that declare no `methodName` / `fieldName`
 | Search build-plugin code (Loom, ModDevGradle, …) | any lookup tool; `mixin_search_in_deps(roots="buildscript")` greps only buildscript sources |
 | Read a known dependency file | `mixin_get_dep_source` (by `className`, or `path` e.g. `com/google/common/collect/Lists.java`) |
 | Read a jar resource (mods.toml, fabric.mod.json, lang, recipes, mixin config) | `mixin_get_dep_source(jarPath=…, entry=…)`, or the `url` from a search hit |
-| See or grep what is inside jars | `mixin_list_jar_entries` (`jarPath` for any jar or a folder of jars, `jar` for a classpath jar by name or coordinates; `regexPattern` greps text entries) |
-| Find which classes reference a member, class, or string, in jars without source, off the classpath, or nested (jar-in-jar) | `mixin_search_bytecode` (`patterns`, then `jarPath` for a jar or a folder such as a pack's mods, `jar` for a classpath jar by name, or neither for the whole classpath) |
+| See or grep what is inside jars | `mixin_list_jar_entries` (`jarPath` for any jar or folder of jars, `jar` for a classpath jar by name/coordinates; `regexPattern` greps text entries) |
+| Find classes referencing a member, class, or string (unindexed, off-classpath, or jar-in-jar) | `mixin_search_bytecode` (`patterns`; optional `jarPath` for a jar/folder, `jar` for a classpath jar, or neither for the whole classpath) |
 | Search a mod that is on no classpath | `./gradlew genDependencySources --jar <path>` (or `mixinmcp { extraJars.from(…) }`), then `mixin_sync_project` |
 | Inheritance chain / all subtypes | `mixin_type_hierarchy` |
 | All implementors of an interface | `mixin_find_impls` |
@@ -67,89 +62,69 @@ takes a method or field name on tools that declare no `methodName` / `fieldName`
 | Re-sync Gradle after build-file or dependency changes | `mixin_sync_project` (waits for the import by default) |
 | See whether the IDE is busy or the last sync failed | `mixin_ide_status` |
 | Make on-disk edits by external tools visible to the IDE | `mixin_refresh_vfs` |
-| Diagnose missing or empty source roots | `mixin_list_source_roots` |
-| Answer "is jar X attached?" | `mixin_list_source_roots(filter="jade")` (label, jar name, coordinates, URL) |
+| Diagnose missing/empty source roots or check if jar X is attached | `mixin_list_source_roots` (`filter="jade"` matches label, jar name, coordinates, URL) |
 | **Minecraft:** synthetic/lambda names, `@At(target)` owner | `mixin_class_bytecode(filter="synthetic")`, `mixin_method_bytecode` |
-| **Minecraft:** cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins`; add `jarPath="<pack>/mods"` to read every mod in a pack from bytecode, including jar-in-jar and mods on no classpath |
+| **Minecraft:** cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins` (`jarPath="<pack>/mods"` scans a pack's jars and jar-in-jars from bytecode) |
 | **Minecraft:** convert a name between mapping namespaces | `mixin_mappings_lookup` |
 
 ## Examples
 
-Read one method from a large class instead of the whole file:
 ```
+# Read one method from a large class instead of the whole file
 mixin_find_class(className="com.google.common.collect.Iterables", methodName="partition")
-```
 
-Grep dependency source, then read a hit (results are grouped by file with a `url:` line):
-```
+# Grep dependency source, then read a hit (grouped by file with a url: line)
 mixin_search_in_deps(regexPattern="computeIfAbsent\\(", pathPrefix="java/util/")
 mixin_get_dep_source(url="<url from result>", lineNumber=42, linesBefore=10, linesAfter=20)
-```
 
-Find every usage of a field, including string refs in mixin config JSON:
-```
+# Find every usage of a field, including string refs in mixin config JSON
 mixin_find_references(className="net.minecraft.world.entity.LivingEntity", memberName="DATA_HEALTH_ID")
 ```
 
 ## Usage notes
 
-Only what isn't obvious from the tool descriptions.
-
-Every `mixin_*` tool rejects parameter names it neither declares nor recognizes as an unambiguous synonym, and lists the accepted ones; nothing is silently ignored. An unknown-parameter error means the call is wrong, not the tool: use the name it suggests. Passing two spellings of the same parameter together is an error.
-
-Every tool except `mixin_sync_project`, `mixin_refresh_vfs`, `mixin_ide_status`, and `mixin_mappings_lookup` waits up to 30s for a busy IDE (indexing, a Gradle resolve, the project-data import) and then errors naming what it is waiting on. That is not a failed lookup: retry, or call `mixin_ide_status` / `mixin_sync_project(wait=true)` first.
-
 **Searching dependency source** (`mixin_search_in_deps` / `mixin_get_dep_source`)
-- `regexPattern` is Java regex — escape metacharacters (`addEffect\\(`, not `addEffect(`). Unescaped, the tool hints the fix.
-- `fileMask` without wildcards is a case-insensitive substring on the path, so a short fragment like `apotheosis` also matches `compat/apotheosis/` inside other jars; use a longer fragment or `pathPrefix`. It never matches jar names or Maven coordinates. Everything that is not `*` or `?` is literal, so `{Foo,Bar}*.java` matches that text, not an alternation.
-- `pathPrefix` is a logical path inside a root (`net/minecraft/`, case-insensitive), not a URL or a disk path; passing one of those is an error with a hint.
-- Broad searches with no `fileMask` can time out — raise `timeout` to 20000–30000.
-- Each hit's `--- path [root] ---` header names the matching root; prefer `Library SOURCES` over decompiled. Copy the `url:` line verbatim into `mixin_get_dep_source`.
-- `contextLines` (3–10) captures a short matched body inline so you can skip the follow-up read; leave it 0 for long methods.
-- `mixin_get_dep_source` takes that `url` verbatim; a package `path` (`.../Foo.java`, not a filesystem path) works too, and if it misses, search first and use the returned `url`.
-- To read a known span, pass `startLine`/`endLine` (inclusive, 1-based); they override the `lineNumber`/`linesBefore`/`linesAfter` window. `startLine` alone reads to end of file, `endLine` alone from line 1.
-- `roots="all"` scans game roots, then other library `-sources.jar` roots, then the decompiled cache, then the JDK, then the buildscript classpath, skipping paths an earlier tier already matched. Narrow with `roots="game"`, `"jdk"`, or `"buildscript"` instead of filtering the output.
-- Decompiled-cache roots also hold the jar's resources, so `pathPrefix="assets/"` or `fileMask="mods.toml"` greps `mods.toml`, `fabric.mod.json`, lang files, recipes, and `*.mixins.json`. Binary entries are skipped.
-- The output reports files that could not be read per root (usually a jar that changed on disk: run `mixin_refresh_vfs`), and on timeout names the root the scan stopped in, so you can rerun with `roots=` pinned to it.
+- `regexPattern` is Java regex — escape metacharacters (`addEffect\\(`, not `addEffect(`). Unescaped patterns return a fix hint.
+- `fileMask` matches internal paths only (never jar names or Maven coordinates). Without `*`/`?`, it is a case-insensitive path substring (`apotheosis` also matches `compat/apotheosis/` in other jars; prefer `pathPrefix`). Only `*` and `?` are wildcards (`{Foo,Bar}*.java` is literal).
+- `pathPrefix` is a case-insensitive logical path inside a root (`net/minecraft/`), never a URL or disk path.
+- Broad searches without `fileMask` may time out — raise `timeout` to 20000–30000. On timeout the output names the root where scanning stopped so you can rerun with `roots=` pinned to it; unreadable files per root usually mean a jar changed on disk (run `mixin_refresh_vfs`).
+- `roots="all"` scans in tier order: `game`, `library` (`-sources.jar`), `decompiled` (which also holds jar text resources: `mods.toml`, `fabric.mod.json`, lang, recipes, `*.mixins.json`; binary entries are skipped), `jdk`, `buildscript`, skipping paths an earlier tier already matched. Narrow with `roots="game"`, `"jdk"`, or `"buildscript"` instead of filtering output.
+- Hit headers (`--- path [root] ---`) name the matching root; prefer `Library SOURCES` over decompiled. Set `contextLines` (3–10) to inline short matched bodies, or pass the `url:` line verbatim to `mixin_get_dep_source`.
+- `mixin_get_dep_source` accepts `startLine`/`endLine` (1-based inclusive; either alone reads to EOF or from line 1), overriding the `lineNumber`/`linesBefore`/`linesAfter` window.
 
 **Jars, resources, and off-classpath mods**
-- **Which tools reach which jars.** Six tools take any jar on disk through `jarPath`: `mixin_get_dep_source`, `mixin_list_jar_entries`, `mixin_search_bytecode`, `mixin_find_targeting_mixins`, `mixin_class_bytecode`, and `mixin_method_bytecode` (`mixin_search_bytecode` and `mixin_find_targeting_mixins` also read jar-in-jar). Every other tool (`mixin_search_in_deps`, `mixin_find_class`, `mixin_search_symbols`, references, hierarchies, call graphs, refactors) sees only what the IDE indexes: the project and its classpath. `mixin_search_in_deps` also needs source for each jar, which `genDependencySources` produces for the compile classpath only, so runtime-only jars are skipped by design, not because they lack sources; its "Not searched" note says which case applies. Declaring a jar `compileOnly` makes it searchable there; `mixin_search_bytecode(jar=...)` searches it without that.
-- `mixin_get_dep_source` addresses a file four ways, in precedence order: `url`, `jarPath` + `entry`, `className`, `path`. `className` resolves the same way `mixin_find_class` does, so it is the shortest route to a class whose path you don't know.
-- `mixin_list_jar_entries` then `mixin_get_dep_source(jarPath=…, entry=…)` reads any jar on disk, on the classpath or not, with no build change: the fastest way to check a mod's `mods.toml`, mixin config, or lang file. A `.class` entry addressed by `url` or `jarPath` is decompiled by the IDE; other binary entries report their size only.
-- `mixin_list_jar_entries(jarPath="<pack>/mods", fileMask="mods.toml", regexPattern="(?i)fzzy")` greps every jar in a folder: the way to answer "which pack mods depend on X". The same grep with `jar=` covers runtime-only classpath jars, which `mixin_search_in_deps` never scans; its empty results name those jars.
-- `mixin_search_bytecode(patterns=["actuallyHurt"], jarPath="<pack>/mods")` finds every class in a pack that references or declares that name, including inside nested jars, and labels each hit by role: `declares method` (the class's own member: an override or a mixin handler), `extends`/`implements`, `method ref Owner.name descriptor`, a class ref, a string, or another constant (mixin annotation targets appear here). Add `kinds=["declares"]` to keep only classes that declare or override the member, which cuts a pack-wide search for a commonly called method down to the classes that actually replace it. It is the bytecode counterpart of the grep above: use it to find which mods hook a vanilla method when a conflict has no obvious culprit.
-- `mixin_find_targeting_mixins(className=…, methodName=…, jarPath="<pack>/mods")` lists every mixin in a pack that targets a class, with its injectors (`@Inject(method = …, at = @At(…)) -> handler`), read from bytecode. Pass names as your project uses them: before 26.x they are also matched as Mojang, intermediary, and Yarn names for that version (`mcVersion`, default the project's), because Fabric mods ship mixins in whichever of those they were built with. It finds private targets a caller search misses, such as a mod cancelling `ChunkGenerator.getNearestGeneratedStructure`.
-- **Jar-in-jar** (a mod or library shipped inside another jar, under `META-INF/jarjar/` or, for Fabric and Connector mods, `META-INF/jars/`) is on no classpath, and no tool can open the inner jar: `mixin_search_bytecode` and `mixin_find_targeting_mixins(jarPath=…)` can search it, but `mixin_get_dep_source`, the bytecode tools, and everything index-based cannot read it. To read, index, or write mixins against it, put the nested jars on the compile classpath with `zipTree`, then `mixin_sync_project`. Gradle reads them straight from the outer jar, so nothing is extracted or committed:
+- **Which tools reach which jars:** Six tools accept any jar/folder on disk via `jarPath` (without waiting for indexing; omit `module` when using `jarPath`): `mixin_get_dep_source`, `mixin_list_jar_entries`, `mixin_search_bytecode`, `mixin_find_targeting_mixins`, `mixin_class_bytecode`, and `mixin_method_bytecode` (`mixin_search_bytecode` and `mixin_find_targeting_mixins` also read jar-in-jar). All other tools see only what the IDE indexes (project + classpath). `mixin_search_in_deps` also requires source per jar, which `genDependencySources` generates for the compile classpath only — runtime-only jars are skipped by design (its "Not searched" note reports this); declare a jar `compileOnly` to search its source, or use `mixin_search_bytecode(jar=…)` / `mixin_list_jar_entries(jar=…, regexPattern=…)`.
+- `mixin_get_dep_source` resolves in precedence order: `url` > `jarPath` + `entry` > `className` > `path`. `className` resolves like `mixin_find_class` (attached sources → decompiled cache → IDE decompiler, with the same line numbers as `mixin_find_class(methodName=…)`). A `.class` entry addressed by `url` or `jarPath` is decompiled by the IDE; other binary entries report size only.
+- `mixin_list_jar_entries` then `mixin_get_dep_source(jarPath=…, entry=…)` reads any jar on disk without build changes. `mixin_list_jar_entries(jarPath="<pack>/mods", fileMask="mods.toml", regexPattern="(?i)fzzy")` greps every jar in a folder ("which pack mods depend on X"); pass `jar=` to grep runtime-only classpath jars.
+- `mixin_search_bytecode(patterns=["actuallyHurt"], jarPath="<pack>/mods")` finds every class in a jar, folder, or classpath (including nested jars) referencing or declaring that name, labeled by role: `declares method` (override or mixin handler), `extends`/`implements`, `method ref Owner.name descriptor`, class ref, or string/constant (mixin annotation targets appear here). Add `kinds=["declares"]` to keep only classes that declare or override the member.
+- `mixin_find_targeting_mixins(className=…, methodName=…, jarPath="<pack>/mods")` reads bytecode across a pack (including nested jars) to list every mixin targeting a class and its injectors (`@Inject(method = …, at = @At(…)) -> handler`), catching private targets a caller search misses. Pre-26.x, names are matched across Mojang, intermediary, and Yarn for `mcVersion` (defaults to the project's).
+- **Jar-in-jar** (nested under `META-INF/jarjar/` or `META-INF/jars/`): only `mixin_search_bytecode` and `mixin_find_targeting_mixins(jarPath=…)` can read inside nested jars directly. Never manually extract or unzip nested jars; to read, index, or write mixins against one, put it on the compile classpath with `zipTree` and run `mixin_sync_project` (keep the outer jar on `localRuntime` if needed in dev):
   ```groovy
-  // Burnt Basic ships only inside the Burnt wrapper jar
   def burnt = file("../pack/mods/burnt-1.10.5.3-neoforge-1.21.1.jar")
   if (burnt.exists()) {
       compileOnly(files(zipTree(burnt).matching { include "META-INF/jarjar/burnt_basic-*.jar" }))
   }
   ```
-  Keep the outer jar on the runtime classpath (e.g. `localRuntime`) if it must load in dev. The `exists()` guard keeps the build working on machines without that pack folder. Don't extract nested jars by hand or unzip them to inspect them.
-- `mixin_get_dep_source(className=…)` reads any class `mixin_find_class` resolves: attached sources first, then the decompiled cache, then the IDE decompiler, with the same line numbers `mixin_find_class(methodName=…)` reports.
-- `jarPath` on `mixin_class_bytecode` / `mixin_method_bytecode` does the same for bytecode, and never waits for indexing. Omit `module` with it.
-- To make an off-classpath mod searchable rather than readable one file at a time, decompile it: `./gradlew genDependencySources --jar ../pack/mods/jade.jar` (repeatable) or `mixinmcp { extraJars.from(…) }` in the build script, then `mixin_sync_project`. Those roots show as `[ad hoc jar]` in `mixin_list_source_roots`.
+- To make an off-classpath mod searchable in `mixin_search_in_deps`, decompile it via `./gradlew genDependencySources --jar ../pack/mods/jade.jar` (repeatable) or `mixinmcp { extraJars.from(…) }`, then `mixin_sync_project` (shown as `[ad hoc jar]` in `mixin_list_source_roots`).
 
 **Reading a class** (`mixin_find_class`)
-- For big classes prefer `methodName=`/`fieldName=` over `includeSource=true` (which dumps 50KB+ and forces extra grep).
-- Methods/Fields list only members declared **directly** on the class. Utility classes often hide their real API in **nested classes** (e.g. `Tags.Blocks`, `Tags.Items`), so the outer class looks empty; always read the Nested classes section, which gives ready-to-paste follow-up calls. Inherited members show `(inherited from X)` — follow up on `X` or via `mixin_super_methods`.
+- Prefer `methodName=` / `fieldName=` over `includeSource=true` on large classes.
+- Methods/Fields list only **directly declared** members. Utility classes often put their real API in **Nested classes** (`Tags.Blocks`, `Tags.Items`), which gives ready-to-paste follow-up calls. Inherited members show `(inherited from X)` — follow up on `X` or via `mixin_super_methods`.
 
 **Usages, hierarchy, call graph**
-- Disambiguate overloaded methods (for `mixin_find_references` / `_call_hierarchy` / `_super_methods` / `_find_overrides` / `_rename` / `_safe_delete` / `_change_signature` / `_inline`) with `parameterTypes=["Entity","DamageSource"]` or `methodDescriptor="(L…;)Z"` (parameterless: `parameterTypes=[]`). On failure the error lists overloads with ready-to-copy values.
-- `mixin_find_references` returns runtime call sites plus string refs in annotations. `mixin_call_hierarchy` output is `owner#name(descriptor)` (paste-ready for `@At`), tags `[lambda]`/`[ctor]`/`[cycle]`, resolves lambdas through the INVOKEDYNAMIC handle, and walks Java/Kotlin/Groovy/Scala via UAST; `maxResults` is a global budget, so raise it for wide graphs or start at `maxDepth=1`. Callers are listed once per calling method. A method that invokes the target more than once gets `[xN: ordinal 0 line L, ...]`, the `ordinal` for `@At(value="INVOKE", ordinal=K)`; `source order` means the class is not built and the ordinals may be off, and `INVOKE owner X` means the bytecode calls it through X, which is what the `@At` target must name.
-- `mixin_super_methods` marks `[root declaration]` entries — usually the best mixin target; `mixin_find_overrides` is its downward mirror. `mixin_type_hierarchy`: check both **Direct** and **Inherited** interface sections (inherited tagged `(from X)`/`(via X)`) before concluding a class doesn't implement something; `direction="supers"` skips the subtype list.
+- Disambiguate overloaded methods (on reference, hierarchy, override, and refactoring tools) with `parameterTypes=["Entity","DamageSource"]` (`[]` for parameterless) or `methodDescriptor="(L…;)Z"`. Ambiguity errors list overloads with copy-ready values.
+- `mixin_find_references` returns runtime call sites plus string refs in annotations. `mixin_call_hierarchy` output is `owner#name(descriptor)` (paste-ready for `@At`), tags `[lambda]`/`[ctor]`/`[cycle]`, resolves lambdas through `INVOKEDYNAMIC`, and walks Java/Kotlin/Groovy/Scala via UAST; `maxResults` is a global budget (raise it or start at `maxDepth=1`). Callers appear once per calling method; multiple calls in one method show `[xN: ordinal 0 line L, ...]` for `@At(value="INVOKE", ordinal=K)` (`source order` means the class isn't built and ordinals may be off; `INVOKE owner X` is the bytecode owner `@At` must name).
+- `mixin_super_methods` marks `[root declaration]` entries (usually the best mixin target); `mixin_find_overrides` is its downward mirror. In `mixin_type_hierarchy`, check both **Direct** and **Inherited** (`(from X)`/`(via X)`) interface sections; `direction="supers"` skips subtypes.
 
 **Bytecode** (`mixin_class_bytecode` / `mixin_method_bytecode`)
-- INVOKE* instructions show the **real owner class**, not the source-declared one — use that owner in `@At(target=…)`.
-- `filter="synthetic"` reveals lambda/bridge names (`lambda$X$N`) and synthetic fields (`this$0`, `$VALUES`) that decompiled source hides; it is the only way to target a lambda.
-- `mixin_method_bytecode(regexPattern="forEachModifier")` returns only the matching instructions, each with its source line and `[ordinal N of M]` when the target repeats: the `@At(ordinal=…)` value without reading a 25 KB listing. A lambda name such as `lambda\$register\$3` matches the `INVOKEDYNAMIC` that creates it, printed as `-> owner.lambda$register$3(…)`.
+- `INVOKE*` instructions show the **real owner class** (which can differ from the source-declared class due to devirtualisation, overrides, or mixins) — use that owner in `@At(target=…)`.
+- `filter="synthetic"` reveals lambda/bridge names (`lambda$X$N`) and synthetic fields (`this$0`, `$VALUES`) hidden by decompiled source; it is the only way to target a lambda.
+- `mixin_method_bytecode(regexPattern="forEachModifier")` returns only matching instructions with source lines and `[ordinal N of M]` for `@At(ordinal=…)`. A lambda name like `lambda\$register\$3` matches the `INVOKEDYNAMIC` creating it (`-> owner.lambda$register$3(…)`).
 
 **Module pinning and classpath variants**
-- Multi-module classpaths carry several copies of a class. `module=` (exact or dot-boundary suffix, e.g. `neoforge.main`) on `mixin_find_class`/`_get_dep_source`/bytecode tools pins resolution; unknown names error with the available list.
-- `module=` is also a compile-visibility check. `mixin_find_class` prints a `Modules:` line naming the modules whose classpath provides the class, tagged `(RUNTIME)` where a module cannot compile against it and `(TEST)` where only its test sources can (`neoforge.main, common.main (RUNTIME)`); `compileOnly` dependencies stay untagged. A class that resolves without `module=` but errors with it ("not in the compile scope of module …") is declared `runtimeOnly` or test-only there, so a mixin in that module will fail the Gradle build however clean the inspections look; fix the dependency declaration, not the mixin.
-- Without `module`, tools append a Variants block: byte-identical copies merge; patched copies get a structural diff tagged by provenance (`[loader-patched]`, `[loom-remapped vanilla]`, `[MDG/NeoForm-recompiled vanilla]`). Two-vanilla diffs collapse to a count (toolchain noise); only `[loader-patched]` diffs are real changes. `mixin_method_bytecode` adds a `NOTE:` when a method differs in another variant.
+- `module=` (exact or dot-boundary suffix, e.g. `neoforge.main`) on `mixin_find_class`, `mixin_get_dep_source`, and bytecode tools pins resolution on multi-module classpaths (unknown names error with the available list) and checks compile visibility.
+- `mixin_find_class` prints a `Modules:` line tagging non-compile scopes as `(RUNTIME)` or `(TEST)` (`compileOnly` stays untagged). If a class resolves without `module=` but errors with `module=<mixin's module>` ("not in the compile scope of module …"), it is `runtimeOnly` or test-only there and `compileJava` will fail — fix the Gradle dependency declaration, not the mixin.
+- Without `module`, tools append a `Variants` block: byte-identical copies merge; patched copies show a structural diff tagged `[loader-patched]`, `[loom-remapped vanilla]`, or `[MDG/NeoForm-recompiled vanilla]` (two-vanilla diffs collapse to a count as toolchain noise; only `[loader-patched]` diffs are real changes). `mixin_method_bytecode` adds a `NOTE:` when a method differs in another variant.
 
 **Minecraft: `net/minecraft/`, `net/minecraftforge/`, or `net/neoforged/` sources come back empty**
 1. Run `mixin_list_source_roots` and read the MDG merged-jar auto-attach section.
@@ -163,41 +138,24 @@ Every tool except `mixin_sync_project`, `mixin_refresh_vfs`, `mixin_ide_status`,
 
 ## Refactoring
 
-Reference-aware: they update or check every reference project-wide (including mixin
-config JSON and javadoc links), so prefer them over hand-editing with `edit_file` or
-`write_file`, which fixes one site and leaves the rest dangling. Shared contract:
-`dryRun=true` reports the resolved target, per-file usage counts, and conflicts without
-changing anything; conflicts are listed one per line tagged `[library]`/`[source]`
-(`[library]` usually means a stale build-output jar, not a real clash);
-`ignoreConflicts=true` proceeds anyway, the headless equivalent of the IDE's "Continue".
-The signature/extract/introduce/inline/move-members tools are Java-source only. Read
-each tool's description for parameters; below is only what isn't obvious there.
+Reference-aware across the project (including mixin config JSON and javadoc links), so prefer them over hand-editing with `edit_file` or `write_file`. Shared contract: `dryRun=true` previews the resolved target, per-file usage counts, and conflicts tagged `[library]` (usually a stale build-output jar) or `[source]`; `ignoreConflicts=true` proceeds anyway. Signature, extract, introduce, inline, and move-members tools are Java-source only.
 
-- `mixin_rename`: class/method/field, plus `memberKind="parameter"`/`"local"` (with `variableName` naming the variable inside the method). Unlike the built-in `rename_refactoring`, it reports conflicts instead of silently discarding them.
-- `mixin_safe_delete`: usage-checked across project and dependencies; overrides count as blocking usages tagged `[override]`; deleting a `@Mixin` class also removes its mixin config entries, so edit no JSON by hand; handles Kotlin (a Kotlin class delete removes the declaration but leaves the file). `force` is accepted as an alias of `ignoreConflicts`.
-- `mixin_move_file`: moves a class to a new package, updating the package declaration and every reference (including mixin config JSON). Package-private access that the move would break counts as a conflict.
-- `mixin_change_signature`: `parametersJson` is a JSON-array string: `{"oldIndex":N}` keeps a parameter, `{"oldIndex":-1,"name":…,"type":…,"defaultValue":…}` adds one (inserted at every call site), omitted parameters are removed.
-- `mixin_extract_method` / `mixin_introduce_variable`: `newMethodName` (alias `methodName`) names the method being created; both address a `filePath` plus `startLine..endLine` range, taken as whole lines; `expression=<its source text>` targets a sub-expression within it, `occurrenceIndex` picks among repeats. A non-matching `expression` lists the selectable expressions with their positions, so let a miss tell you the exact text instead of guessing.
+- `mixin_rename`: class/method/field, plus `memberKind="parameter"`/`"local"` (via `variableName`). Unlike built-in `rename_refactoring`, it reports conflicts instead of silently discarding them. For mechanical text replacement across files, run a script via `run_command` and call `mixin_refresh_vfs` on the touched path instead.
+- `mixin_safe_delete`: usage-checked across project and dependencies (overrides block as `[override]`); deleting a `@Mixin` class also removes its mixin config JSON entries; handles Kotlin (removes the declaration, leaves the file). `force` is an alias for `ignoreConflicts`.
+- `mixin_move_file`: moves a class to a new package, updating the package declaration and all references (including mixin config JSON); broken package-private access is reported as a conflict.
+- `mixin_change_signature`: `parametersJson` is a JSON-array string: `{"oldIndex":N}` keeps a parameter, `{"oldIndex":-1,"name":…,"type":…,"defaultValue":…}` adds one at every call site, and omitted indices are removed.
+- `mixin_extract_method` / `mixin_introduce_variable`: address a `filePath` plus whole-line `startLine..endLine` range (`newMethodName` / `methodName` names the extracted method); pass `expression=<source text>` (and `occurrenceIndex`) for a sub-expression. A non-matching `expression` lists selectable expressions with positions.
 - `mixin_inline`: `kind="method"|"field"|"local"`; refuses recursive methods, enum constants, and non-final fields with write usages.
-- `mixin_move_members`: `direction="up"|"down"|"toClass"`; `members` are `name` or `name#descriptor`. `direction="down"` pushes into every direct subclass and takes no `targetClassName`; it refuses when the class has no direct subclass. Moving members *into* a `@Mixin` class flags external references to them as blocking `[mixin]` conflicts, since mixin members can't be referenced from ordinary classes at runtime.
-- `mixin_rename` is for reference-following renames. A mechanical text rewrite across many files (one string replaced everywhere, a generated block regenerated) is script territory instead: run the script via `run_command`, then `mixin_refresh_vfs` on the touched path so the IDE sees it.
+- `mixin_move_members`: `direction="up"|"down"|"toClass"`, with `members` as `name` or `name#descriptor`. `"down"` pushes into every direct subclass (no `targetClassName`; requires at least one subclass). Moving members into a `@Mixin` class flags external references as blocking `[mixin]` conflicts.
 
 ## Mixin workflow
 
-1. **Type hierarchy first.** Run `mixin_type_hierarchy` before designing the @Mixin. The target's parent often declares the method you actually want; injecting into the subclass means rewriting once you find the real declaration site.
-2. **Bytecode for synthetics.** Decompiled source hides lambda and bridge names; `mixin_class_bytecode(filter="synthetic")` is the only way to get the `lambda$X$N` symbol for `method = "…"`.
-3. **Bytecode owner for `@At(target)`.** The owner in an INVOKE instruction can differ from the source-declared class (devirtualisation, override resolution, mixin re-application). It is what runs at injection time, so read it from `mixin_method_bytecode`.
-4. **Origin questions.** `mixin_super_methods` walks up to the original declaration; `mixin_find_overrides` walks down to every implementation.
-5. **After writing a mixin, verify twice.** `get_file_problems` (JetBrains MCP) checks that the injectors resolve: `@At` targets, `method=` selectors, `@Shadow` members. The compiler never checks any of that, so it is not optional. Then build through the IDE (`build_project`, or a Gradle run configuration): the IDE model can resolve a class `compileJava` cannot see (a `runtimeOnly` dependency, or a jar another subproject's decompile cache made visible), so a clean inspection is not a compile proof. If `mixin_find_class(className=<target>, module=<the mixin's module>)` answers "not in the compile scope", fix the Gradle declaration, not the mixin.
-6. **After dependency changes**, run `./gradlew genDependencySources` then `mixin_sync_project` so the index matches the new classpath. It waits for the import by default and reports the outcome; a failure names the build error.
+1. **Type hierarchy first.** Run `mixin_type_hierarchy` / `mixin_super_methods` before designing the `@Mixin` — the parent class often declares the method you actually want.
+2. **Bytecode for synthetics and `@At(target)` owners.** Use `mixin_class_bytecode(filter="synthetic")` for `lambda$X$N` names, and `mixin_method_bytecode` for the real `INVOKE*` owner and `[ordinal N of M]`.
+3. **After writing a mixin, verify twice.** Run `get_file_problems` (JetBrains MCP) to check `@At` targets, `method=` selectors, and `@Shadow` members (`javac` never checks these). Then build through the IDE (`build_project` or a run configuration), since the IDE index can resolve classes `compileJava` cannot see (`runtimeOnly` or another subproject's cache); check `mixin_find_class(className=<target>, module=<mixin's module>)` if compile scope is in doubt.
+4. **After dependency changes**, run `./gradlew genDependencySources` then `mixin_sync_project`.
 
-For injector selection (`@ModifyExpressionValue` vs `@WrapOperation` vs `@Inject` vs …),
-`@At` parameter format, and MixinExtras `@Expression` syntax, switch to the
-**mixin-writing** skill once the tools above have pinned down the target.
-
-**Note:** the IntelliJ MCP framework auto-injects a `projectPath` parameter into every
-tool. Pass it when multiple IDE windows are open; with one window it can be omitted. An
-ambiguous project produces an error listing the candidate paths.
+For injector selection (`@ModifyExpressionValue` vs `@WrapOperation` vs `@Inject` vs …), `@At` parameter format, and MixinExtras `@Expression` syntax, switch to the **mixin-writing** skill.
 
 ## Troubleshooting
 
