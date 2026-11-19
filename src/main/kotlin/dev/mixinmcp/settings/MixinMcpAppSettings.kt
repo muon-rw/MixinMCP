@@ -13,6 +13,8 @@ class MixinMcpAppSettings : PersistentStateComponent<MixinMcpAppSettings.State> 
     data class State(
         var warnMissingClaudePlugin: Boolean = true,
         var warnMissingAntigravityPlugin: Boolean = true,
+        var decompiledCacheMaxGiB: Int = DEFAULT_DECOMPILED_CACHE_MAX_GIB,
+        var trigramCacheMaxMiB: Int = DEFAULT_TRIGRAM_CACHE_MAX_MIB,
     )
 
     private var state = State()
@@ -31,7 +33,20 @@ class MixinMcpAppSettings : PersistentStateComponent<MixinMcpAppSettings.State> 
         get() = state.warnMissingAntigravityPlugin
         set(value) { state.warnMissingAntigravityPlugin = value }
 
+    var decompiledCacheMaxGiB: Int
+        get() = state.decompiledCacheMaxGiB
+        set(value) { state.decompiledCacheMaxGiB = value }
+
+    var trigramCacheMaxMiB: Int
+        get() = state.trigramCacheMaxMiB
+        set(value) { state.trigramCacheMaxMiB = value }
+
     companion object {
+        const val DEFAULT_DECOMPILED_CACHE_MAX_GIB: Int = 6
+        const val DEFAULT_TRIGRAM_CACHE_MAX_MIB: Int = 512
+        val DECOMPILED_CACHE_MAX_GIB_RANGE: IntRange = 1..1024
+        val TRIGRAM_CACHE_MAX_MIB_RANGE: IntRange = 64..65536
+
         fun getInstance(): MixinMcpAppSettings =
             ApplicationManager.getApplication().getService(MixinMcpAppSettings::class.java)
     }

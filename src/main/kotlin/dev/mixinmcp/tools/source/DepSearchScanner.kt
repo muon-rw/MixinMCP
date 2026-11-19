@@ -5,7 +5,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import dev.mixinmcp.cache.DecompilationCacheService
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -137,13 +136,11 @@ private class RootBudget(private val ctx: ScanContext) {
  * candidate files; otherwise we scan the root directly with whole-file literal pre-filtering, and a
  * missing shard is built in the background for later searches.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 internal suspend fun scanDependencies(
     project: Project,
     regex: CompiledRegex,
     regexPattern: String,
     caseSensitive: Boolean,
-    fileMask: String?,
     matchesMask: (String) -> Boolean,
     normalizedPathPrefix: String?,
     rootsMode: String,
@@ -257,42 +254,47 @@ private fun appendSortedFileHits(
     }
 }
 
+private class JarRootLocation(val jarPath: String, val subPrefix: String)
+
+private fun jarRootLocation(root: VirtualFile): JarRootLocation? {
+    if (!root.url.startsWith("jar://")) return null
+    val rawPath: String = root.path
+    val jarPart: String = rawPath.substringBefore("!/")
+    if (!File(jarPart).isFile) return null
+    val sub: String = rawPath.substringAfter("!/", "").trim('/')
+    return JarRootLocation(jarPart, if (sub.isEmpty()) "" else "$sub/")
+}
+
+private fun localDirectory(root: VirtualFile): Path? {
+    if (root.url.startsWith("jar://") || !root.isInLocalFileSystem) return null
+    return Path.of(root.path).takeIf { Files.isDirectory(it) }
+}
+
+// Only decompiled-cache directories are indexed: other directories can change at any time,
+// and a shard is never revalidated against its files.
+private fun cacheDirShardStamp(root: VirtualFile, dir: Path, cacheService: DecompilationCacheService): String? =
+    cacheService.cachedRootInfo(root)?.let { TrigramShardIndex.cacheDirectoryStamp(dir, it.manifestCreatedAt) }
+
+/** The shard a dependency search reads for [root], or null when we never index it. */
+internal fun shardPathForSourceRoot(root: VirtualFile, cacheService: DecompilationCacheService): Path? {
+    jarRootLocation(root)?.let { return TrigramShardIndex.shardPathForJar(File(it.jarPath), it.subPrefix) }
+    val dir: Path = localDirectory(root) ?: return null
+    val stamp: String = cacheDirShardStamp(root, dir, cacheService) ?: return null
+    return TrigramShardIndex.shardPathForDirectory(dir, stamp)
+}
+
 private fun buildRootSlot(rootIdx: Int, info: SourceRootInfo, cacheService: DecompilationCacheService): RootSlot {
     val root: VirtualFile = info.root
-    val url: String = root.url
-
-    var diskJarPath: String? = null
-    var jarSubPrefix = ""
-    var diskDir: Path? = null
-    var dirShardStamp: String? = null
-
-    if (url.startsWith("jar://")) {
-        val rawPath: String = root.path
-        val jarPart: String = rawPath.substringBefore("!/")
-        if (File(jarPart).isFile) {
-            diskJarPath = jarPart
-            val sub: String = rawPath.substringAfter("!/", "").trim('/')
-            jarSubPrefix = if (sub.isEmpty()) "" else "$sub/"
-        }
-    } else if (root.isInLocalFileSystem) {
-        val p: Path = Path.of(root.path)
-        if (Files.isDirectory(p)) {
-            diskDir = p
-            // Other directories can change at any time, and a shard is never revalidated against its files.
-            dirShardStamp = cacheService.cachedRootInfo(root)?.let {
-                TrigramShardIndex.cacheDirectoryStamp(p, it.manifestCreatedAt)
-            }
-        }
-    }
-
+    val jar: JarRootLocation? = jarRootLocation(root)
+    val diskDir: Path? = if (jar == null) localDirectory(root) else null
     return RootSlot(
         rootIdx = rootIdx,
         info = info,
-        rootUrlTrimmed = url.trimEnd('/'),
-        diskJarPath = diskJarPath,
-        jarSubPrefix = jarSubPrefix,
+        rootUrlTrimmed = root.url.trimEnd('/'),
+        diskJarPath = jar?.jarPath,
+        jarSubPrefix = jar?.subPrefix.orEmpty(),
         diskDir = diskDir,
-        dirShardStamp = dirShardStamp,
+        dirShardStamp = diskDir?.let { cacheDirShardStamp(root, it, cacheService) },
     )
 }
 

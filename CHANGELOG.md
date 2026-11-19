@@ -11,12 +11,15 @@
 - New tool `mixin_get_loader_sources`: NeoForge, Forge, Fabric Loader, or Fabric API sources for any version, without decompiling Minecraft. Also useful for porting.
 - - Long generations run in the background: calls return a progress status after `timeoutMs` instead of timing out, and `mixin_ide_status` shows running jobs
 - - `loaderVersion` is optional; the newest release for `mcVersion` is used
+- LRU cleanup of the decompiled sources and search index caches in `~/.cache/mixinmcp`. Dependencies of open projects are never removed
+- - Absolute cache limits are under Settings | Tools | MixinMCP (6 GiB decompiled sources, 512 MiB search index by default); anything unused for 30 days is removed regardless
 
 ### Changed
 
 - Massive performance improvements to `mixin_search_in_deps` and `mixin_list_jar_entries(regexPattern=...)` (4x to 80x faster in testing)
 - - Details: Scan in parallel off the read lock using persistent per-jar trigram shards (`~/.cache/mixinmcp/trigrams/`) 
 - - Use linear-time RE2J matching, falling back to `java.util.regex` for Java-only syntax
+- - Shards build in the background on first search, which scans in full until they finish; `mixin_ide_status` shows builds still running
 - - Search timeout errors report when a pattern fell back from RE2J or the trigram index to plain regex
 
 ## [1.6.0]

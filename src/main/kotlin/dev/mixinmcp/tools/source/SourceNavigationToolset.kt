@@ -891,7 +891,6 @@ class SourceNavigationToolset : McpToolset {
             regex = compiledRegex,
             regexPattern = regexPattern,
             caseSensitive = caseSensitive,
-            fileMask = fileMask,
             matchesMask = matchesMask,
             normalizedPathPrefix = normalizedPathPrefix,
             rootsMode = rootsMode,

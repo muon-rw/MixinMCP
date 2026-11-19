@@ -3,6 +3,7 @@ package dev.mixinmcp.settings
 import com.intellij.openapi.options.BoundConfigurable
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.AdditionalLibraryRootsProvider
+import com.intellij.ui.dsl.builder.bindIntText
 import com.intellij.ui.dsl.builder.bindSelected
 import com.intellij.ui.dsl.builder.panel
 import dev.mixinmcp.tools.source.LabeledSyntheticRootsProvider
@@ -42,6 +43,25 @@ class MixinMcpSettingsConfigurable(private val project: Project) : BoundConfigur
             row {
                 checkBox("Warn when the MixinMCP Gradle plugin is missing or outdated")
                     .bindSelected(settings::warnMissingGradlePlugin)
+            }
+        }
+        group("Cache Cleanup") {
+            row("Decompiled sources cache limit (GiB):") {
+                intTextField(MixinMcpAppSettings.DECOMPILED_CACHE_MAX_GIB_RANGE)
+                    .bindIntText(MixinMcpAppSettings.getInstance()::decompiledCacheMaxGiB)
+            }
+            row("Search index cache limit (MiB):") {
+                intTextField(MixinMcpAppSettings.TRIGRAM_CACHE_MAX_MIB_RANGE)
+                    .bindIntText(MixinMcpAppSettings.getInstance()::trigramCacheMaxMiB)
+            }
+            row {
+                comment(
+                    "Shared by every project on this machine, in ~/.cache/mixinmcp. Dependencies of open " +
+                        "projects don't count toward these limits and are never removed. Beyond the limit, " +
+                        "we remove the least recently used entries first, and anything unused for 30 days " +
+                        "regardless. Cleanup runs at most every 6 hours, so a lowered limit can take that " +
+                        "long to apply.",
+                )
             }
         }
         group("Buildscript Classpath") {

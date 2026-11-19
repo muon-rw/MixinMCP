@@ -1,6 +1,7 @@
 package dev.mixinmcp.tools.source
 
 import com.intellij.util.concurrency.AppExecutorUtil
+import dev.mixinmcp.cache.CacheLruEvictor
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -80,6 +81,13 @@ internal object TrigramShardIndex {
     val pendingBuildCount: Int
         get() = scheduledBuilds.size
 
+    fun isBuildScheduled(shardPath: Path): Boolean = shardPath in scheduledBuilds
+
+    fun invalidateCachedShard(shardPath: Path) {
+        shardCache.remove(shardPath)
+        failedBuilds.remove(shardPath)
+    }
+
     /**
      * Looks up candidates in the shard for an unpacked directory [rootDir]. [contentStamp] must change
      * whenever the directory's contents may have changed, since the shard is never revalidated
@@ -125,7 +133,10 @@ internal object TrigramShardIndex {
         if (shardPath in failedBuilds) return Lookup.Unavailable
         if (query.branches.any { extractBranchTrigrams(it).isEmpty() }) return Lookup.Unavailable
         if (shardPath !in scheduledBuilds) {
-            queryShard(shardPath, query)?.let { return Lookup.Candidates(it) }
+            queryShard(shardPath, query)?.let {
+                CacheLruEvictor.touchIfStale(shardPath)
+                return Lookup.Candidates(it)
+            }
             // Missing or unreadable. Delete a corrupt file so the build doesn't accept its header as valid.
             shardCache.remove(shardPath)
             runCatching { Files.deleteIfExists(shardPath) }
@@ -154,12 +165,16 @@ internal object TrigramShardIndex {
     /**
      * Content stamp for a decompiled-cache directory. The Gradle plugin writes a cache directory in
      * place and records it in the manifest only once complete, keeping [manifestCreatedAt] across
-     * later syncs and replacing it on every fresh write. The directory's creation time catches a
-     * directory another project regenerated after this project's manifest entry was written.
+     * later syncs and replacing it on every fresh write. The directory's identity catches a
+     * directory another project regenerated after this project's manifest entry was written: its
+     * file key (device and inode) where the OS has one, else its creation time (Windows, where NTFS
+     * records it). Never its modification time, which we touch to track LRU use, and which Java
+     * returns as the creation time on filesystems that don't record one.
      */
     fun cacheDirectoryStamp(rootDir: Path, manifestCreatedAt: Long): String? = try {
-        val created: Long = Files.readAttributes(rootDir, BasicFileAttributes::class.java).creationTime().toMillis()
-        "$manifestCreatedAt:$created"
+        val attrs: BasicFileAttributes = Files.readAttributes(rootDir, BasicFileAttributes::class.java)
+        val identity: String = attrs.fileKey()?.toString() ?: "c${attrs.creationTime().toMillis()}"
+        "$manifestCreatedAt:$identity"
     } catch (_: Exception) {
         null
     }

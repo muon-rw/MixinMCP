@@ -201,6 +201,10 @@ class DecompilationCacheService(private val project: Project) {
         return globalManifest.entries
     }
 
+    /** Every cache directory the project's manifests reference, including ones the VFS hasn't seen yet. */
+    fun manifestCacheDirs(): Map<String, Path> =
+        loadMergedManifestEntries().mapValues { (_, entry) -> Paths.get(entry.cachePath) }
+
     /**
      * Newest Gradle-plugin version stamped across the project's manifests; null when no
      * manifest carries one (plugin absent, or every manifest predates version stamping).

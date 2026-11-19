@@ -38,6 +38,7 @@ class MixinDecompileCacheSyncListener : ExternalSystemTaskNotificationListener {
             SourceAutoAttacher.getInstance(project).schedule("gradle-sync")
         }
 
+        CacheMaintenanceService.getInstance().schedule()
         checkForUnresolvedArtifacts(project, projectPath)
     }
 
