@@ -7,10 +7,17 @@
 ### Added
 
 - New tool `mixin_get_mc_sources`: Pull minecraft (or loader-patched) sources for a version not on your active project. Useful for porting!
-- Caching multiple mc versions can get quite big. Also added `mixin_manage_mc_sources_cache` for when this needs manual cleaning. 
-- New tool `mixin_get_loader_sources`: NeoForge, Forge, Fabric Loader, or Fabric API sources for any version, without decompiling Minecraft. Pre-26 Fabric API is remapped to Mojang names, mixin strings included
-- Long generations run in the background: calls return a progress status after `timeoutMs` instead of timing out, and `mixin_ide_status` shows running jobs
-- `loaderVersion` is optional; the newest release for `mcVersion` is used
+- - Caching multiple mc versions can get quite big. Also added `mixin_manage_mc_sources_cache` for when this needs manual cleaning. 
+- New tool `mixin_get_loader_sources`: NeoForge, Forge, Fabric Loader, or Fabric API sources for any version, without decompiling Minecraft. Also useful for porting.
+- - Long generations run in the background: calls return a progress status after `timeoutMs` instead of timing out, and `mixin_ide_status` shows running jobs
+- - `loaderVersion` is optional; the newest release for `mcVersion` is used
+
+### Changed
+
+- Massive performance improvements to `mixin_search_in_deps` and `mixin_list_jar_entries(regexPattern=...)` (4x to 80x faster in testing)
+- - Details: Scan in parallel off the read lock using persistent per-jar trigram shards (`~/.cache/mixinmcp/trigrams/`) 
+- - Use linear-time RE2J matching, falling back to `java.util.regex` for Java-only syntax
+- - Search timeout errors report when a pattern fell back from RE2J or the trigram index to plain regex
 
 ## [1.6.0]
 

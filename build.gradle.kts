@@ -89,6 +89,9 @@ dependencies {
     // mapping-io: parses tiny v1/v2, tsrg/tsrg2, ProGuard; composes namespaces
     implementation(libs.mapping.io)
 
+    // Linear-time regex engine for dependency search (falls back to java.util.regex on lookarounds/backrefs)
+    implementation(libs.re2j)
+
     testImplementation(libs.junit)
     testImplementation(libs.opentest4j)
 
@@ -353,7 +356,7 @@ intellijPlatformTesting {
     runIde {
         register("runIdeDev") {
             task {
-                val projectDir = layout.projectDirectory.dir(".sandbox/Chronicles-Leveling").asFile
+                val projectDir = layout.projectDirectory.dir(".sandbox/Otherworld-Core").asFile
                 // IntelliJ opens the project passed as its first program argument; without one it stops
                 // at the welcome screen and no MCP project tools resolve.
                 if (projectDir.isDirectory) {

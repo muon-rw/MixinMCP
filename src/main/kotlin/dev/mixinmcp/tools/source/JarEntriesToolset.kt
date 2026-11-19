@@ -369,15 +369,47 @@ class JarEntriesToolset : McpToolset {
     }
 }
 
-/** `  entry:line: text` for every line of [jar]'s text entries matching [pattern], at most [limit] lines. */
+/**
+ * `  entry:line: text` for every line of [jar]'s text entries matching [pattern], at most [limit] lines.
+ * Reads only the [TrigramShardIndex] candidates once the jar's shard is built; until then we scan the
+ * whole jar while the shard builds in the background.
+ */
 internal fun grepJar(
     jar: File,
     prefix: String?,
     matchesMask: (String) -> Boolean,
     pattern: Pattern,
     limit: Int,
+    shardDir: java.nio.file.Path = TrigramShardIndex.defaultShardDir,
 ): List<String> {
+    if (limit <= 0) return emptyList()
+    val caseSensitive: Boolean = (pattern.flags() and Pattern.CASE_INSENSITIVE) == 0
+    val plan: RegexLiteralPlanner.Plan = RegexLiteralPlanner.plan(pattern.pattern(), caseSensitive)
+    val session: CompiledRegex.LineSession = CompiledRegex.fromJavaPattern(pattern).newLineSession()
     val out = mutableListOf<String>()
+
+    if (plan.trigramQuery is RegexLiteralPlanner.TrigramQuery.Clauses) {
+        val lookup: TrigramShardIndex.Lookup = TrigramShardIndex.lookupJar(jar.absolutePath, "", plan.trigramQuery, shardDir)
+        if (lookup is TrigramShardIndex.Lookup.Candidates) {
+            val filtered: List<String> = lookup.relPaths
+                .filter { prefix == null || it.startsWith(prefix, ignoreCase = true) }
+                .filter { matchesMask(it) }
+                .sorted()
+            if (filtered.isEmpty()) return out
+            ZipFile(jar).use { zip ->
+                for (name in filtered) {
+                    val entry = zip.getEntry(name) ?: continue
+                    if (entry.size > MAX_GREP_ENTRY_BYTES) continue
+                    val bytes: ByteArray = zip.getInputStream(entry).use { it.readBytes() }
+                    if (looksBinary(bytes)) continue
+                    appendMatchingGrepLines(String(bytes, StandardCharsets.UTF_8), name, plan.prefilter, session, limit, out)
+                    if (out.size >= limit) return out
+                }
+            }
+            return out
+        }
+    }
+
     ZipFile(jar).use { zip ->
         val entries = zip.entries().asSequence()
             .filter { !it.isDirectory && !isBinaryEntryName(it.name) && it.size <= MAX_GREP_ENTRY_BYTES }
@@ -387,12 +419,40 @@ internal fun grepJar(
         for (entry in entries) {
             val bytes: ByteArray = zip.getInputStream(entry).use { it.readBytes() }
             if (looksBinary(bytes)) continue
-            for ((i, line) in String(bytes, StandardCharsets.UTF_8).lines().withIndex()) {
-                if (!pattern.matcher(line).find()) continue
-                out.add("  ${entry.name}:${i + 1}: ${line.trim().take(MAX_GREP_LINE_CHARS)}")
-                if (out.size >= limit) return out
-            }
+            appendMatchingGrepLines(String(bytes, StandardCharsets.UTF_8), entry.name, plan.prefilter, session, limit, out)
+            if (out.size >= limit) return out
         }
     }
     return out
+}
+
+private fun appendMatchingGrepLines(
+    content: String,
+    entryName: String,
+    prefilter: RegexLiteralPlanner.LiteralPrefilter,
+    session: CompiledRegex.LineSession,
+    limit: Int,
+    out: MutableList<String>,
+) {
+    if (!prefilter.matches(content)) return
+    val len: Int = content.length
+    var lineStart = 0
+    var lineNum = 1
+    while (lineStart <= len && out.size < limit) {
+        var lineEnd: Int = lineStart
+        while (lineEnd < len && content[lineEnd] != '\n' && content[lineEnd] != '\r') {
+            lineEnd++
+        }
+        if (session.matchesLine(content, lineStart, lineEnd)) {
+            val text: String = content.substring(lineStart, lineEnd).trim().take(MAX_GREP_LINE_CHARS)
+            out.add("  $entryName:$lineNum: $text")
+        }
+        if (lineEnd >= len) break
+        lineStart = if (content[lineEnd] == '\r' && lineEnd + 1 < len && content[lineEnd + 1] == '\n') {
+            lineEnd + 2
+        } else {
+            lineEnd + 1
+        }
+        lineNum++
+    }
 }

@@ -61,7 +61,7 @@ data class DecompilationManifest(
             ignoreUnknownKeys = true
         }
 
-        private const val HASH_MEMO_FILE = "hash-memo.json"
+        const val HASH_MEMO_FILE = "hash-memo.json"
 
         /**
          * The Gradle plugin's `<jar path>|<size>|<mtime>` to content-hash memo in [cacheRoot],

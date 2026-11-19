@@ -86,6 +86,43 @@ class DepSearchCollectorTest : LightJavaCodeInsightFixtureTestCase() {
         assertEquals(1, scanned)
     }
 
+    fun testPathPrefixWithoutTrailingSlashKeepsSiblingDirectories() {
+        myFixture.addFileToProject("deps11/net/minecraft/world/Level.java", "addEffect(x);")
+        myFixture.addFileToProject("deps11/net/minecraftforge/event/Event.java", "addEffect(y);")
+        myFixture.addFileToProject("deps11/com/other/Unrelated.java", "addEffect(z);")
+        val (hits, _) = scan(myFixture.findFileInTempDir("deps11"), """addEffect\(""", null, pathPrefix = "net/minecraft")
+        assertEquals(
+            setOf("net/minecraft/world/Level.java", "net/minecraftforge/event/Event.java"),
+            hits.map { it.filePath }.toSet(),
+        )
+    }
+
+    fun testPathPrefixPrunesOtherDirectoriesAndMatchesWithPrefilter() {
+        myFixture.addFileToProject("deps10/net/minecraft/world/Level.java", "void tick() {\n  addEffect(x);\n}")
+        myFixture.addFileToProject("deps10/com/other/Unrelated.java", "void addEffect(int x) {}")
+        val plan = RegexLiteralPlanner.plan("""addEffect\(""", caseSensitive = true)
+        val hits: MutableList<DepSearchHit> = mutableListOf()
+        val scanned = IntArray(1)
+        val root: VirtualFile = myFixture.findFileInTempDir("deps10")
+        collectRegexHits(
+            root,
+            root,
+            Pattern.compile("""addEffect\("""),
+            buildFileMaskMatcher(null),
+            hits,
+            100,
+            System.currentTimeMillis(),
+            60_000,
+            pathPrefix = "net/minecraft/",
+            scannedFiles = scanned,
+            prefilter = plan.prefilter,
+        )
+        assertEquals(1, hits.size)
+        assertEquals("net/minecraft/world/Level.java", hits.single().filePath)
+        assertEquals(2, hits.single().lineNum)
+        assertEquals(1, scanned[0])
+    }
+
     private fun scan(
         root: VirtualFile,
         regex: String,

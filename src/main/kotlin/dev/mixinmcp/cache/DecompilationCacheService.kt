@@ -27,12 +27,21 @@ import java.nio.file.Paths
 @Service(Service.Level.PROJECT)
 class DecompilationCacheService(private val project: Project) {
 
+    private data class RootsMemo(
+        val stamp: String,
+        val roots: List<CachedLibraryInfo>,
+    )
+
+    @Volatile
+    private var rootsMemo: RootsMemo? = null
+
     /**
      * Ensure the VFS knows about the entire cache directory tree. Must be
      * called outside of read lock (e.g. from startup activity) before
      * getAdditionalProjectLibraries is invoked under read lock.
      */
     fun refreshVfs() {
+        rootsMemo = null
         val root = globalCacheRoot.toFile()
         if (!root.isDirectory) return
 
@@ -44,6 +53,13 @@ class DecompilationCacheService(private val project: Project) {
     }
 
     fun getCachedRoots(): List<CachedLibraryInfo> {
+        val stamp: String = computeManifestStamp()
+        val memo: RootsMemo? = rootsMemo
+        // The VFS can keep a deleted directory valid until its next refresh, so check the disk too.
+        if (memo != null && memo.stamp == stamp && memo.roots.all { it.root.isValid && Files.isDirectory(Path.of(it.root.path)) }) {
+            return memo.roots
+        }
+
         val mergedEntries = loadMergedManifestEntries()
         val result = mutableListOf<CachedLibraryInfo>()
         var missingCache = 0
@@ -59,7 +75,14 @@ class DecompilationCacheService(private val project: Project) {
             val virtualFile = LocalFileSystem.getInstance().findFileByIoFile(cachePath.toFile())
             if (virtualFile != null) {
                 result.add(
-                    CachedLibraryInfo(entry.libraryName, hash, entry.classesJarPath, virtualFile, entry.classpathKind),
+                    CachedLibraryInfo(
+                        entry.libraryName,
+                        hash,
+                        entry.classesJarPath,
+                        virtualFile,
+                        entry.classpathKind,
+                        manifestCreatedAt = entry.createdAt,
+                    ),
                 )
             } else {
                 noVirtualFile++
@@ -74,11 +97,33 @@ class DecompilationCacheService(private val project: Project) {
             noVirtualFile = noVirtualFile,
             totalManifestEntries = mergedEntries.size,
         )
+        // Only memoize clean snapshots so missing dirs or unrefreshed VFS entries are retried.
+        rootsMemo = if (missingCache == 0 && noVirtualFile == 0) RootsMemo(stamp, result) else null
 
         LOG.info("MixinMCP: getCachedRoots() → ${result.size} valid, " +
             "$missingCache missing cache dir, " +
             "$noVirtualFile no VirtualFile (of ${mergedEntries.size} total)")
         return result
+    }
+
+    // Covers the hash memo too: artifactHashByJarPath is only recomputed on a memo miss.
+    private fun computeManifestStamp(): String = buildString {
+        var found = false
+        forEachManifestDir { dir ->
+            for (name in MANIFEST_FILE_NAMES + DecompilationManifest.HASH_MEMO_FILE) {
+                val p: Path = dir.resolve(name)
+                if (Files.isRegularFile(p)) {
+                    if (name in MANIFEST_FILE_NAMES) found = true
+                    append(p).append('=').append(Files.size(p)).append(':').append(Files.getLastModifiedTime(p).toMillis()).append(';')
+                }
+            }
+        }
+        if (!found) {
+            val global: Path = globalCacheRoot.resolve("manifest.json")
+            if (Files.isRegularFile(global)) {
+                append("global=").append(Files.size(global)).append(':').append(Files.getLastModifiedTime(global).toMillis())
+            }
+        }
     }
 
     /**
@@ -204,6 +249,7 @@ class DecompilationCacheService(private val project: Project) {
         val classesJarPath: String,
         val root: VirtualFile,
         val classpathKind: String = "compile",
+        val manifestCreatedAt: Long = 0L,
     ) {
         val jarFileName: String
             get() = classesJarPath.replace('\\', '/').trimEnd('/').substringAfterLast('/')

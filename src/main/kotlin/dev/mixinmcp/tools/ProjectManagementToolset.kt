@@ -24,6 +24,7 @@ import dev.mixinmcp.mcsources.GenerationStatus
 import dev.mixinmcp.mcsources.McSourcesService
 import dev.mixinmcp.sync.IdeSyncState
 import dev.mixinmcp.tools.mcsources.McSourcesToolset
+import dev.mixinmcp.tools.source.TrigramShardIndex
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -213,7 +214,8 @@ class ProjectManagementToolset : McpToolset {
         "Reports whether the IDE can answer classpath questions right now: dumb mode (indexing), a Gradle resolve or " +
             "project-data import in flight and how long ago it started, the last sync outcome with its error text, and " +
             "the linked Gradle roots that mixin_sync_project accepts as projectPath, and any mixin_get_mc_sources " +
-            "generation running in the background with its elapsed time and latest step. Other mixin_* tools wait up to " +
+            "generation running in the background with its elapsed time and latest step, and how many mixin_search_in_deps " +
+            "trigram index builds are still running. Other mixin_* tools wait up to " +
             "30s for a busy IDE and then return an error asking you to retry; call this to see what they are waiting on.",
     )
     @Suppress("unused")
@@ -242,6 +244,13 @@ class ProjectManagementToolset : McpToolset {
                 failed.forEach {
                     appendLine("  FAILED ${it.key} ${ago(it.failedAtMs)}: ${it.message.lineSequence().first()}")
                 }
+            }
+            val indexBuilds: Int = TrigramShardIndex.pendingBuildCount
+            if (indexBuilds > 0) {
+                appendLine(
+                    "Dependency search index: building $indexBuilds trigram ${if (indexBuilds == 1) "shard" else "shards"} " +
+                        "in the background; mixin_search_in_deps scans those roots in full until they finish",
+                )
             }
         }
         return McpToolCallResult.text(text)

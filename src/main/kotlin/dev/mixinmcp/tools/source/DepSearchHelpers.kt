@@ -81,19 +81,6 @@ internal data class DepSearchHit(
     val highlighted: String,
 )
 
-internal data class DepRegexScanResult(
-    val hits: List<DepSearchHit>,
-    val timedOut: Boolean,
-    val noMatchHints: List<String>,
-    val scannedFiles: Int,
-    val sawMore: Boolean,
-    val unreadableFilesByRoot: Map<String, Int> = emptyMap(),
-    val rootsScanned: Int = 0,
-    val rootsTotal: Int = 0,
-    val stoppedInRoot: String? = null,
-    val unsearchedJars: UnsearchedJars = UnsearchedJars.NONE,
-)
-
 /**
  * Collects all source roots: SOURCES from library and JDK order entries plus
  * source roots from every AdditionalLibraryRootsProvider (decompiled cache,
@@ -331,6 +318,13 @@ internal fun hasNeoForgeNeoforgeEventApiInLibrarySources(libRoots: List<SourceRo
     }
 }
 
+private class SentinelCheck(val vfsStructureStamp: Long, val isGame: Boolean)
+
+// Keyed on the VFS structure stamp: a directory root checked before its files reached the VFS
+// would otherwise stay out of the game tier for the whole session.
+private val gameRootSentinelCache: MutableMap<VirtualFile, SentinelCheck> =
+    java.util.Collections.synchronizedMap(java.util.WeakHashMap())
+
 /**
  * True for Library SOURCES roots holding game code: loom-cache or MDG merged
  * artifacts under the project, or any root containing a vanilla / Forge /
@@ -345,9 +339,14 @@ internal fun isGameSourceRoot(project: Project, root: VirtualFile): Boolean {
     ) {
         return true
     }
-    return libraryRootContainsAnySentinelJava(root, VANILLA_LIBRARY_SOURCE_SENTINELS) ||
-        libraryRootContainsAnySentinelJava(root, FORGE_EVENT_LIBRARY_SOURCE_SENTINELS) ||
-        libraryRootContainsAnySentinelJava(root, NEOFORGE_NEOFORGE_EVENT_SOURCE_SENTINELS)
+    val vfsStamp: Long = VirtualFileManager.getInstance().structureModificationCount
+    gameRootSentinelCache[root]?.takeIf { it.vfsStructureStamp == vfsStamp }?.let { return it.isGame }
+    val hasSentinel: Boolean =
+        libraryRootContainsAnySentinelJava(root, VANILLA_LIBRARY_SOURCE_SENTINELS) ||
+            libraryRootContainsAnySentinelJava(root, FORGE_EVENT_LIBRARY_SOURCE_SENTINELS) ||
+            libraryRootContainsAnySentinelJava(root, NEOFORGE_NEOFORGE_EVENT_SOURCE_SENTINELS)
+    gameRootSentinelCache[root] = SentinelCheck(vfsStamp, hasSentinel)
+    return hasSentinel
 }
 
 /**
@@ -376,6 +375,8 @@ internal fun describeEmptyScan(
     scannedFiles: Int,
     fileMask: String?,
     pathPrefix: String?,
+    usedIndex: Boolean = false,
+    indexCandidatesFilteredOut: Int = 0,
 ): String {
     val mask: String? = fileMask?.trim()?.takeUnless { it.isBlank() || it == "*" }
     val filterDesc: String? = when {
@@ -384,13 +385,22 @@ internal fun describeEmptyScan(
         pathPrefix != null -> "pathPrefix \"$pathPrefix\""
         else -> null
     }
+    val maskHint = " Without wildcards, fileMask matches as a case-insensitive path substring; with wildcards, as a glob."
     val files: String = if (scannedFiles == 1) "file" else "files"
     return when {
+        scannedFiles == 0 && filterDesc != null && indexCandidatesFilteredOut > 0 -> buildString {
+            val n: Int = indexCandidatesFilteredOut
+            append("$n ${if (n == 1) "file contains" else "files contain"} the pattern's literals, but none match ")
+            append("$filterDesc, so the regex was never tested. Check the filter.")
+            if (mask != null) append(maskHint)
+        }
+        scannedFiles == 0 && usedIndex && filterDesc != null ->
+            "No file matching $filterDesc contains the pattern's literals (the trigram index found no candidates)."
+        scannedFiles == 0 && usedIndex ->
+            "No file in the searched roots contains the pattern's literals (the trigram index found no candidates)."
         scannedFiles == 0 && filterDesc != null -> buildString {
             append("$filterDesc matched no files in the searched roots; the regex was never tested.")
-            if (mask != null) {
-                append(" Without wildcards, fileMask matches as a case-insensitive path substring; with wildcards, as a glob.")
-            }
+            if (mask != null) append(maskHint)
         }
         scannedFiles == 0 -> "The searched roots contain no source files."
         filterDesc != null ->
@@ -398,6 +408,37 @@ internal fun describeEmptyScan(
         else -> "The regex matched no lines in the $scannedFiles $files scanned."
     }
 }
+
+private const val MAX_UNFINISHED_ROOTS_LISTED: Int = 5
+
+// Roots in a tier are scanned in parallel, so unfinished roots need not be the last ones.
+internal fun describeUnfinishedRoots(rootsScanned: Int, rootsTotal: Int, unfinished: List<String>): String? {
+    if (unfinished.isEmpty()) return null
+    val listed: String = unfinished.take(MAX_UNFINISHED_ROOTS_LISTED).joinToString(", ")
+    val more: String = if (unfinished.size > MAX_UNFINISHED_ROOTS_LISTED) " and ${unfinished.size - MAX_UNFINISHED_ROOTS_LISTED} more" else ""
+    return "$rootsScanned of $rootsTotal roots were fully searched; not fully searched: $listed$more."
+}
+
+internal fun describeTimeoutDiagnostics(usesRe2j: Boolean, patternHasTrigrams: Boolean, indexBuildsPending: Int): String? =
+    buildList {
+        if (!usesRe2j) {
+            add(
+                "Note: pattern uses Java-only regex syntax (such as lookaround or backreferences), so it fell back " +
+                    "from linear-time RE2J to java.util.regex; simplifying the pattern may avoid backtracking.",
+            )
+        }
+        if (!patternHasTrigrams) {
+            add(
+                "Note: pattern had no 3+ character identifier literals for the trigram index, so a full scan was required.",
+            )
+        } else if (indexBuildsPending > 0) {
+            val roots: String = if (indexBuildsPending == 1) "1 root" else "$indexBuildsPending roots"
+            add(
+                "Note: the trigram index for $roots is still being built in the background, so they were scanned in " +
+                    "full. Retry once mixin_ide_status no longer lists index builds.",
+            )
+        }
+    }.takeIf { it.isNotEmpty() }?.joinToString("\n")
 
 internal fun describeUnreadableFiles(unreadableByRoot: Map<String, Int>): String? {
     if (unreadableByRoot.isEmpty()) return null
@@ -927,7 +968,6 @@ internal fun isBinaryEntryName(name: String): Boolean =
  */
 internal fun directoryMayContainPrefix(dirRel: String, prefix: String): Boolean =
     prefix.startsWith(dirRel, ignoreCase = true) || dirRel.startsWith(prefix, ignoreCase = true)
-
 /**
  * Returns the path used for fileMask matching: the path of [vf] relative to
  * [root] (e.g. net/minecraft/world/entity/LivingEntity.java). Falls back to
@@ -967,6 +1007,43 @@ internal fun collectRegexHits(
     skipPath: (String) -> Boolean = { false },
     scannedFiles: IntArray? = null,
     unreadableFiles: IntArray? = null,
+    prefilter: RegexLiteralPlanner.LiteralPrefilter = RegexLiteralPlanner.LiteralPrefilter.None,
+) {
+    collectRegexHits(
+        vf = vf,
+        root = root,
+        regex = CompiledRegex.fromJavaPattern(pattern),
+        matchesMask = matchesMask,
+        hits = hits,
+        maxResults = maxResults,
+        startTime = startTime,
+        timeout = timeout,
+        rootLabel = rootLabel,
+        pathPrefix = pathPrefix,
+        skipPath = skipPath,
+        scannedFiles = scannedFiles,
+        unreadableFiles = unreadableFiles,
+        prefilter = prefilter,
+    )
+}
+
+@RequiresReadLock
+internal fun collectRegexHits(
+    vf: VirtualFile,
+    root: VirtualFile,
+    regex: CompiledRegex,
+    matchesMask: (String) -> Boolean,
+    hits: MutableList<DepSearchHit>,
+    maxResults: Int,
+    startTime: Long,
+    timeout: Long,
+    rootLabel: String = "",
+    pathPrefix: String? = null,
+    skipPath: (String) -> Boolean = { false },
+    scannedFiles: IntArray? = null,
+    unreadableFiles: IntArray? = null,
+    prefilter: RegexLiteralPlanner.LiteralPrefilter = RegexLiteralPlanner.LiteralPrefilter.None,
+    session: CompiledRegex.LineSession = regex.newLineSession(),
 ) {
     ProgressManager.checkCanceled()
     if (hits.size >= maxResults) return
@@ -981,7 +1058,7 @@ internal fun collectRegexHits(
             collectRegexHits(
                 child,
                 root,
-                pattern,
+                regex,
                 matchesMask,
                 hits,
                 maxResults,
@@ -992,6 +1069,8 @@ internal fun collectRegexHits(
                 skipPath,
                 scannedFiles,
                 unreadableFiles,
+                prefilter,
+                session,
             )
         }
     } else {
@@ -1010,20 +1089,19 @@ internal fun collectRegexHits(
         if (looksBinary(bytes)) return
         val content = String(bytes, StandardCharsets.UTF_8)
         scannedFiles?.let { count -> count[0]++ }
-        val lines: List<String> = content.lines()
-        for ((i, line) in lines.withIndex()) {
-            if (hits.size >= maxResults) return
-            val matcher = pattern.matcher(line)
-            if (matcher.find()) {
-                hits.add(DepSearchHit(
-                    url = vf.url,
-                    filePath = pathToMatch,
-                    rootLabel = rootLabel,
-                    lineNum = i + 1,
-                    highlighted = matcher.replaceAll("||\$0||"),
-                ))
-            }
-        }
+        val remaining: Int = maxResults - hits.size
+        if (remaining <= 0) return
+        hits.addAll(
+            matchContentLines(
+                content = content,
+                url = vf.url,
+                filePath = pathToMatch,
+                rootLabel = rootLabel,
+                session = session,
+                prefilter = prefilter,
+                maxHits = remaining,
+            ),
+        )
     }
 }
 
@@ -1059,6 +1137,7 @@ internal fun formatGroupedHitsWithContext(
     sb: StringBuilder,
     hits: List<DepSearchHit>,
     contextLines: Int,
+    preloadedContent: Map<String, String> = emptyMap(),
 ) {
     if (contextLines <= 0) {
         formatGroupedHits(sb, hits)
@@ -1069,14 +1148,14 @@ internal fun formatGroupedHitsWithContext(
         val first = fileHits.first()
         sb.appendLine("--- ${first.filePath} [${first.rootLabel}] ---")
         sb.appendLine("url: $url")
-        val vf: VirtualFile? = VirtualFileManager.getInstance().findFileByUrl(url)
-        val lines: List<String>? = vf?.let {
-            try {
-                String(it.contentsToByteArray(), StandardCharsets.UTF_8).lines()
-            } catch (_: Exception) {
-                null
+        val lines: List<String>? = preloadedContent[url]?.lines()
+            ?: VirtualFileManager.getInstance().findFileByUrl(url)?.let {
+                try {
+                    String(it.contentsToByteArray(), StandardCharsets.UTF_8).lines()
+                } catch (_: Exception) {
+                    null
+                }
             }
-        }
         if (lines == null) {
             for (hit in fileHits) {
                 sb.appendLine("  ${hit.lineNum}: ${hit.highlighted}")

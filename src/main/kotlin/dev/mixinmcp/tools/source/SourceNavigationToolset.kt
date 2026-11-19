@@ -846,11 +846,8 @@ class SourceNavigationToolset : McpToolset {
         }
         val project = coroutineContext.requireProject { return it }
 
-        val pattern: Pattern = try {
-            Pattern.compile(
-                regexPattern,
-                if (caseSensitive) 0 else Pattern.CASE_INSENSITIVE,
-            )
+        val compiledRegex: CompiledRegex = try {
+            CompiledRegex.compile(regexPattern, caseSensitive)
         } catch (e: java.util.regex.PatternSyntaxException) {
             val hint: String = buildString {
                 append("Invalid regex: ${e.message}")
@@ -889,77 +886,32 @@ class SourceNavigationToolset : McpToolset {
         val matchesMask: (String) -> Boolean = buildFileMaskMatcher(fileMask)
 
         val requestStart: Long = System.currentTimeMillis()
-        // Scan one hit past the cap so the truncation footer can state definitively
-        // whether more matches exist, without counting everything past the cap.
-        val scanCap: Int = if (maxResults == Int.MAX_VALUE) maxResults else maxResults + 1
-        val scanResult: DepRegexScanResult = smartReadAction(project) {
-            val startTime: Long = System.currentTimeMillis()
-            val hits: MutableList<DepSearchHit> = mutableListOf()
-            var timedOut: Boolean = false
-            val scannedFiles = IntArray(1)
-            val unreadableFiles = IntArray(1)
-            val unreadableByRoot: MutableMap<String, Int> = linkedMapOf()
-            var rootsScanned = 0
-            var stoppedInRoot: String? = null
+        val execution: DepSearchExecution = scanDependencies(
+            project = project,
+            regex = compiledRegex,
+            regexPattern = regexPattern,
+            caseSensitive = caseSensitive,
+            fileMask = fileMask,
+            matchesMask = matchesMask,
+            normalizedPathPrefix = normalizedPathPrefix,
+            rootsMode = rootsMode,
+            maxResults = maxResults,
+            timeout = timeout,
+            captureContextContent = contextLines > 0,
+        )
 
-            val tiers: SearchTiers = searchTiers(project, collectSourceRootsWithMetadata(project))
-            val plan: List<List<SourceRootInfo>> = tiers.tiersFor(rootsMode)
-            val rootsTotal: Int = plan.sumOf { it.size }
-
-            fun scanRoots(rootsToScan: List<SourceRootInfo>, skipPath: (String) -> Boolean) {
-                for (info in rootsToScan) {
-                    if (System.currentTimeMillis() - startTime > timeout) {
-                        timedOut = true
-                        return
-                    }
-                    if (hits.size >= scanCap) return
-                    val unreadableBefore: Int = unreadableFiles[0]
-                    collectRegexHits(
-                        info.root,
-                        info.root,
-                        pattern,
-                        matchesMask,
-                        hits,
-                        scanCap,
-                        startTime,
-                        timeout,
-                        info.typeLabel,
-                        normalizedPathPrefix,
-                        skipPath,
-                        scannedFiles,
-                        unreadableFiles,
-                    )
-                    val unreadableHere: Int = unreadableFiles[0] - unreadableBefore
-                    if (unreadableHere > 0) unreadableByRoot.merge(info.typeLabel, unreadableHere, Int::plus)
-                    if (System.currentTimeMillis() - startTime > timeout) {
-                        timedOut = true
-                        stoppedInRoot = info.typeLabel
-                        return
-                    }
-                    rootsScanned++
-                }
-            }
-
-            // Later tiers skip paths already matched so a class present both as -sources.jar
-            // and in the decompiled cache is reported once, from the better root.
-            for (tier: List<SourceRootInfo> in plan) {
-                if (hits.size >= scanCap || timedOut) break
-                val pathsHit: Set<String> = hits.map { it.filePath }.toSet()
-                scanRoots(tier, skipPath = { it in pathsHit })
-            }
-            if (!timedOut && System.currentTimeMillis() - startTime > timeout) timedOut = true
-
-            val unsearchedJars: UnsearchedJars =
+        val (unsearchedJars: UnsearchedJars, noMatchHints: List<String>) = smartReadAction(project) {
+            val unsearched: UnsearchedJars =
                 if (rootsMode in setOf("all", "library", "decompiled")) unsearchableClasspathJars(project) else UnsearchedJars.NONE
-            val noMatchHints: List<String> =
-                if (hits.isEmpty() && !timedOut) {
+            val hints: List<String> =
+                if (execution.hits.isEmpty() && !execution.timedOut) {
                     val base: List<String> = buildNoMatchHintsForDepSearch(
                         project,
                         normalizedPathPrefix,
                         rootsMode,
                     )
                     val zeroTierNotice: String? = when {
-                        rootsMode == "buildscript" && tiers.buildscript.isEmpty() -> {
+                        rootsMode == "buildscript" && execution.tiers.buildscript.isEmpty() -> {
                             val cause: String =
                                 if (!MixinMcpSettings.getInstance(project).indexBuildscriptClasspath) {
                                     "buildscript indexing is disabled in Settings | Tools | MixinMCP."
@@ -970,44 +922,36 @@ class SourceNavigationToolset : McpToolset {
                                 }
                             "No buildscript classpath roots are available; nothing was searched. $cause"
                         }
-                        rootsMode == "library" && rootsTotal == 0 ->
+                        rootsMode == "library" && execution.rootsTotal == 0 ->
                             "No Library SOURCES roots are attached; nothing was searched for roots=library. " +
                                 "Run mixin_list_source_roots for diagnostics."
-                        rootsMode == "decompiled" && tiers.cache.isEmpty() ->
+                        rootsMode == "decompiled" && execution.tiers.cache.isEmpty() ->
                             "No decompiled cache roots are attached; nothing was searched for roots=decompiled. " +
                                 "Run mixin_list_source_roots for diagnostics."
-                        rootsMode == "jdk" && tiers.jdk.isEmpty() ->
+                        rootsMode == "jdk" && execution.tiers.jdk.isEmpty() ->
                             "No JDK source roots are attached (project SDK without src.zip); nothing was searched for roots=jdk."
-                        rootsMode == "game" && tiers.game.isEmpty() ->
+                        rootsMode == "game" && execution.tiers.game.isEmpty() ->
                             "No Minecraft / loader game source roots were detected; nothing was searched for roots=game. " +
                                 "Run mixin_list_source_roots for the toolchain diagnostics."
                         else -> null
                     }
-                    base + listOfNotNull(zeroTierNotice, describeUnsearchableJars(unsearchedJars))
+                    base + listOfNotNull(zeroTierNotice, describeUnsearchableJars(unsearched))
                 } else {
                     emptyList()
                 }
-            DepRegexScanResult(
-                hits = hits.take(maxResults),
-                timedOut = timedOut,
-                noMatchHints = noMatchHints,
-                scannedFiles = scannedFiles[0],
-                sawMore = hits.size > maxResults,
-                unreadableFilesByRoot = unreadableByRoot,
-                rootsScanned = rootsScanned,
-                rootsTotal = rootsTotal,
-                stoppedInRoot = stoppedInRoot,
-                unsearchedJars = unsearchedJars,
-            )
+            unsearched to hints
         }
 
         val elapsed: Long = System.currentTimeMillis() - requestStart
-        val hits: List<DepSearchHit> = scanResult.hits
-        val timedOut: Boolean = scanResult.timedOut
-        val stoppedNote: String = scanResult.stoppedInRoot?.let { label ->
-            " Scanning stopped in root ${scanResult.rootsScanned + 1} of ${scanResult.rootsTotal} ($label); " +
-                "the roots after it were not searched."
-        } ?: ""
+        val hits: List<DepSearchHit> = execution.hits
+        val timedOut: Boolean = execution.timedOut
+        val stoppedNote: String =
+            describeUnfinishedRoots(execution.rootsScanned, execution.rootsTotal, execution.unfinishedRoots)?.let { " $it" } ?: ""
+        val timeoutDiagnostic: String? = if (timedOut) {
+            describeTimeoutDiagnostics(compiledRegex.usesRe2j, execution.patternHasTrigrams, execution.indexBuildsPending)
+        } else {
+            null
+        }
         val result: String = buildString {
             appendLine("=== Regex search in dependencies: $regexPattern ===")
             if (normalizedPathPrefix != null) {
@@ -1017,33 +961,43 @@ class SourceNavigationToolset : McpToolset {
                 appendLine("(roots: $rootsMode)")
             }
             appendLine()
-            describeUnreadableFiles(scanResult.unreadableFilesByRoot)?.let {
+            describeUnreadableFiles(execution.unreadableFilesByRoot)?.let {
                 appendLine(it)
                 appendLine()
             }
             if (hits.isEmpty()) {
                 if (timedOut) {
                     appendLine("Search INCOMPLETE (timed out after ${elapsed}ms); not all files were searched, so this is not a confirmed negative.$stoppedNote")
-                    appendLine("No matches in the ${scanResult.scannedFiles} files scanned before the cutoff. Retry with a more specific pattern, fileMask, or pathPrefix, or increase timeout.")
+                    appendLine("No matches in the ${execution.scannedFiles} files scanned before the cutoff. Retry with a more specific pattern, fileMask, or pathPrefix, or increase timeout.")
+                    timeoutDiagnostic?.let { appendLine(it) }
                 } else {
                     appendLine("No matches found.")
-                    appendLine(describeEmptyScan(scanResult.scannedFiles, fileMask, normalizedPathPrefix))
-                    for (line: String in scanResult.noMatchHints) {
+                    appendLine(
+                        describeEmptyScan(
+                            execution.scannedFiles,
+                            fileMask,
+                            normalizedPathPrefix,
+                            execution.usedIndex,
+                            execution.indexCandidatesFilteredOut,
+                        ),
+                    )
+                    for (line: String in noMatchHints) {
                         appendLine(line)
                     }
                 }
             } else {
                 if (timedOut) {
                     appendLine("Search INCOMPLETE (timed out after ${elapsed}ms); not all files were searched, results below are partial.$stoppedNote")
+                    timeoutDiagnostic?.let { appendLine(it) }
                     appendLine()
                 }
-                formatGroupedHitsWithContext(this, hits, contextLines)
-                if (scanResult.sawMore) {
+                formatGroupedHitsWithContext(this, hits, contextLines, execution.preloadedContent)
+                if (execution.sawMore) {
                     appendLine("  ... (truncated at $maxResults matches; more exist)")
                 } else if (timedOut && hits.size >= maxResults) {
                     appendLine("  ... (stopped at $maxResults matches; unscanned files may hold more)")
                 }
-                describeUnsearchedJarsBriefly(scanResult.unsearchedJars)?.let {
+                describeUnsearchedJarsBriefly(unsearchedJars)?.let {
                     appendLine()
                     appendLine(it)
                 }
