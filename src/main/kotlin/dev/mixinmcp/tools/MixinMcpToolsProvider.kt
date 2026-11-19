@@ -6,6 +6,7 @@ import com.intellij.mcpserver.McpToolsProvider
 import com.intellij.mcpserver.impl.util.asTools
 import com.intellij.openapi.diagnostic.Logger
 import dev.mixinmcp.tools.mappings.MappingsToolset
+import dev.mixinmcp.tools.mcsources.McSourcesToolset
 import dev.mixinmcp.tools.refactor.ChangeSignatureToolset
 import dev.mixinmcp.tools.refactor.ExtractToolset
 import dev.mixinmcp.tools.refactor.InlineToolset
@@ -30,6 +31,7 @@ class MixinMcpToolsProvider : McpToolsProvider {
         BytecodeInspectionToolset(),
         ProjectManagementToolset(),
         MappingsToolset(),
+        McSourcesToolset(),
         ChangeSignatureToolset(),
         ExtractToolset(),
         InlineToolset(),

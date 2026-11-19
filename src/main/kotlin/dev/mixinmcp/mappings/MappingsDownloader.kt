@@ -152,16 +152,25 @@ object MappingsDownloader {
     }
 
     private suspend fun resolveMojmapUrl(mcVersion: String): MojmapResolution {
-        val manifestBytes = readLauncherManifest()
-        val manifest = JSON.decodeFromString(VersionManifestV2.serializer(), String(manifestBytes))
-        val entry = manifest.versions.firstOrNull { it.id == mcVersion }
-            ?: return MojmapResolution.VersionNotListed
-        val versionJsonBytes = httpGet(entry.url)
-        val versionJson =
-            JSON.decodeFromString(VersionJson.serializer(), String(versionJsonBytes))
+        val versionJson = fetchVersionJson(mcVersion) ?: return MojmapResolution.VersionNotListed
         val url = versionJson.downloads.client_mappings?.url
             ?: return MojmapResolution.NoClientMappings
         return MojmapResolution.Url(url)
+    }
+
+    // Not cached: callers keep only what they extract, since the jar is ~25 MB per version.
+    suspend fun downloadClientJar(mcVersion: String, target: Path) = withContext(Dispatchers.IO) {
+        val versionJson = fetchVersionJson(mcVersion)
+            ?: throw IOException("Minecraft version '$mcVersion' is not in Mojang's launcher manifest.")
+        val url = versionJson.downloads.client?.url
+            ?: throw IOException("Mojang's version JSON for $mcVersion has no client jar.")
+        downloadTo(url, target)
+    }
+
+    private fun fetchVersionJson(mcVersion: String): VersionJson? {
+        val manifest = JSON.decodeFromString(VersionManifestV2.serializer(), String(readLauncherManifest()))
+        val entry = manifest.versions.firstOrNull { it.id == mcVersion } ?: return null
+        return JSON.decodeFromString(VersionJson.serializer(), String(httpGet(entry.url)))
     }
 
     private fun readLauncherManifest(): ByteArray {
@@ -294,7 +303,7 @@ object MappingsDownloader {
     private data class VersionJson(val downloads: Downloads)
 
     @Serializable
-    private data class Downloads(val client_mappings: DownloadInfo? = null)
+    private data class Downloads(val client: DownloadInfo? = null, val client_mappings: DownloadInfo? = null)
 
     @Serializable
     private data class DownloadInfo(val url: String)

@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- New tool `mixin_get_mc_sources`: Pull minecraft (or loader-patched) sources for a version not on your active project. Useful for porting!
+- Caching multiple mc versions can get quite big. Also added `mixin_manage_mc_sources_cache` for when this needs manual cleaning. 
+- New tool `mixin_get_loader_sources`: NeoForge, Forge, Fabric Loader, or Fabric API sources for any version, without decompiling Minecraft. Pre-26 Fabric API is remapped to Mojang names, mixin strings included
+- Long generations run in the background: calls return a progress status after `timeoutMs` instead of timing out, and `mixin_ide_status` shows running jobs
+- `loaderVersion` is optional; the newest release for `mcVersion` is used
+
 ## [1.6.0]
 
 ### Added

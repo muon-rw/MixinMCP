@@ -32,7 +32,7 @@ description for its parameters and defaults before calling.
 - **Address parameters are distinct:** `path` is a classpath-relative source path (`com/example/Foo.java`), `filePath` is a file on disk, and `url` is a `jar://` or `file://` URL. Do not pass one where another is expected.
 - **`memberName`** takes a method or field name on tools that declare no `methodName` / `fieldName`.
 - **`projectPath`** is auto-injected by the IntelliJ MCP framework; omit it when one IDE window is open, or pass one of the candidate paths if multiple windows make it ambiguous.
-- **Busy IDE:** every tool except `mixin_sync_project`, `mixin_refresh_vfs`, `mixin_ide_status`, and `mixin_mappings_lookup` waits up to 30s for indexing, Gradle resolve, or project import and then errors naming what it is waiting on. Retry or call `mixin_ide_status` / `mixin_sync_project(wait=true)` first.
+- **Busy IDE:** every tool except `mixin_sync_project`, `mixin_refresh_vfs`, `mixin_ide_status`, `mixin_mappings_lookup`, and the on-demand sources tools (`mixin_get_mc_sources`, `mixin_get_loader_sources`, `mixin_manage_mc_sources_cache`) waits up to 30s for indexing, Gradle resolve, or project import and then errors naming what it is waiting on. Retry or call `mixin_ide_status` / `mixin_sync_project(wait=true)` first.
 
 ## Tool selection
 
@@ -64,6 +64,8 @@ description for its parameters and defaults before calling.
 | **Minecraft:** synthetic/lambda names, `@At(target)` owner | `mixin_class_bytecode(filter="synthetic")`, `mixin_method_bytecode` |
 | **Minecraft:** cross-mod mixin conflicts on a target | `mixin_find_targeting_mixins` (`jarPath="<pack>/mods"` scans a pack's jars and jar-in-jars from bytecode) |
 | **Minecraft:** convert a name between mapping namespaces | `mixin_mappings_lookup` |
+| **Minecraft:** vanilla or loader-patched sources for another MC version | `mixin_get_mc_sources`, then `jarPath` on `mixin_list_jar_entries` / `mixin_get_dep_source`. First run decompiles for minutes: on "still running", call again |
+| **Minecraft:** NeoForge, Forge, Fabric Loader, or Fabric API sources for another version | `mixin_get_loader_sources(loader=…, mcVersion=…)`; pre-26 Fabric API comes remapped to Mojang names |
 
 ## Examples
 

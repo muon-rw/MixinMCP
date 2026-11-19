@@ -43,6 +43,9 @@ class IdeBusyGuardingTool(private val delegate: McpTool) : McpTool {
             "mixin_refresh_vfs",
             "mixin_ide_status",
             "mixin_mappings_lookup",
+            "mixin_get_mc_sources",
+            "mixin_get_loader_sources",
+            "mixin_manage_mc_sources_cache",
         )
 
         val DISK_PATH_EXEMPT_TOOLS: Set<String> = setOf(

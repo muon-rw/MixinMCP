@@ -225,7 +225,7 @@ Older MixinMCP versions injected these skills into `.cursor/` and `.claude/` and
 ## Tool reference
 
 <details>
-<summary>All 28 tools (click to expand)</summary>
+<summary>All 31 tools (click to expand)</summary>
 
 Six tools accept any jar on disk through `jarPath`, on the classpath or not: `mixin_get_dep_source`, `mixin_list_jar_entries`, `mixin_search_bytecode` and `mixin_find_targeting_mixins` (both also read jar-in-jar), `mixin_class_bytecode`, and `mixin_method_bytecode`. The rest work on what the IDE indexes, the project and its classpath. `mixin_search_in_deps` searches source, which `genDependencySources` produces for the compile classpath only: runtime-only jars are left out by design, and its "Not searched" note names them separately from compile jars that just haven't been decompiled yet.
 
@@ -268,9 +268,17 @@ Undeclared parameter names are rejected before the call runs: common synonyms ar
 |------|-------------|
 | `mixin_mappings_lookup` | Convert a class/method/field name between mojmap, yarn, intermediary, srg, and obf. MC version auto-detected from `gradle.properties`. Mapping files are downloaded on demand and cached. |
 
+### On-Demand Minecraft Sources
+
+| Tool | Description |
+|------|-------------|
+| `mixin_get_mc_sources` | Fetch decompiled Minecraft (and optionally Forge or NeoForge) sources for an arbitrary MC version on demand via NeoFormRuntime, cached as a `sources.jar` under `~/.cache/mixinmcp/mc-sources/jars/`. Returns `jarPath` for direct use with `mixin_list_jar_entries` and `mixin_get_dep_source`. A first-time generation takes minutes and runs in the background: the call waits up to `timeoutMs` (default 40 s) and otherwise returns a "still generating" status with the latest NFRT step. Call it again with the same arguments to keep waiting, or watch `mixin_ide_status`. Jars untouched for 30 days are evicted automatically, and so is NFRT's work cache after 7 days without a generation. |
+| `mixin_get_loader_sources` | Download the published sources of NeoForge, Forge, Fabric Loader, or Fabric API for any version, without decompiling Minecraft. Pass `mcVersion` to get the newest loader version for it, or an exact `loaderVersion`. MixinMCP merges Fabric API's ~40 module sources jars into one jar and, before 26.x, remaps their intermediary names (`class_1657`, `method_5643`) to Mojang names with its own mappings, so this works on any project. Shares the cache, background runs, and cleanup with `mixin_get_mc_sources`. |
+| `mixin_manage_mc_sources_cache` | List cached on-demand MC source jars and NeoFormRuntime work-cache usage (`action="list"`), delete one entry (`action="delete"`, `key=...`), clean NFRT's internal work cache while keeping built jars (`action="clean_work"`), clear everything (`action="clean_all"`), or stop a background generation (`action="cancel"`, `key=...`). Both clean actions refuse while a generation is running. |
+
 ### Project Management
 
-Every other `mixin_*` tool waits up to 30 seconds for a busy IDE (indexing, a Gradle resolve, or the project-data import) and then returns an error naming what it is waiting on, instead of hanging. The three tools below and `mixin_mappings_lookup` are exempt.
+Every other `mixin_*` tool waits up to 30 seconds for a busy IDE (indexing, a Gradle resolve, or the project-data import) and then returns an error naming what it is waiting on, instead of hanging. The three tools below, `mixin_mappings_lookup`, and the three on-demand sources tools are exempt.
 
 | Tool | Description |
 |------|-------------|

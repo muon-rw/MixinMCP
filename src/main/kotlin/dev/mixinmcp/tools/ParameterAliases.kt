@@ -72,6 +72,7 @@ internal object ParameterSynonyms {
         "params" to listOf("parameterTypes"),
         "args" to listOf("parameterTypes"),
         "version" to listOf("mcVersion"),
+        "minecraftversion" to listOf("mcVersion"),
         "force" to listOf("ignoreConflicts"),
     )
 

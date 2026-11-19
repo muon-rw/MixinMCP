@@ -19,7 +19,11 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.io.FileUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtil
+import dev.mixinmcp.mcsources.GenerationFailure
+import dev.mixinmcp.mcsources.GenerationStatus
+import dev.mixinmcp.mcsources.McSourcesService
 import dev.mixinmcp.sync.IdeSyncState
+import dev.mixinmcp.tools.mcsources.McSourcesToolset
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -208,7 +212,8 @@ class ProjectManagementToolset : McpToolset {
     @McpDescription(
         "Reports whether the IDE can answer classpath questions right now: dumb mode (indexing), a Gradle resolve or " +
             "project-data import in flight and how long ago it started, the last sync outcome with its error text, and " +
-            "the linked Gradle roots that mixin_sync_project accepts as projectPath. Other mixin_* tools wait up to " +
+            "the linked Gradle roots that mixin_sync_project accepts as projectPath, and any mixin_get_mc_sources " +
+            "generation running in the background with its elapsed time and latest step. Other mixin_* tools wait up to " +
             "30s for a busy IDE and then return an error asking you to retry; call this to see what they are waiting on.",
     )
     @Suppress("unused")
@@ -228,6 +233,16 @@ class ProjectManagementToolset : McpToolset {
             snapshot.lastError?.let { appendLine("Last sync error: $it") }
             val linked: List<String> = linkedGradleRoots(project)
             appendLine("Linked Gradle roots (${linked.size}): ${if (linked.isEmpty()) "(none)" else linked.joinToString(", ")}")
+            val mcSources: McSourcesService = McSourcesService.getInstance()
+            val generating: List<GenerationStatus> = mcSources.runningGenerations()
+            val failed: List<GenerationFailure> = mcSources.unreportedFailures()
+            if (generating.isNotEmpty() || failed.isNotEmpty()) {
+                appendLine("On-demand MC sources (mixin_get_mc_sources):")
+                generating.forEach { appendLine("  generating ${McSourcesToolset.describeGeneration(it, now)}") }
+                failed.forEach {
+                    appendLine("  FAILED ${it.key} ${ago(it.failedAtMs)}: ${it.message.lineSequence().first()}")
+                }
+            }
         }
         return McpToolCallResult.text(text)
     }
